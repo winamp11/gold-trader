@@ -60,6 +60,12 @@ app.get('/api/signal', async (req, res) => {
     // Start outcome tracking
     outcomeTracker.startTracking(signalId, signal);
     
+    // Check outcomes for active signals using current price
+    const currentPrice = signal.currentPrice || marketData.m15?.price;
+    if (currentPrice) {
+      outcomeTracker.checkOutcomesWithPrice(currentPrice);
+    }
+    
     // Cache it
     currentSignal = signal;
     lastUpdate = Date.now();
@@ -100,6 +106,12 @@ app.post('/api/signal/refresh', async (req, res) => {
     
     const signalId = database.saveSignal(signal);
     outcomeTracker.startTracking(signalId, signal);
+    
+    // Check outcomes using current price
+    const currentPrice = signal.currentPrice || marketData.m15?.price;
+    if (currentPrice) {
+      outcomeTracker.checkOutcomesWithPrice(currentPrice);
+    }
     
     currentSignal = signal;
     lastUpdate = Date.now();

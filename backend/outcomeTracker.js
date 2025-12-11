@@ -49,12 +49,12 @@ class OutcomeTracker {
   }
 
   startMonitoring() {
-    // Check every 2 minutes
+    // Check every 30 minutes for cleanup only (no API calls)
     this.monitoringInterval = setInterval(() => {
       this.checkAllSignals();
-    }, 2 * 60 * 1000);
+    }, 30 * 60 * 1000);
 
-    console.log('👁️  Outcome monitoring started (checks every 2 minutes)');
+    console.log('👁️  Outcome monitoring started (cleanup checks every 30 minutes)');
   }
 
   async checkAllSignals() {
@@ -66,34 +66,47 @@ class OutcomeTracker {
       return;
     }
 
-    console.log(`\n🔍 Checking ${this.activeTracking.size} active signals...`);
-
-    try {
-      // Fetch current price
-      const marketData = await twelveData.getMarketData();
-      const currentPrice = marketData.m15.price;
-      const now = new Date();
-
-      for (const [signalId, tracking] of this.activeTracking) {
-        const ageInHours = (now - tracking.startTime) / (1000 * 60 * 60);
-
-        // Update price ranges
-        tracking.maxPrice = Math.max(tracking.maxPrice, currentPrice);
-        tracking.minPrice = Math.min(tracking.minPrice, currentPrice);
-
-        if (tracking.type === 'GREEN') {
-          this.checkGreenSignal(tracking, currentPrice, ageInHours);
-        } else if (tracking.type === 'RED') {
-          this.checkRedSignal(tracking, currentPrice, ageInHours);
-        }
-
-        // Stop tracking after 4 hours
-        if (ageInHours >= 4 && !tracking.outcome) {
-          this.finalizeSignal(tracking, 'EXPIRED');
-        }
+    // NOTE: We don't fetch market data here anymore
+    // Outcome tracking now happens when signals are generated
+    // This method is kept for cleanup only
+    
+    const now = new Date();
+    
+    for (const [signalId, tracking] of this.activeTracking) {
+      const ageInHours = (now - tracking.startTime) / (1000 * 60 * 60);
+      
+      // Expire old signals that haven't been resolved
+      if (ageInHours >= 4 && !tracking.outcome) {
+        this.finalizeSignal(tracking, 'EXPIRED');
       }
-    } catch (error) {
-      console.error('Error checking signals:', error.message);
+    }
+  }
+
+  // New method: Check outcomes using current price from signal generation
+  checkOutcomesWithPrice(currentPrice) {
+    if (this.activeTracking.size === 0) return;
+    
+    console.log(`\n🔍 Checking ${this.activeTracking.size} active signals at price ${currentPrice}...`);
+    
+    const now = new Date();
+    
+    for (const [signalId, tracking] of this.activeTracking) {
+      const ageInHours = (now - tracking.startTime) / (1000 * 60 * 60);
+
+      // Update price ranges
+      tracking.maxPrice = Math.max(tracking.maxPrice, currentPrice);
+      tracking.minPrice = Math.min(tracking.minPrice, currentPrice);
+
+      if (tracking.type === 'GREEN') {
+        this.checkGreenSignal(tracking, currentPrice, ageInHours);
+      } else if (tracking.type === 'RED') {
+        this.checkRedSignal(tracking, currentPrice, ageInHours);
+      }
+
+      // Stop tracking after 4 hours
+      if (ageInHours >= 4 && !tracking.outcome) {
+        this.finalizeSignal(tracking, 'EXPIRED');
+      }
     }
   }
 
