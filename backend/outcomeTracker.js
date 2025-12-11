@@ -1,5 +1,6 @@
 import twelveData from './twelveData.js';
 import database from './database.js';
+import { isTradingHours } from './tradingHours.js';
 
 class OutcomeTracker {
   constructor() {
@@ -58,6 +59,12 @@ class OutcomeTracker {
 
   async checkAllSignals() {
     if (this.activeTracking.size === 0) return;
+
+    // Skip if outside trading hours
+    if (!isTradingHours()) {
+      console.log('⏸️  Outcome tracking paused (outside trading hours)');
+      return;
+    }
 
     console.log(`\n🔍 Checking ${this.activeTracking.size} active signals...`);
 

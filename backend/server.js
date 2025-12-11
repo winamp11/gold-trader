@@ -5,6 +5,7 @@ import twelveData from './twelveData.js';
 import signalEngine from './signalEngine.js';
 import database from './database.js';
 import outcomeTracker from './outcomeTracker.js';
+import { isTradingHours, getNextTradingTime } from './tradingHours.js';
 
 dotenv.config();
 
@@ -27,6 +28,16 @@ app.get('/api/health', (req, res) => {
 // Get current signal
 app.get('/api/signal', async (req, res) => {
   try {
+    // Check if within trading hours
+    if (!isTradingHours()) {
+      return res.json({
+        signal: 'CLOSED',
+        message: 'Outside trading hours (12:00-22:00 Dubai time)',
+        nextTradingTime: getNextTradingTime(),
+        timestamp: new Date().toISOString()
+      });
+    }
+
     if (currentSignal && lastUpdate && (Date.now() - lastUpdate < 5 * 60 * 1000)) {
       // Return cached signal if less than 5 minutes old
       return res.json({
@@ -71,6 +82,16 @@ app.get('/api/signal', async (req, res) => {
 // Force refresh signal
 app.post('/api/signal/refresh', async (req, res) => {
   try {
+    // Check if within trading hours
+    if (!isTradingHours()) {
+      return res.json({
+        signal: 'CLOSED',
+        message: 'Outside trading hours (12:00-22:00 Dubai time)',
+        nextTradingTime: getNextTradingTime(),
+        timestamp: new Date().toISOString()
+      });
+    }
+
     const accountBalance = req.body.balance || 400;
     
     console.log('\n🔄 Force refresh requested...');
