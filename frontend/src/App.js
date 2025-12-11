@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import './App.css';
 
+const API_URL = process.env.REACT_APP_API_URL || 'https://gold-trader-production.up.railway.app';
+
 function App() {
   const [signal, setSignal] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -13,7 +15,7 @@ function App() {
   const fetchSignal = async (forceRefresh = false) => {
     setLoading(true);
     try {
-      const endpoint = forceRefresh ? '/api/signal/refresh' : `/api/signal?balance=${balance}`;
+      const endpoint = forceRefresh ? `${API_URL}/api/signal/refresh` : `${API_URL}/api/signal?balance=${balance}`;
       const method = forceRefresh ? 'POST' : 'GET';
       const body = forceRefresh ? JSON.stringify({ balance }) : undefined;
       
@@ -35,7 +37,7 @@ function App() {
 
   const fetchHistory = async () => {
     try {
-      const response = await fetch('/api/signals/history?limit=50');
+      const response = await fetch(`${API_URL}/api/signals/history?limit=50`);
       const data = await response.json();
       setHistory(data.signals || []);
     } catch (error) {
@@ -45,7 +47,7 @@ function App() {
 
   const fetchPerformance = async () => {
     try {
-      const response = await fetch('/api/stats/performance?days=7');
+      const response = await fetch(`${API_URL}/api/stats/performance?days=7`);
       const data = await response.json();
       setPerformance(data);
     } catch (error) {
