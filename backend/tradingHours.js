@@ -8,9 +8,9 @@ export function isTradingHours() {
   const dubaiTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Dubai' }));
   const hour = dubaiTime.getHours();
   
-  // Trading hours: 12:00 - 22:00 Dubai time
-  // This covers London (12:00-20:00) and NY (17:00-02:00 next day)
-  const isTradingTime = hour >= 12 && hour < 22;
+  // Trading hours: 13:00 - 21:00 Dubai time (8 hours)
+  // This covers London close (13:00-17:00) and NY session (17:00-21:00)
+  const isTradingTime = hour >= 13 && hour < 21;
   
   if (!isTradingTime) {
     console.log(`⏸️  Outside trading hours (${hour}:00 Dubai time). Skipping signal generation.`);
@@ -24,10 +24,10 @@ export function getNextTradingTime() {
   const dubaiTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Dubai' }));
   const hour = dubaiTime.getHours();
   
-  if (hour < 12) {
-    return `${12 - hour} hours until London open (12:00 Dubai)`;
-  } else if (hour >= 22) {
-    return `${24 - hour + 12} hours until London open (12:00 Dubai)`;
+  if (hour < 13) {
+    return `${13 - hour} hours until London close (13:00 Dubai)`;
+  } else if (hour >= 21) {
+    return `${24 - hour + 13} hours until London close (13:00 Dubai)`;
   }
   
   return 'Currently in trading hours';

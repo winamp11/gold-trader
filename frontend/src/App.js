@@ -89,15 +89,15 @@ function App() {
     fetchHistory();
     fetchPerformance();
     
-    // Auto-refresh every 5 minutes
+    // Auto-refresh every 10 minutes
     const interval = setInterval(() => {
       fetchSignal();
       fetchHistory();
       fetchPerformance();
-    }, 5 * 60 * 1000);
+    }, 10 * 60 * 1000); // 10 minutes
     
     return () => clearInterval(interval);
-  }, [balance]);
+  }, []); // Empty dependency array - only runs once on mount
 
   const formatTime = (timestamp) => {
     if (!timestamp) return '';
