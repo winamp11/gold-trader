@@ -117,13 +117,34 @@
   cursor: pointer;
   box-shadow: 0 4px 15px rgba(59, 130, 246, 0.3);
   transition: transform 0.2s;
-  width: 100%;
-  max-width: 300px;
-  margin: 0 auto;
-  display: block;
 }
 
 .calculate-btn:hover {
+  transform: translateY(-2px);
+}
+
+.button-group {
+  display: flex;
+  gap: 16px;
+  justify-content: center;
+  margin-top: 24px;
+  flex-wrap: wrap;
+}
+
+.add-log-btn {
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  color: white;
+  border: none;
+  padding: 16px 48px;
+  border-radius: 12px;
+  font-size: 18px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3);
+  transition: transform 0.2s;
+}
+
+.add-log-btn:hover {
   transform: translateY(-2px);
 }
 
@@ -221,6 +242,77 @@
   font-weight: 700;
   color: #10b981;
   font-size: 16px;
+}
+
+/* Pattern Log Section */
+.pattern-log-section {
+  background: white;
+  border-radius: 16px;
+  padding: 40px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+  margin-top: 30px;
+}
+
+.pattern-log-section h2 {
+  font-size: 24px;
+  color: #1f2937;
+  margin-bottom: 24px;
+  font-weight: 700;
+}
+
+.pattern-log-table-wrapper {
+  overflow-x: auto;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+}
+
+.pattern-log-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.pattern-log-table thead {
+  background: #3b82f6;
+  color: white;
+}
+
+.pattern-log-table th {
+  padding: 12px 16px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.pattern-log-table tbody tr {
+  border-bottom: 1px solid #e5e7eb;
+  transition: background 0.2s;
+}
+
+.pattern-log-table tbody tr:hover {
+  background: #f9fafb;
+}
+
+.pattern-log-table td {
+  padding: 14px 16px;
+}
+
+.probability-badge {
+  background: #dbeafe;
+  color: #1e40af;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.signal-badge-green {
+  font-size: 20px;
+}
+
+.signal-badge-red {
+  font-size: 20px;
 }
 
 /* Responsive */

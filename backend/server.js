@@ -254,6 +254,65 @@ app.get('/api/account/history', (req, res) => {
   }
 });
 
+// ===== AUTOCHARTIST PATTERNS ENDPOINTS =====
+
+// Get all logged Autochartist patterns
+app.get('/api/autochartist/patterns', (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 100;
+    const patterns = database.getAutochartistPatterns(limit);
+    res.json({ patterns });
+  } catch (error) {
+    console.error('Error fetching Autochartist patterns:', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch patterns', 
+      message: error.message 
+    });
+  }
+});
+
+// Log a new Autochartist pattern
+app.post('/api/autochartist/patterns', async (req, res) => {
+  try {
+    const { patternType, timeframe, timeIdentified, entryPrice, stopLoss, target, successProbability } = req.body;
+
+    // Get current price from latest signal
+    let currentPrice = null;
+    let ourSignal = null;
+    
+    if (currentSignal) {
+      currentPrice = currentSignal.currentPrice || currentSignal.marketData?.m15?.price;
+      ourSignal = currentSignal.signal;
+    }
+
+    const patternData = {
+      patternType,
+      timeframe,
+      timeIdentified,
+      entryPrice,
+      stopLoss,
+      target,
+      successProbability,
+      currentPrice,
+      ourSignal
+    };
+
+    const patternId = database.saveAutochartistPattern(patternData);
+    
+    res.json({ 
+      success: true, 
+      patternId,
+      message: 'Pattern logged successfully'
+    });
+  } catch (error) {
+    console.error('Error logging Autochartist pattern:', error);
+    res.status(500).json({ 
+      error: 'Failed to log pattern', 
+      message: error.message 
+    });
+  }
+});
+
 // Start server
 app.listen(PORT, () => {
   console.log('\n' + '='.repeat(50));

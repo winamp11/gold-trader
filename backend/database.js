@@ -52,6 +52,27 @@ class DatabaseService {
       )
     `);
 
+    // Autochartist patterns table - stores manually logged patterns from Autochartist
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS autochartist_patterns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pattern_type TEXT NOT NULL,
+        time_identified TEXT NOT NULL,
+        timeframe TEXT NOT NULL,
+        success_probability REAL,
+        entry_price REAL NOT NULL,
+        stop_loss REAL NOT NULL,
+        target REAL NOT NULL,
+        current_price_at_log REAL,
+        our_signal_at_time TEXT,
+        outcome TEXT,
+        outcome_timestamp TEXT,
+        outcome_price REAL,
+        outcome_pnl REAL,
+        logged_at TEXT NOT NULL
+      )
+    `);
+
     // Trades table - stores actual trades taken by user
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS trades (
@@ -305,6 +326,52 @@ class DatabaseService {
       LIMIT ?
     `);
     return stmt.all(days);
+  }
+
+  // ===== AUTOCHARTIST PATTERNS =====
+  
+  saveAutochartistPattern(pattern) {
+    const stmt = this.db.prepare(`
+      INSERT INTO autochartist_patterns (
+        pattern_type, time_identified, timeframe, success_probability,
+        entry_price, stop_loss, target, current_price_at_log,
+        our_signal_at_time, logged_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const result = stmt.run(
+      pattern.patternType,
+      pattern.timeIdentified,
+      pattern.timeframe,
+      pattern.successProbability,
+      pattern.entryPrice,
+      pattern.stopLoss,
+      pattern.target,
+      pattern.currentPrice || null,
+      pattern.ourSignal || null,
+      new Date().toISOString()
+    );
+
+    return result.lastInsertRowid;
+  }
+
+  getAutochartistPatterns(limit = 100) {
+    const stmt = this.db.prepare(`
+      SELECT * FROM autochartist_patterns 
+      ORDER BY logged_at DESC 
+      LIMIT ?
+    `);
+    return stmt.all(limit);
+  }
+
+  updateAutochartistPatternOutcome(patternId, outcome, price, pnl) {
+    const stmt = this.db.prepare(`
+      UPDATE autochartist_patterns 
+      SET outcome = ?, outcome_timestamp = ?, outcome_price = ?, outcome_pnl = ?
+      WHERE id = ?
+    `);
+
+    stmt.run(outcome, new Date().toISOString(), price, pnl, patternId);
   }
 
   close() {

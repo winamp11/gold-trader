@@ -5,14 +5,72 @@ function AutochartistCalculator({ onBack }) {
   const [patternType, setPatternType] = useState('');
   const [timeframe, setTimeframe] = useState('');
   const [timeIdentified, setTimeIdentified] = useState('');
+  const [entryPrice, setEntryPrice] = useState('');
+  const [stopLoss, setStopLoss] = useState('');
+  const [target, setTarget] = useState('');
   const [elapsedTime, setElapsedTime] = useState('');
   const [showResult, setShowResult] = useState(false);
+  const [patternLog, setPatternLog] = useState([]);
   const [result, setResult] = useState({
     finalProbability: 0,
     patternRate: 0,
     hoursRate: 0,
     timeframeRate: 0
   });
+
+  const API_URL = process.env.REACT_APP_API_URL || 'https://gold-trader-production.up.railway.app';
+
+  // Fetch pattern log on mount
+  useEffect(() => {
+    fetchPatternLog();
+  }, []);
+
+  const fetchPatternLog = async () => {
+    try {
+      const response = await fetch(`${API_URL}/api/autochartist/patterns`);
+      const data = await response.json();
+      setPatternLog(data.patterns || []);
+    } catch (error) {
+      console.error('Error fetching pattern log:', error);
+    }
+  };
+
+  const addToLog = async () => {
+    if (!patternType || !timeframe || !timeIdentified || !entryPrice || !stopLoss || !target) {
+      alert('Please fill in all fields including Entry, Stop, and Target prices');
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_URL}/api/autochartist/patterns`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          patternType,
+          timeframe,
+          timeIdentified,
+          entryPrice: parseFloat(entryPrice),
+          stopLoss: parseFloat(stopLoss),
+          target: parseFloat(target),
+          successProbability: result.finalProbability
+        })
+      });
+
+      if (response.ok) {
+        alert('✅ Pattern logged successfully!');
+        fetchPatternLog(); // Refresh the log
+        // Clear entry fields
+        setEntryPrice('');
+        setStopLoss('');
+        setTarget('');
+      } else {
+        alert('Failed to log pattern');
+      }
+    } catch (error) {
+      console.error('Error logging pattern:', error);
+      alert('Error logging pattern');
+    }
+  };
 
   // Pattern success rates from CSV data
   const patternRates = {
@@ -175,11 +233,58 @@ function AutochartistCalculator({ onBack }) {
               />
               {elapsedTime && <div className="elapsed-time">{elapsedTime}</div>}
             </div>
+
+            {/* Entry Price */}
+            <div className="form-group">
+              <label className="form-label">Entry Price</label>
+              <input 
+                type="number" 
+                step="0.01"
+                className="form-input"
+                placeholder="e.g., 4253.93"
+                value={entryPrice}
+                onChange={(e) => setEntryPrice(e.target.value)}
+              />
+            </div>
+
+            {/* Stop Loss */}
+            <div className="form-group">
+              <label className="form-label">Stop Loss</label>
+              <input 
+                type="number" 
+                step="0.01"
+                className="form-input"
+                placeholder="e.g., 4200.00"
+                value={stopLoss}
+                onChange={(e) => setStopLoss(e.target.value)}
+              />
+            </div>
+
+            {/* Target */}
+            <div className="form-group">
+              <label className="form-label">Target</label>
+              <input 
+                type="number" 
+                step="0.01"
+                className="form-input"
+                placeholder="e.g., 4288.24"
+                value={target}
+                onChange={(e) => setTarget(e.target.value)}
+              />
+            </div>
           </div>
 
-          <button className="calculate-btn" onClick={calculateProbability}>
-            Calculate Probability
-          </button>
+          <div className="button-group">
+            <button className="calculate-btn" onClick={calculateProbability}>
+              Calculate Probability
+            </button>
+            
+            {showResult && (
+              <button className="add-log-btn" onClick={addToLog}>
+                📝 Add to Log
+              </button>
+            )}
+          </div>
 
           {/* Result Card */}
           {showResult && (
@@ -239,6 +344,76 @@ function AutochartistCalculator({ onBack }) {
               <li><span>15 min</span> <span className="percentage-tag">79%</span></li>
               <li><span>240 min (H4)</span> <span className="percentage-tag">79%</span></li>
             </ul>
+          </div>
+        </div>
+
+        {/* Pattern Log Table */}
+        <div className="pattern-log-section">
+          <h2>📋 Logged Patterns</h2>
+          <div className="pattern-log-table-wrapper">
+            <table className="pattern-log-table">
+              <thead>
+                <tr>
+                  <th>Date Logged</th>
+                  <th>Pattern Type</th>
+                  <th>Probability</th>
+                  <th>Entry</th>
+                  <th>Stop</th>
+                  <th>Target</th>
+                  <th>Our Signal</th>
+                  <th>Outcome</th>
+                  <th>P&L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {patternLog.length === 0 ? (
+                  <tr>
+                    <td colSpan="9" style={{ textAlign: 'center', padding: '40px', color: '#6b7280' }}>
+                      No patterns logged yet. Add your first pattern above!
+                    </td>
+                  </tr>
+                ) : (
+                  patternLog.map((pattern) => (
+                    <tr key={pattern.id}>
+                      <td>{new Date(pattern.logged_at).toLocaleString('en-US', { 
+                        month: '2-digit', 
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                      })}</td>
+                      <td>{pattern.pattern_type}</td>
+                      <td><span className="probability-badge">{pattern.success_probability}%</span></td>
+                      <td>{pattern.entry_price?.toFixed(2)}</td>
+                      <td>{pattern.stop_loss?.toFixed(2)}</td>
+                      <td>{pattern.target?.toFixed(2)}</td>
+                      <td>
+                        <span className={pattern.our_signal_at_time === 'GREEN' ? 'signal-badge-green' : 'signal-badge-red'}>
+                          {pattern.our_signal_at_time === 'GREEN' ? '🟢' : '🔴'}
+                        </span>
+                      </td>
+                      <td>
+                        {pattern.outcome ? (
+                          <span className={`outcome-badge ${
+                            pattern.outcome === 'TARGET_HIT' ? 'outcome-win' : 
+                            pattern.outcome === 'STOP_HIT' ? 'outcome-loss' : 
+                            'outcome-pending'
+                          }`}>
+                            {pattern.outcome === 'TARGET_HIT' ? 'TARGET HIT' : 
+                             pattern.outcome === 'STOP_HIT' ? 'STOP HIT' : 
+                             pattern.outcome}
+                          </span>
+                        ) : (
+                          <span className="outcome-badge outcome-pending">PENDING</span>
+                        )}
+                      </td>
+                      <td className={pattern.outcome_pnl > 0 ? 'pnl-positive' : pattern.outcome_pnl < 0 ? 'pnl-negative' : ''}>
+                        {pattern.outcome_pnl ? `$${pattern.outcome_pnl.toFixed(2)}` : '—'}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
