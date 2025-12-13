@@ -20,39 +20,34 @@ app.use(express.json());
 let currentSignal = null;
 let lastUpdate = null;
 
-// Health check
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
+// Background job to generate signals every 10 minutes during trading hours
+function startBackgroundSignalGeneration() {
+  console.log('🤖 Starting background signal generation...');
+  
+  // Run immediately on startup if within trading hours
+  generateSignalIfTradingHours();
+  
+  // Then run every 10 minutes
+  setInterval(() => {
+    generateSignalIfTradingHours();
+  }, 10 * 60 * 1000); // 10 minutes
+}
 
-// Get current signal
-app.get('/api/signal', async (req, res) => {
+async function generateSignalIfTradingHours() {
+  if (!isTradingHours()) {
+    console.log('⏸️  Outside trading hours - skipping signal generation');
+    return;
+  }
+  
   try {
-    // Check if within trading hours
-    if (!isTradingHours()) {
-      return res.json({
-        signal: 'CLOSED',
-        message: 'Outside trading hours (12:00-22:00 Dubai time)',
-        nextTradingTime: getNextTradingTime(),
-        timestamp: new Date().toISOString()
-      });
-    }
-
-    if (currentSignal && lastUpdate && (Date.now() - lastUpdate < 5 * 60 * 1000)) {
-      // Return cached signal if less than 5 minutes old
-      return res.json({
-        ...currentSignal,
-        cached: true,
-        age: Math.floor((Date.now() - lastUpdate) / 1000)
-      });
-    }
-
-    // Fetch fresh signal
-    const accountBalance = parseFloat(req.query.balance) || 400;
+    console.log('\n🔄 [BACKGROUND] Generating fresh signal...');
     
-    console.log('\n🔄 Generating fresh signal...');
-    const marketData = await twelveData.getMarketData();
-    const signal = signalEngine.generateSignal(marketData, accountBalance);
+    // Stagger API calls to stay under 8 calls/minute limit
+    // First batch: 8 calls (time_series + RSI for all timeframes)
+    console.log('📞 Making first batch of API calls (8 calls)...');
+    const marketData = await twelveData.getMarketDataStaggered();
+    
+    const signal = signalEngine.generateSignal(marketData, 400); // Default balance
     
     // Save to database
     const signalId = database.saveSignal(signal);
@@ -60,7 +55,7 @@ app.get('/api/signal', async (req, res) => {
     // Start outcome tracking
     outcomeTracker.startTracking(signalId, signal);
     
-    // Check outcomes for active signals using current price
+    // Check outcomes using current price
     const currentPrice = signal.currentPrice || marketData.m15?.price;
     if (currentPrice) {
       outcomeTracker.checkOutcomesWithPrice(currentPrice);
@@ -70,52 +65,55 @@ app.get('/api/signal', async (req, res) => {
     currentSignal = signal;
     lastUpdate = Date.now();
     
-    res.json({
-      ...signal,
-      cached: false,
-      age: 0
-    });
-    
+    console.log(`✅ [BACKGROUND] Signal cached: ${signal.signal}`);
   } catch (error) {
-    console.error('Error generating signal:', error);
-    res.status(500).json({ 
-      error: 'Failed to generate signal', 
-      message: error.message 
-    });
+    console.error('❌ [BACKGROUND] Error generating signal:', error.message);
   }
+}
+
+// Health check
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Force refresh signal
-app.post('/api/signal/refresh', async (req, res) => {
+// Get current signal (returns cached data - NO API calls)
+app.get('/api/signal', async (req, res) => {
   try {
     // Check if within trading hours
     if (!isTradingHours()) {
       return res.json({
         signal: 'CLOSED',
-        message: 'Outside trading hours (12:00-22:00 Dubai time)',
+        message: 'Outside trading hours (11:00-15:00 & 17:00-21:00 UAE time)',
         nextTradingTime: getNextTradingTime(),
         timestamp: new Date().toISOString()
       });
     }
 
-    const accountBalance = req.body.balance || 400;
-    
-    console.log('\n🔄 Force refresh requested...');
-    const marketData = await twelveData.getMarketData();
-    const signal = signalEngine.generateSignal(marketData, accountBalance);
-    
-    const signalId = database.saveSignal(signal);
-    outcomeTracker.startTracking(signalId, signal);
-    
-    // Check outcomes using current price
-    const currentPrice = signal.currentPrice || marketData.m15?.price;
-    if (currentPrice) {
-      outcomeTracker.checkOutcomesWithPrice(currentPrice);
+    // Return cached signal (no fresh API calls)
+    if (currentSignal && lastUpdate) {
+      const age = Math.floor((Date.now() - lastUpdate) / 1000);
+      return res.json({
+        ...currentSignal,
+        cached: true,
+        age
+      });
     }
-    
-    currentSignal = signal;
-    lastUpdate = Date.now();
-    
+
+    // No signal yet (shouldn't happen after background job starts)
+    return res.json({
+      signal: 'PENDING',
+      message: 'Waiting for first signal generation...',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Error fetching signal:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Force refresh endpoint removed - background job handles signal generation
+
+// Get signal history
     res.json({
       ...signal,
       cached: false,
@@ -279,7 +277,13 @@ app.listen(PORT, () => {
   console.log('='.repeat(50));
   console.log(`📡 Server running on http://localhost:${PORT}`);
   console.log(`🔑 API Key configured: ${process.env.TWELVE_DATA_API_KEY ? 'YES' : 'NO'}`);
+  console.log(`⏰ Trading hours: 11:00-15:00 & 17:00-21:00 UAE time (8 hours, split sessions)`);
+  console.log(`🔄 Signal generation: Every 10 minutes (background job)`);
+  console.log(`📊 Expected: ~48 signals/day, 768 API calls/day`);
   console.log('='.repeat(50) + '\n');
+  
+  // Start background signal generation
+  startBackgroundSignalGeneration();
 });
 
 // Graceful shutdown

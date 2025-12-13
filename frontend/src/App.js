@@ -91,7 +91,7 @@ function App() {
     fetchHistory();
     fetchPerformance();
     
-    // Auto-refresh every 10 minutes
+    // Auto-refresh every 10 minutes (matches backend signal generation)
     const interval = setInterval(() => {
       fetchSignal();
       fetchHistory();

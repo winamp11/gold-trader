@@ -1,123 +1,12 @@
 import fetch from 'node-fetch';
 
-const API_KEY = 'ca9aa60df1ac43a593b61fa812a77355';
+const API_KEY = process.env.TWELVE_DATA_API_KEY;
 const BASE_URL = 'https://api.twelvedata.com';
 
 class TwelveDataService {
   constructor() {
     this.callCount = 0;
     this.lastReset = new Date();
-  }
-
-  // Calculate RSI from price data
-  calculateRSI(prices, period = 14) {
-    if (prices.length < period + 1) return 50; // Default neutral if not enough data
-    
-    const changes = [];
-    for (let i = 1; i < prices.length; i++) {
-      changes.push(prices[i] - prices[i - 1]);
-    }
-    
-    let gains = 0;
-    let losses = 0;
-    
-    // First average
-    for (let i = 0; i < period; i++) {
-      if (changes[i] > 0) gains += changes[i];
-      else losses += Math.abs(changes[i]);
-    }
-    
-    let avgGain = gains / period;
-    let avgLoss = losses / period;
-    
-    // Smooth subsequent values
-    for (let i = period; i < changes.length; i++) {
-      if (changes[i] > 0) {
-        avgGain = (avgGain * (period - 1) + changes[i]) / period;
-        avgLoss = (avgLoss * (period - 1)) / period;
-      } else {
-        avgGain = (avgGain * (period - 1)) / period;
-        avgLoss = (avgLoss * (period - 1) + Math.abs(changes[i])) / period;
-      }
-    }
-    
-    if (avgLoss === 0) return 100;
-    const rs = avgGain / avgLoss;
-    const rsi = 100 - (100 / (1 + rs));
-    
-    return rsi;
-  }
-
-  // Calculate MACD
-  calculateMACD(prices, fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
-    if (prices.length < slowPeriod + signalPeriod) {
-      return { macd: 0, signal: 0, histogram: 0 };
-    }
-
-    // Calculate EMA
-    const calculateEMA = (data, period) => {
-      const k = 2 / (period + 1);
-      let ema = data[0];
-      
-      for (let i = 1; i < data.length; i++) {
-        ema = data[i] * k + ema * (1 - k);
-      }
-      
-      return ema;
-    };
-
-    const fastEMA = calculateEMA(prices.slice(-fastPeriod * 2), fastPeriod);
-    const slowEMA = calculateEMA(prices.slice(-slowPeriod * 2), slowPeriod);
-    const macdLine = fastEMA - slowEMA;
-
-    // Calculate signal line (EMA of MACD)
-    const macdValues = [];
-    for (let i = slowPeriod; i < prices.length; i++) {
-      const fast = calculateEMA(prices.slice(i - fastPeriod * 2, i), fastPeriod);
-      const slow = calculateEMA(prices.slice(i - slowPeriod * 2, i), slowPeriod);
-      macdValues.push(fast - slow);
-    }
-
-    const signalLine = calculateEMA(macdValues.slice(-signalPeriod * 2), signalPeriod);
-    const histogram = macdLine - signalLine;
-
-    return {
-      macd: macdLine,
-      signal: signalLine,
-      histogram: histogram
-    };
-  }
-
-  // Calculate MFI (Money Flow Index)
-  calculateMFI(candles, period = 14) {
-    if (candles.length < period + 1) return 50;
-
-    const typicalPrices = candles.map(c => (c.high + c.low + c.close) / 3);
-    const moneyFlows = [];
-
-    for (let i = 1; i < candles.length; i++) {
-      const tp = typicalPrices[i];
-      const volume = parseFloat(candles[i].volume || 1); // Default volume if not available
-      const mf = tp * volume;
-      
-      if (tp > typicalPrices[i - 1]) {
-        moneyFlows.push({ positive: mf, negative: 0 });
-      } else if (tp < typicalPrices[i - 1]) {
-        moneyFlows.push({ positive: 0, negative: mf });
-      } else {
-        moneyFlows.push({ positive: 0, negative: 0 });
-      }
-    }
-
-    const recentFlows = moneyFlows.slice(-period);
-    const positiveFlow = recentFlows.reduce((sum, f) => sum + f.positive, 0);
-    const negativeFlow = recentFlows.reduce((sum, f) => sum + f.negative, 0);
-
-    if (negativeFlow === 0) return 100;
-    const moneyRatio = positiveFlow / negativeFlow;
-    const mfi = 100 - (100 / (1 + moneyRatio));
-
-    return mfi;
   }
 
   async fetchTimeSeries(symbol, interval, outputsize = 50) {
@@ -141,48 +30,99 @@ class TwelveDataService {
     }
   }
 
+  async fetchRSI(symbol, interval, timePeriod = 14) {
+    const url = `${BASE_URL}/rsi?apikey=${API_KEY}&symbol=${symbol}&interval=${interval}&time_period=${timePeriod}`;
+    
+    try {
+      const response = await fetch(url);
+      const data = await response.json();
+      
+      this.callCount++;
+      console.log(`API Call #${this.callCount}: RSI ${symbol} ${interval}`);
+      
+      if (data.status === 'error') {
+        throw new Error(data.message || 'API error');
+      }
+      
+      return parseFloat(data.values?.[0]?.rsi || 0);
+    } catch (error) {
+      console.error('Error fetching RSI:', error.message);
+      throw error;
+    }
+  }
+
+  async fetchMACD(symbol, interval) {
+    const url = `${BASE_URL}/macd?apikey=${API_KEY}&symbol=${symbol}&interval=${interval}&fast_period=12&slow_period=26&signal_period=9`;
+    
+    try {
+      const response = await fetch(url);
+      const data = await response.json();
+      
+      this.callCount++;
+      console.log(`API Call #${this.callCount}: MACD ${symbol} ${interval}`);
+      
+      if (data.status === 'error') {
+        throw new Error(data.message || 'API error');
+      }
+      
+      const latest = data.values?.[0] || {};
+      return {
+        macd: parseFloat(latest.macd || 0),
+        signal: parseFloat(latest.macd_signal || 0),
+        histogram: parseFloat(latest.macd_hist || 0)
+      };
+    } catch (error) {
+      console.error('Error fetching MACD:', error.message);
+      throw error;
+    }
+  }
+
+  async fetchMFI(symbol, interval, timePeriod = 14) {
+    const url = `${BASE_URL}/mfi?apikey=${API_KEY}&symbol=${symbol}&interval=${interval}&time_period=${timePeriod}`;
+    
+    try {
+      const response = await fetch(url);
+      const data = await response.json();
+      
+      this.callCount++;
+      console.log(`API Call #${this.callCount}: MFI ${symbol} ${interval}`);
+      
+      if (data.status === 'error') {
+        throw new Error(data.message || 'API error');
+      }
+      
+      return parseFloat(data.values?.[0]?.mfi || 0);
+    } catch (error) {
+      console.error('Error fetching MFI:', error.message);
+      throw error;
+    }
+  }
+
   async fetchAllIndicators(symbol, interval) {
     try {
-      console.log(`\n📊 Fetching data for ${symbol} ${interval}...`);
+      console.log(`\n📊 Fetching indicators for ${symbol} ${interval}...`);
       
-      // Fetch 50 candles to have enough data for indicators
-      const timeSeries = await this.fetchTimeSeries(symbol, interval, 50);
-      const candles = timeSeries.values || [];
-      
-      if (candles.length === 0) {
-        throw new Error('No candle data received');
-      }
+      const [timeSeries, rsi, macd, mfi] = await Promise.all([
+        this.fetchTimeSeries(symbol, interval, 2),
+        this.fetchRSI(symbol, interval),
+        this.fetchMACD(symbol, interval),
+        this.fetchMFI(symbol, interval)
+      ]);
 
-      // Extract close prices for calculations
-      const closePrices = candles.map(c => parseFloat(c.close)).reverse(); // Reverse to chronological order
-      
-      // Prepare candle objects for MFI
-      const candleObjects = candles.reverse().map(c => ({
-        high: parseFloat(c.high),
-        low: parseFloat(c.low),
-        close: parseFloat(c.close),
-        volume: parseFloat(c.volume || 1000) // Use default if volume missing
-      }));
-
-      // Calculate indicators locally
-      const rsi = this.calculateRSI(closePrices, 14);
-      const macd = this.calculateMACD(closePrices, 12, 26, 9);
-      const mfi = this.calculateMFI(candleObjects, 14);
-
-      const latestCandle = candles[candles.length - 1];
+      const latestCandle = timeSeries.values?.[0] || {};
       
       return {
         interval,
-        price: parseFloat(latestCandle.close),
+        price: parseFloat(latestCandle.close || 0),
         timestamp: latestCandle.datetime,
-        rsi: rsi,
+        rsi,
         macd: macd.macd,
         macd_signal: macd.signal,
         macd_hist: macd.histogram,
-        mfi: mfi
+        mfi
       };
     } catch (error) {
-      console.error(`Error fetching indicators for ${interval}:`, error.message);
+      console.error(`Error fetching all indicators for ${interval}:`, error.message);
       throw error;
     }
   }
@@ -191,7 +131,6 @@ class TwelveDataService {
     console.log('\n🚀 Starting market data fetch...\n');
     
     try {
-      // Fetch all 4 timeframes (4 API calls total)
       const [h4, h1, m30, m15] = await Promise.all([
         this.fetchAllIndicators(symbol, '4h'),
         this.fetchAllIndicators(symbol, '1h'),
@@ -200,7 +139,7 @@ class TwelveDataService {
       ]);
 
       console.log(`\n✅ Market data fetched successfully`);
-      console.log(`📞 Total API calls: ${this.callCount} (under 8 limit ✓)`);
+      console.log(`📞 Total API calls: ${this.callCount}`);
       
       return {
         symbol,
@@ -213,6 +152,103 @@ class TwelveDataService {
       };
     } catch (error) {
       console.error('Error getting market data:', error.message);
+      throw error;
+    }
+  }
+
+  // Staggered version - splits 16 calls into 2 batches to stay under 8/min limit
+  async getMarketDataStaggered(symbol = 'XAU/USD') {
+    console.log('\n🚀 Starting staggered market data fetch (3-min process)...\n');
+    this.resetCallCount();
+    
+    try {
+      // BATCH 1: First 8 calls (time_series + RSI for all timeframes)
+      console.log('📞 Batch 1/2: Fetching time_series & RSI (8 calls)...');
+      const batch1 = await Promise.all([
+        this.fetchTimeSeries(symbol, '4h', 50),
+        this.fetchTimeSeries(symbol, '1h', 50),
+        this.fetchTimeSeries(symbol, '30min', 50),
+        this.fetchTimeSeries(symbol, '15min', 50),
+        this.fetchRSI(symbol, '4h'),
+        this.fetchRSI(symbol, '1h'),
+        this.fetchRSI(symbol, '30min'),
+        this.fetchRSI(symbol, '15min')
+      ]);
+
+      console.log(`✅ Batch 1 complete (${this.callCount} calls)`);
+      console.log('⏳ Waiting 90 seconds before batch 2...');
+      
+      // Wait 1.5 minutes (90 seconds) before next batch
+      await new Promise(resolve => setTimeout(resolve, 90000));
+
+      // BATCH 2: Next 8 calls (MACD + MFI for all timeframes)
+      console.log('📞 Batch 2/2: Fetching MACD & MFI (8 calls)...');
+      const batch2 = await Promise.all([
+        this.fetchMACD(symbol, '4h'),
+        this.fetchMACD(symbol, '1h'),
+        this.fetchMACD(symbol, '30min'),
+        this.fetchMACD(symbol, '15min'),
+        this.fetchMFI(symbol, '4h'),
+        this.fetchMFI(symbol, '1h'),
+        this.fetchMFI(symbol, '30min'),
+        this.fetchMFI(symbol, '15min')
+      ]);
+
+      console.log(`✅ Batch 2 complete (${this.callCount} total calls)`);
+
+      // Combine results
+      const result = {
+        symbol,
+        timestamp: new Date().toISOString(),
+        h4: {
+          interval: '4h',
+          price: parseFloat(batch1[0].values?.[0]?.close || 0),
+          timestamp: batch1[0].values?.[0]?.datetime,
+          rsi: batch1[4],
+          macd: batch2[0].macd,
+          macd_signal: batch2[0].signal,
+          macd_hist: batch2[0].histogram,
+          mfi: batch2[4]
+        },
+        h1: {
+          interval: '1h',
+          price: parseFloat(batch1[1].values?.[0]?.close || 0),
+          timestamp: batch1[1].values?.[0]?.datetime,
+          rsi: batch1[5],
+          macd: batch2[1].macd,
+          macd_signal: batch2[1].signal,
+          macd_hist: batch2[1].histogram,
+          mfi: batch2[5]
+        },
+        m30: {
+          interval: '30min',
+          price: parseFloat(batch1[2].values?.[0]?.close || 0),
+          timestamp: batch1[2].values?.[0]?.datetime,
+          rsi: batch1[6],
+          macd: batch2[2].macd,
+          macd_signal: batch2[2].signal,
+          macd_hist: batch2[2].histogram,
+          mfi: batch2[6]
+        },
+        m15: {
+          interval: '15min',
+          price: parseFloat(batch1[3].values?.[0]?.close || 0),
+          timestamp: batch1[3].values?.[0]?.datetime,
+          rsi: batch1[7],
+          macd: batch2[3].macd,
+          macd_signal: batch2[3].signal,
+          macd_hist: batch2[3].histogram,
+          mfi: batch2[7]
+        },
+        apiCallCount: this.callCount
+      };
+
+      console.log(`\n✅ Staggered market data fetch complete`);
+      console.log(`📞 Total API calls: ${this.callCount}`);
+      
+      return result;
+    } catch (error) {
+      console.error('Error getting staggered market data:', error.message);
       throw error;
     }
   }
