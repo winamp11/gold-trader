@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
+import AutochartistCalculator from './AutochartistCalculator';
 
 const API_URL = process.env.REACT_APP_API_URL || 'https://gold-trader-production.up.railway.app';
 
@@ -10,6 +11,7 @@ function App() {
   const [lastUpdate, setLastUpdate] = useState(null);
   const [history, setHistory] = useState([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [showCalculator, setShowCalculator] = useState(false);
   const [performance, setPerformance] = useState(null);
   const [expandedRow, setExpandedRow] = useState(null);
   const [notificationPermission, setNotificationPermission] = useState('default');
@@ -138,15 +140,22 @@ function App() {
 
   return (
     <div className="App">
-      {/* Header */}
-      <header className="header">
-        <h1>⚡ GOLD TRADER</h1>
-        <div className="header-actions">
-          <button onClick={() => setShowHistory(!showHistory)} className="history-btn">
-            {showHistory ? '📊 Dashboard' : '📜 History'}
-          </button>
-        </div>
-      </header>
+      {showCalculator ? (
+        <AutochartistCalculator onBack={() => setShowCalculator(false)} />
+      ) : (
+        <>
+          {/* Header */}
+          <header className="header">
+            <h1>⚡ GOLD TRADER</h1>
+            <div className="header-actions">
+              <button onClick={() => setShowHistory(!showHistory)} className="history-btn">
+                {showHistory ? '📊 Dashboard' : '📜 History'}
+              </button>
+              <button onClick={() => setShowCalculator(true)} className="calculator-btn">
+                🎯 Autochartist
+              </button>
+            </div>
+          </header>
 
       <div className="container">
         {showHistory ? (
@@ -431,6 +440,8 @@ function App() {
           </>
         )}
       </div>
+        </>
+      )}
     </div>
   );
 }
