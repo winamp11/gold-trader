@@ -114,22 +114,6 @@ app.get('/api/signal', async (req, res) => {
 // Force refresh endpoint removed - background job handles signal generation
 
 // Get signal history
-    res.json({
-      ...signal,
-      cached: false,
-      age: 0
-    });
-    
-  } catch (error) {
-    console.error('Error refreshing signal:', error);
-    res.status(500).json({ 
-      error: 'Failed to refresh signal', 
-      message: error.message 
-    });
-  }
-});
-
-// Get signal history
 app.get('/api/signals/history', (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 20;
