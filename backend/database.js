@@ -137,7 +137,6 @@ class DatabaseService {
       tf.h4?.rsi || null,
       tf.h1?.macd || null,
       tf.h1?.rsi || null,
-      tf.h1?.rsi || null,
       tf.m30?.macd || null,
       tf.m30?.rsi || null,
       tf.m15?.macd || null,
