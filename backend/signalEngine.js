@@ -230,10 +230,10 @@ class SignalEngine {
     }
     
     console.log('\n📊 TIMEFRAMES:');
-    console.log(`H4:  MACD: ${signal.timeframes.h4.macd.toFixed(2)} | RSI: ${signal.timeframes.h4.rsi.toFixed(1)} | MFI: ${signal.timeframes.h4.mfi.toFixed(1)}`);
-    console.log(`H1:  MACD: ${signal.timeframes.h1.macd.toFixed(2)} | RSI: ${signal.timeframes.h1.rsi.toFixed(1)} | MFI: ${signal.timeframes.h1.mfi.toFixed(1)}`);
-    console.log(`M30: MACD: ${signal.timeframes.m30.macd.toFixed(2)} | RSI: ${signal.timeframes.m30.rsi.toFixed(1)} | MFI: ${signal.timeframes.m30.mfi.toFixed(1)}`);
-    console.log(`M15: MACD: ${signal.timeframes.m15.macd.toFixed(2)} | RSI: ${signal.timeframes.m15.rsi.toFixed(1)} | MFI: ${signal.timeframes.m15.mfi.toFixed(1)}`);
+    console.log(`H4:  MACD: ${signal.timeframes.h4.macd.toFixed(2)} | RSI: ${signal.timeframes.h4.rsi.toFixed(1)}`);
+    console.log(`H1:  MACD: ${signal.timeframes.h1.macd.toFixed(2)} | RSI: ${signal.timeframes.h1.rsi.toFixed(1)}`);
+    console.log(`M30: MACD: ${signal.timeframes.m30.macd.toFixed(2)} | RSI: ${signal.timeframes.m30.rsi.toFixed(1)}`);
+    console.log(`M15: MACD: ${signal.timeframes.m15.macd.toFixed(2)} | RSI: ${signal.timeframes.m15.rsi.toFixed(1)}`);
     console.log('='.repeat(50) + '\n');
   }
 }
