@@ -91,12 +91,12 @@ function App() {
     fetchHistory();
     fetchPerformance();
     
-    // Auto-refresh every 10 minutes (matches backend signal generation)
+    // Auto-refresh every 8 minutes (matches backend signal generation)
     const interval = setInterval(() => {
       fetchSignal();
       fetchHistory();
       fetchPerformance();
-    }, 10 * 60 * 1000); // 10 minutes
+    }, 8 * 60 * 1000); // 8 minutes
     
     return () => clearInterval(interval);
   }, []); // Empty dependency array - only runs once on mount
@@ -221,7 +221,6 @@ function App() {
                                       <div className="indicator-values">
                                         <span>MACD: {sig.h4_macd?.toFixed(2)}</span>
                                         <span>RSI: {sig.h4_rsi?.toFixed(1)}</span>
-                                        <span>MFI: {sig.h4_mfi?.toFixed(1)}</span>
                                       </div>
                                     </div>
                                     <div className="indicator-box">
@@ -229,7 +228,6 @@ function App() {
                                       <div className="indicator-values">
                                         <span>MACD: {sig.h1_macd?.toFixed(2)}</span>
                                         <span>RSI: {sig.h1_rsi?.toFixed(1)}</span>
-                                        <span>MFI: {sig.h1_mfi?.toFixed(1)}</span>
                                       </div>
                                     </div>
                                     <div className="indicator-box">
@@ -237,7 +235,6 @@ function App() {
                                       <div className="indicator-values">
                                         <span>MACD: {sig.m30_macd?.toFixed(2)}</span>
                                         <span>RSI: {sig.m30_rsi?.toFixed(1)}</span>
-                                        <span>MFI: {sig.m30_mfi?.toFixed(1)}</span>
                                       </div>
                                     </div>
                                     <div className="indicator-box">
@@ -245,7 +242,6 @@ function App() {
                                       <div className="indicator-values">
                                         <span>MACD: {sig.m15_macd?.toFixed(2)}</span>
                                         <span>RSI: {sig.m15_rsi?.toFixed(1)}</span>
-                                        <span>MFI: {sig.m15_mfi?.toFixed(1)}</span>
                                       </div>
                                     </div>
                                   </div>
@@ -424,10 +420,6 @@ function App() {
                             <div className="indicator">
                               <span className={`indicator-dot ${tf.trend}`}></span>
                               <span>RSI: {tf.rsi?.toFixed(1)}</span>
-                            </div>
-                            <div className="indicator">
-                              <span className={`indicator-dot ${tf.trend}`}></span>
-                              <span>MFI: {tf.mfi?.toFixed(1)}</span>
                             </div>
                           </div>
                         </div>

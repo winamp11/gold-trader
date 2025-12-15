@@ -109,11 +109,10 @@ class TwelveDataService {
     try {
       console.log(`\n📊 Fetching indicators for ${symbol} ${interval}...`);
       
-      const [timeSeries, rsi, macd, mfi] = await Promise.all([
+      const [timeSeries, rsi, macd] = await Promise.all([
         this.fetchTimeSeries(symbol, interval, 2),
         this.fetchRSI(symbol, interval),
-        this.fetchMACD(symbol, interval),
-        this.fetchMFI(symbol, interval)
+        this.fetchMACD(symbol, interval)
       ]);
 
       const latestCandle = timeSeries.values?.[0] || {};
@@ -125,8 +124,7 @@ class TwelveDataService {
         rsi,
         macd: macd.macd,
         macd_signal: macd.signal,
-        macd_hist: macd.histogram,
-        mfi
+        macd_hist: macd.histogram
       };
     } catch (error) {
       console.error(`Error fetching all indicators for ${interval}:`, error.message);
@@ -163,9 +161,9 @@ class TwelveDataService {
     }
   }
 
-  // Staggered version - splits 16 calls into 2 batches to stay under 8/min limit
+  // Staggered version - splits 12 calls into 2 batches to stay under 8/min limit
   async getMarketDataStaggered(symbol = 'XAU/USD') {
-    console.log('\n🚀 Starting staggered market data fetch (3-min process)...\n');
+    console.log('\n🚀 Starting staggered market data fetch...\n');
     this.resetCallCount();
     
     try {
@@ -188,17 +186,13 @@ class TwelveDataService {
       // Wait 1.5 minutes (90 seconds) before next batch
       await new Promise(resolve => setTimeout(resolve, 90000));
 
-      // BATCH 2: Next 8 calls (MACD + MFI for all timeframes)
-      console.log('📞 Batch 2/2: Fetching MACD & MFI (8 calls)...');
+      // BATCH 2: Next 4 calls (MACD for all timeframes)
+      console.log('📞 Batch 2/2: Fetching MACD (4 calls)...');
       const batch2 = await Promise.all([
         this.fetchMACD(symbol, '4h'),
         this.fetchMACD(symbol, '1h'),
         this.fetchMACD(symbol, '30min'),
-        this.fetchMACD(symbol, '15min'),
-        this.fetchMFI(symbol, '4h'),
-        this.fetchMFI(symbol, '1h'),
-        this.fetchMFI(symbol, '30min'),
-        this.fetchMFI(symbol, '15min')
+        this.fetchMACD(symbol, '15min')
       ]);
 
       console.log(`✅ Batch 2 complete (${this.callCount} total calls)`);
@@ -214,8 +208,7 @@ class TwelveDataService {
           rsi: batch1[4],
           macd: batch2[0].macd,
           macd_signal: batch2[0].signal,
-          macd_hist: batch2[0].histogram,
-          mfi: batch2[4]
+          macd_hist: batch2[0].histogram
         },
         h1: {
           interval: '1h',
@@ -224,8 +217,7 @@ class TwelveDataService {
           rsi: batch1[5],
           macd: batch2[1].macd,
           macd_signal: batch2[1].signal,
-          macd_hist: batch2[1].histogram,
-          mfi: batch2[5]
+          macd_hist: batch2[1].histogram
         },
         m30: {
           interval: '30min',
@@ -234,8 +226,7 @@ class TwelveDataService {
           rsi: batch1[6],
           macd: batch2[2].macd,
           macd_signal: batch2[2].signal,
-          macd_hist: batch2[2].histogram,
-          mfi: batch2[6]
+          macd_hist: batch2[2].histogram
         },
         m15: {
           interval: '15min',
@@ -244,8 +235,7 @@ class TwelveDataService {
           rsi: batch1[7],
           macd: batch2[3].macd,
           macd_signal: batch2[3].signal,
-          macd_hist: batch2[3].histogram,
-          mfi: batch2[7]
+          macd_hist: batch2[3].histogram
         },
         apiCallCount: this.callCount
       };

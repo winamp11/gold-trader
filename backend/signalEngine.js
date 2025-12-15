@@ -4,7 +4,7 @@ class SignalEngine {
   }
 
   analyzeTimeframe(data, timeframe) {
-    const { rsi, macd, macd_signal, mfi } = data;
+    const { rsi, macd, macd_signal } = data;
     
     // Determine trend direction
     const macdPositive = macd > 0;
@@ -19,7 +19,6 @@ class SignalEngine {
       rsi,
       macd,
       macd_signal,
-      mfi,
       macdPositive,
       macdBullish,
       rsiBullish,

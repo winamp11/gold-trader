@@ -20,17 +20,17 @@ app.use(express.json());
 let currentSignal = null;
 let lastUpdate = null;
 
-// Background job to generate signals every 10 minutes during trading hours
+// Background job to generate signals every 8 minutes during trading hours
 function startBackgroundSignalGeneration() {
   console.log('🤖 Starting background signal generation...');
   
   // Run immediately on startup if within trading hours
   generateSignalIfTradingHours();
   
-  // Then run every 10 minutes
+  // Then run every 8 minutes
   setInterval(() => {
     generateSignalIfTradingHours();
-  }, 10 * 60 * 1000); // 10 minutes
+  }, 8 * 60 * 1000); // 8 minutes
 }
 
 async function generateSignalIfTradingHours() {
@@ -321,8 +321,8 @@ app.listen(PORT, () => {
   console.log(`📡 Server running on http://localhost:${PORT}`);
   console.log(`🔑 API Key configured: ${process.env.TWELVE_DATA_API_KEY ? 'YES' : 'NO'}`);
   console.log(`⏰ Trading hours: 11:00-15:00 & 17:00-21:00 UAE time (8 hours, split sessions)`);
-  console.log(`🔄 Signal generation: Every 10 minutes (background job)`);
-  console.log(`📊 Expected: ~48 signals/day, 768 API calls/day`);
+  console.log(`🔄 Signal generation: Every 8 minutes (background job)`);
+  console.log(`📊 Expected: ~60 signals/day, 720 API calls/day`);
   console.log('='.repeat(50) + '\n');
   
   // Start background signal generation

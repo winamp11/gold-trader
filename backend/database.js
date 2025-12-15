@@ -113,9 +113,9 @@ class DatabaseService {
       INSERT INTO signals (
         timestamp, signal, direction, entry_price, stop_loss, target,
         position_size, risk_amount, potential_profit, confidence, reasoning,
-        h4_macd, h4_rsi, h4_mfi, h1_macd, h1_rsi, h1_mfi,
-        m30_macd, m30_rsi, m30_mfi, m15_macd, m15_rsi, m15_mfi
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        h4_macd, h4_rsi, h1_macd, h1_rsi,
+        m30_macd, m30_rsi, m15_macd, m15_rsi
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const rec = signalData.recommendation || {};
@@ -135,16 +135,13 @@ class DatabaseService {
       rec.reasoning || signalData.reason || null,
       tf.h4?.macd || null,
       tf.h4?.rsi || null,
-      tf.h4?.mfi || null,
       tf.h1?.macd || null,
       tf.h1?.rsi || null,
-      tf.h1?.mfi || null,
+      tf.h1?.rsi || null,
       tf.m30?.macd || null,
       tf.m30?.rsi || null,
-      tf.m30?.mfi || null,
       tf.m15?.macd || null,
-      tf.m15?.rsi || null,
-      tf.m15?.mfi || null
+      tf.m15?.rsi || null
     );
 
     console.log(`💾 Signal saved to database (ID: ${info.lastInsertRowid})`);
