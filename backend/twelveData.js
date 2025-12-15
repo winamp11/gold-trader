@@ -87,11 +87,18 @@ class TwelveDataService {
       this.callCount++;
       console.log(`API Call #${this.callCount}: MFI ${symbol} ${interval}`);
       
+      // DEBUG: Log raw MFI response
+      console.log(`🔍 DEBUG MFI Response:`, JSON.stringify(data, null, 2));
+      
       if (data.status === 'error') {
+        console.error(`❌ MFI API Error: ${data.message || 'Unknown error'}`);
         throw new Error(data.message || 'API error');
       }
       
-      return parseFloat(data.values?.[0]?.mfi || 0);
+      const mfiValue = parseFloat(data.values?.[0]?.mfi || 0);
+      console.log(`📊 MFI Value parsed: ${mfiValue}`);
+      
+      return mfiValue;
     } catch (error) {
       console.error('Error fetching MFI:', error.message);
       throw error;
