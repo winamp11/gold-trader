@@ -216,6 +216,20 @@ app.get('/api/stats/performance', (req, res) => {
   }
 });
 
+// Export all signals data (for data analysis)
+app.get('/api/export-all', async (req, res) => {
+  try {
+    const signals = database.getAllSignals(); // We'll need to add this method to database.js
+    res.json({ count: signals.length, data: signals });
+  } catch (error) {
+    console.error('Error exporting signals:', error);
+    res.status(500).json({ 
+      error: 'Failed to export signals', 
+      message: error.message 
+    });
+  }
+});
+
 // Update account balance
 app.post('/api/account/update', (req, res) => {
   try {

@@ -156,6 +156,14 @@ class DatabaseService {
     return stmt.all(limit);
   }
 
+  getAllSignals() {
+    const stmt = this.db.prepare(`
+      SELECT * FROM signals 
+      ORDER BY timestamp DESC
+    `);
+    return stmt.all();
+  }
+
   getSignalById(id) {
     const stmt = this.db.prepare('SELECT * FROM signals WHERE id = ?');
     return stmt.get(id);
