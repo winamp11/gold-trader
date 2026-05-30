@@ -9,7 +9,6 @@ import { isTradingHours, getNextTradingTime } from './tradingHours.js';
 import { decide as mechanicalDecide }    from './deciders/mechanicalDecider.js';
 import { decide as claudeOverlayDecide } from './deciders/claudeOverlayDecider.js';
 import { decide as claudeSoloDecide }    from './deciders/claudeSoloDecider.js';
-import { reflect, reflectVeto }          from './deciders/reflector.js';
 
 dotenv.config();
 
@@ -391,112 +390,6 @@ app.post('/api/autochartist/patterns', (req, res) => {
 });
 
 
-// TODO REMOVE AFTER PHASE 3 VERIFICATION
-// Runs checks 6-8 from verify-phase3.js against the live DB and real Claude API.
-// Guarded by VERIFY_TOKEN env var; 403 on wrong / missing token.
-app.get('/api/verify-phase3', async (req, res) => {
-  const expectedToken = process.env.VERIFY_TOKEN;
-  if (!expectedToken || req.query.token !== expectedToken) {
-    return res.status(403).json({ error: 'forbidden' });
-  }
-
-  try {
-    const soloPortfolio    = database.getPortfolioByName('claude_solo');
-    const overlayPortfolio = database.getPortfolioByName('claude_overlay');
-
-    // ── Check 6: solo STOP_HIT → real reflect() call → journal entry ─────
-    const cntSoloBefore    = database.db.prepare('SELECT COUNT(*) AS n FROM journal WHERE portfolio_id = ?').get(soloPortfolio.id).n;
-    const cntOverlayBefore = database.db.prepare('SELECT COUNT(*) AS n FROM journal WHERE portfolio_id = ?').get(overlayPortfolio.id).n;
-
-    await reflect({
-      portfolioName: 'claude_solo',
-      portfolioId:   soloPortfolio.id,
-      direction:     'LONG',
-      entryPrice:    3300.00,
-      stopLoss:      3290.00,
-      target:        3320.00,
-      lots:          0.10,
-      tag:           'h1_momentum_pullback_entry',
-      reasoning:     'H1 MACD crossed above signal; RSI 56; support at 3290 ATR-confirmed.',
-      tradeId:       null,
-      maxPrice:      3305.00,
-      minPrice:      3290.00,
-    }, 'STOP_HIT', -100);
-
-    const newestSoloLoss = database.db.prepare(
-      'SELECT * FROM journal WHERE portfolio_id = ? ORDER BY id DESC LIMIT 1'
-    ).get(soloPortfolio.id);
-
-    // Lesson block exactly as it will be assembled for the next solo decision prompt
-    const recentLessons = database.getRecentLessons(soloPortfolio.id);
-    const lessonsBlock = recentLessons.length === 0
-      ? 'No lessons recorded yet.'
-      : recentLessons.map((l, i) =>
-          `${i + 1}. [${l.entry_type}${l.recurring ? ' — RECURRING' : ''}] ${l.lesson_text} (tag: ${l.tag})`
-        ).join('\n');
-
-    // ── Check 7: veto shadow → real reflectVeto() call → journal entry ────
-    await reflectVeto({
-      portfolioName: 'claude_solo',
-      portfolioId:   soloPortfolio.id,
-      direction:     'SHORT',
-      entryPrice:    3320.00,
-      stopLoss:      3330.00,
-      target:        3300.00,
-      lots:          0.10,
-      tag:           'overbought_rejection_veto',
-      reasoning:     'H1 RSI 72, overbought; mechanical was late; vetoed on risk of snap-back.',
-      shadowId:      null,
-    }, 'STOP_HIT', -100);
-
-    const newestVetoEntry = database.db.prepare(
-      `SELECT * FROM journal WHERE portfolio_id = ? AND entry_type = 'veto' ORDER BY id DESC LIMIT 1`
-    ).get(soloPortfolio.id);
-
-    // ── Check 8: journal counts (overlay must be untouched) ───────────────
-    const cntSoloAfter    = database.db.prepare('SELECT COUNT(*) AS n FROM journal WHERE portfolio_id = ?').get(soloPortfolio.id).n;
-    const cntOverlayAfter = database.db.prepare('SELECT COUNT(*) AS n FROM journal WHERE portfolio_id = ?').get(overlayPortfolio.id).n;
-
-    // ── Full /api/accounts payload ─────────────────────────────────────────
-    const accounts = database.getAccountsSummary();
-    const openByPortfolio = {};
-    for (const t of outcomeTracker.activeTracking.values()) {
-      openByPortfolio[t.portfolioId] = (openByPortfolio[t.portfolioId] || 0) + 1;
-    }
-    const accountsResult = accounts.map(a => {
-      const base = { ...a, open_positions: openByPortfolio[a.id] || 0 };
-      if (a.id === overlayPortfolio?.id) base.veto_stats = database.getVetoStats(a.id);
-      return base;
-    });
-
-    res.json({
-      check6_solo_loss_reflection: {
-        simulated:     { direction: 'LONG', entry: 3300, stop: 3290, target: 3320, outcome: 'STOP_HIT', pnl: -100 },
-        journal_entry: newestSoloLoss,
-      },
-      check6_lesson_block_for_next_prompt: {
-        count:     recentLessons.length,
-        formatted: lessonsBlock,
-      },
-      check7_veto_reflection: {
-        simulated:     { direction: 'SHORT', would_be_outcome: 'STOP_HIT', would_be_pnl: -100 },
-        journal_entry: newestVetoEntry,
-      },
-      journal_counts: {
-        solo_before:       cntSoloBefore,
-        solo_after:        cntSoloAfter,
-        overlay_before:    cntOverlayBefore,
-        overlay_after:     cntOverlayAfter,
-        overlay_untouched: cntOverlayAfter === cntOverlayBefore,
-      },
-      accounts: accountsResult,
-    });
-  } catch (error) {
-    console.error('❌ /api/verify-phase3 error:', error.message);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // ── Startup ────────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
@@ -512,11 +405,6 @@ app.listen(PORT, () => {
   console.log(`📊 Projected daily total: ~750 calls  (budget: 800, margin: ~50)`);
   console.log(`⚡ Max calls/60s window: 7  (Batch B 6 + poller 1)`);
   console.log(`🏦 Accounts: mechanical | claude_overlay | claude_solo`);
-  console.log('='.repeat(55));
-  if (process.env.VERIFY_TOKEN) {
-    console.log('⚠️  DEBUG ROUTE ACTIVE — TODO REMOVE AFTER PHASE 3 VERIFICATION');
-    console.log('   GET /api/verify-phase3?token=<VERIFY_TOKEN>');
-  }
   console.log('='.repeat(55) + '\n');
 
   startBackgroundSignalGeneration();
