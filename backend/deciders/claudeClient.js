@@ -28,6 +28,11 @@ function nextCallNum() {
 
 export function todayCallCount() { return _counter.count; }
 
+// ── Last-call token usage (overwritten after every call) ─────────────────
+// Sequential calls only; safe because the cycle awaits each decider.
+let _lastUsage = null;
+export function getLastCallUsage() { return _lastUsage ? { ..._lastUsage } : null; }
+
 // ── Schema validation ───────────────────────────────────────────────────
 
 function validateDecision(obj) {
@@ -102,10 +107,11 @@ export async function callDecider({ systemPrompt, userContent, deciderName }) {
       { timeout: 30_000 }
     );
 
-    // Log token usage for cost visibility
+    // Log and capture token usage for cost visibility
     const u = resp.usage;
     const cacheCreate = u.cache_creation_input_tokens ?? 0;
     const cacheRead   = u.cache_read_input_tokens   ?? 0;
+    _lastUsage = { input: u.input_tokens, cache_create: cacheCreate, cache_read: cacheRead, output: u.output_tokens };
     console.log(
       `📊 [${deciderName}] tokens: in=${u.input_tokens}` +
       ` (cache_create=${cacheCreate} cache_read=${cacheRead})` +
