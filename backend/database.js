@@ -70,15 +70,6 @@ class DatabaseService {
       }
     }
 
-    // Migrate trades table — add portfolio_id, decider, tag
-    const tradeCols = this.db.prepare('PRAGMA table_info(trades)').all().map(c => c.name);
-    for (const [col, def] of [['portfolio_id', 'INTEGER DEFAULT 1'], ['decider', 'TEXT'], ['tag', 'TEXT']]) {
-      if (!tradeCols.includes(col)) {
-        this.db.exec(`ALTER TABLE trades ADD COLUMN ${col} ${def}`);
-        console.log(`🔧 Migrated: added trades.${col}`);
-      }
-    }
-
     // Autochartist patterns table - stores manually logged patterns from Autochartist
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS autochartist_patterns (
@@ -123,6 +114,15 @@ class DatabaseService {
         FOREIGN KEY (portfolio_id) REFERENCES portfolios(id)
       )
     `);
+
+    // Migrate trades table — add portfolio_id, decider, tag (for DBs created before Phase 1)
+    const tradeCols = this.db.prepare('PRAGMA table_info(trades)').all().map(c => c.name);
+    for (const [col, def] of [['portfolio_id', 'INTEGER DEFAULT 1'], ['decider', 'TEXT'], ['tag', 'TEXT']]) {
+      if (!tradeCols.includes(col)) {
+        this.db.exec(`ALTER TABLE trades ADD COLUMN ${col} ${def}`);
+        console.log(`🔧 Migrated: added trades.${col}`);
+      }
+    }
 
     // Account snapshots - daily balance tracking
     this.db.exec(`
