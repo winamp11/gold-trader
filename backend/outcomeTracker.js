@@ -1,181 +1,171 @@
-import twelveData from './twelveData.js';
 import database from './database.js';
 import { isTradingHours } from './tradingHours.js';
 
 class OutcomeTracker {
   constructor() {
-    this.activeTracking = new Map(); // signalId -> tracking data
+    // key → tracking  (real positions, all portfolios)
+    // key format: `${portfolioId}_${signalId_or_tradeId}`
+    this.activeTracking = new Map();
+
+    // key → shadow  (veto counterfactuals, never touch balances)
+    // key format: `shadow_${shadowId}`
+    this.shadowTracking = new Map();
+
     this.monitoringInterval = null;
   }
 
-  startTracking(signalId, signalData) {
-    const { recommendation, signal, currentPrice, timestamp } = signalData;
+  // ── Real positions ────────────────────────────────────────────────────────
 
-    if (signal === 'GREEN' && recommendation) {
-      // Track GREEN signals: monitor entry/stop/target
-      this.activeTracking.set(signalId, {
-        signalId,
-        type: 'GREEN',
-        direction: recommendation.direction,
-        lots: recommendation.positionSize || 0.01,
-        startPrice: currentPrice,
-        entryPrice: recommendation.entry,
-        stopLoss: recommendation.stop,
-        target: recommendation.target,
-        startTime: new Date(timestamp),
-        entryTriggered: false,
-        outcome: null,
-        maxPrice: currentPrice,
-        minPrice: currentPrice
-      });
-    } else if (signal === 'RED') {
-      // Track RED signals: detect missed opportunities
-      this.activeTracking.set(signalId, {
-        signalId,
-        type: 'RED',
-        startPrice: currentPrice,
-        startTime: new Date(timestamp),
-        maxPrice: currentPrice,
-        minPrice: currentPrice,
-        outcome: null
-      });
-    }
-
-    console.log(`📊 Started tracking signal ${signalId} (${signal})`);
-
-    // Start monitoring if not already running
-    if (!this.monitoringInterval) {
-      this.startMonitoring();
-    }
+  // tracking shape:
+  //   key, portfolioId, portfolioName,
+  //   type: 'GREEN'|'RED',
+  //   signalId (nullable — only mechanical updates signals table),
+  //   tradeId  (nullable — set when a trade row was created),
+  //   direction, lots, startPrice, entryPrice, stopLoss, target,
+  //   startTime, entryTriggered, outcome, maxPrice, minPrice
+  startTracking(key, tracking) {
+    this.activeTracking.set(key, tracking);
+    console.log(`📊 Tracking started [${tracking.portfolioName}] key=${key} type=${tracking.type}`);
+    if (!this.monitoringInterval) this.startMonitoring();
   }
+
+  // ── Shadow positions (VETO counterfactuals) ───────────────────────────────
+
+  // shadow shape:
+  //   key, shadowId, portfolioId, portfolioName,
+  //   direction, lots, startPrice, entryPrice, stopLoss, target,
+  //   startTime, entryTriggered, maxPrice, minPrice
+  startShadow(key, shadow) {
+    this.shadowTracking.set(key, shadow);
+    console.log(`👻 Shadow tracking started [${shadow.portfolioName}] key=${key}`);
+  }
+
+  // ── Cleanup interval (no API calls) ──────────────────────────────────────
 
   startMonitoring() {
-    // Check every 30 minutes for cleanup only (no API calls)
     this.monitoringInterval = setInterval(() => {
-      this.checkAllSignals();
+      this.expireStale();
     }, 30 * 60 * 1000);
-
-    console.log('👁️  Outcome monitoring started (cleanup checks every 30 minutes)');
+    console.log('👁️  Outcome monitoring started (stale-check every 30 minutes)');
   }
 
-  async checkAllSignals() {
-    if (this.activeTracking.size === 0) return;
-
-    // Skip if outside trading hours
-    if (!isTradingHours()) {
-      console.log('⏸️  Outcome tracking paused (outside trading hours)');
-      return;
-    }
-
-    // NOTE: We don't fetch market data here anymore
-    // Outcome tracking now happens when signals are generated
-    // This method is kept for cleanup only
-    
+  expireStale() {
+    if (!isTradingHours()) return;
     const now = new Date();
-    
-    for (const [signalId, tracking] of this.activeTracking) {
-      const ageInHours = (now - tracking.startTime) / (1000 * 60 * 60);
-      
-      // Expire old signals that haven't been resolved
-      if (ageInHours >= 4 && !tracking.outcome) {
-        this.finalizeSignal(tracking, 'EXPIRED');
+    for (const [key, tracking] of this.activeTracking) {
+      const ageHours = (now - tracking.startTime) / 3600000;
+      if (ageHours >= 4 && !tracking.outcome) {
+        this.finalizePosition(tracking, 'EXPIRED');
+      }
+    }
+    for (const [key, shadow] of this.shadowTracking) {
+      const ageHours = (now - shadow.startTime) / 3600000;
+      if (ageHours >= 4) {
+        this.finalizeShadow(shadow, 'EXPIRED', null);
       }
     }
   }
 
-  // New method: Check outcomes using current price from signal generation
-  checkOutcomesWithPrice(currentPrice) {
-    if (this.activeTracking.size === 0) return;
-    
-    console.log(`\n🔍 Checking ${this.activeTracking.size} active signals at price ${currentPrice}...`);
-    
-    const now = new Date();
-    
-    for (const [signalId, tracking] of this.activeTracking) {
-      const ageInHours = (now - tracking.startTime) / (1000 * 60 * 60);
+  // ── Price-tick evaluation (called by the 1-min poller) ───────────────────
 
-      // Update price ranges
+  checkOutcomesWithPrice(currentPrice) {
+    const total = this.activeTracking.size + this.shadowTracking.size;
+    if (total === 0) return;
+    console.log(`\n🔍 Price tick $${currentPrice.toFixed(2)} — ${this.activeTracking.size} positions, ${this.shadowTracking.size} shadows`);
+
+    const now = new Date();
+
+    for (const [, tracking] of this.activeTracking) {
       tracking.maxPrice = Math.max(tracking.maxPrice, currentPrice);
       tracking.minPrice = Math.min(tracking.minPrice, currentPrice);
+      const ageHours = (now - tracking.startTime) / 3600000;
 
       if (tracking.type === 'GREEN') {
-        this.checkGreenSignal(tracking, currentPrice, ageInHours);
+        this.checkGreenPosition(tracking, currentPrice, ageHours);
       } else if (tracking.type === 'RED') {
-        this.checkRedSignal(tracking, currentPrice, ageInHours);
+        this.checkRedPosition(tracking, currentPrice, ageHours);
       }
+      if (ageHours >= 4 && !tracking.outcome) {
+        this.finalizePosition(tracking, 'EXPIRED');
+      }
+    }
 
-      // Stop tracking after 4 hours
-      if (ageInHours >= 4 && !tracking.outcome) {
-        this.finalizeSignal(tracking, 'EXPIRED');
-      }
+    for (const [, shadow] of this.shadowTracking) {
+      shadow.maxPrice = Math.max(shadow.maxPrice, currentPrice);
+      shadow.minPrice = Math.min(shadow.minPrice, currentPrice);
+      const ageHours = (now - shadow.startTime) / 3600000;
+      this.checkShadowPosition(shadow, currentPrice, ageHours);
     }
   }
 
-  checkGreenSignal(tracking, currentPrice, ageInHours) {
+  // ── GREEN position logic ──────────────────────────────────────────────────
+
+  checkGreenPosition(tracking, currentPrice, ageHours) {
     const { direction, entryPrice, stopLoss, target, entryTriggered } = tracking;
 
-    // Check if entry was triggered
     if (!entryTriggered) {
-      const entryHit = direction === 'LONG' 
-        ? currentPrice <= entryPrice 
-        : currentPrice >= entryPrice;
-
+      const entryHit = direction === 'LONG' ? currentPrice <= entryPrice : currentPrice >= entryPrice;
       if (entryHit) {
         tracking.entryTriggered = true;
         tracking.entryTime = new Date();
-        console.log(`✅ Entry triggered for signal ${tracking.signalId}`);
-      } else if (ageInHours >= 2) {
-        // Entry not hit within 2 hours
-        this.finalizeSignal(tracking, 'NO_ENTRY');
-        return;
-      } else {
-        return; // Keep waiting for entry
+        console.log(`✅ Entry triggered [${tracking.portfolioName}] key=${tracking.key}`);
+      } else if (ageHours >= 2) {
+        this.finalizePosition(tracking, 'NO_ENTRY');
       }
+      return;
     }
 
-    // Entry was triggered, check stop/target
     if (direction === 'LONG') {
-      if (currentPrice <= stopLoss) {
-        this.finalizeSignal(tracking, 'STOP_HIT', currentPrice);
-      } else if (currentPrice >= target) {
-        this.finalizeSignal(tracking, 'TARGET_HIT', currentPrice);
-      }
-    } else { // SHORT
-      if (currentPrice >= stopLoss) {
-        this.finalizeSignal(tracking, 'STOP_HIT', currentPrice);
-      } else if (currentPrice <= target) {
-        this.finalizeSignal(tracking, 'TARGET_HIT', currentPrice);
-      }
+      if (currentPrice <= stopLoss)  this.finalizePosition(tracking, 'STOP_HIT',   currentPrice);
+      else if (currentPrice >= target) this.finalizePosition(tracking, 'TARGET_HIT', currentPrice);
+    } else {
+      if (currentPrice >= stopLoss)  this.finalizePosition(tracking, 'STOP_HIT',   currentPrice);
+      else if (currentPrice <= target) this.finalizePosition(tracking, 'TARGET_HIT', currentPrice);
     }
   }
 
-  checkRedSignal(tracking, currentPrice, ageInHours) {
+  checkRedPosition(tracking, currentPrice, ageHours) {
     const { startPrice, maxPrice, minPrice } = tracking;
-
-    const upMove = maxPrice - startPrice;
-    const downMove = startPrice - minPrice;
-    const biggestMove = Math.max(upMove, downMove);
-
-    // Consider it a missed opportunity if >15 point move
+    const biggestMove = Math.max(maxPrice - startPrice, startPrice - minPrice);
     if (biggestMove >= 15) {
-      const direction = upMove > downMove ? 'UP' : 'DOWN';
-      this.finalizeSignal(tracking, 'MISSED_OPPORTUNITY', currentPrice, {
-        move: biggestMove.toFixed(1),
-        direction
-      });
-    } else if (ageInHours >= 4) {
-      // No significant move, RED was correct
-      this.finalizeSignal(tracking, 'CORRECT_RED', currentPrice);
+      const direction = (maxPrice - startPrice) > (startPrice - minPrice) ? 'UP' : 'DOWN';
+      this.finalizePosition(tracking, 'MISSED_OPPORTUNITY', currentPrice, { move: biggestMove.toFixed(1), direction });
+    } else if (ageHours >= 4) {
+      this.finalizePosition(tracking, 'CORRECT_RED', currentPrice);
     }
   }
 
-  finalizeSignal(tracking, outcome, exitPrice = null, metadata = {}) {
+  // ── Shadow position logic ─────────────────────────────────────────────────
+
+  checkShadowPosition(shadow, currentPrice, ageHours) {
+    const { direction, entryPrice, stopLoss, target, entryTriggered } = shadow;
+
+    if (!entryTriggered) {
+      const entryHit = direction === 'LONG' ? currentPrice <= entryPrice : currentPrice >= entryPrice;
+      if (entryHit) {
+        shadow.entryTriggered = true;
+      } else if (ageHours >= 2) {
+        this.finalizeShadow(shadow, 'NO_ENTRY', null);
+      }
+      return;
+    }
+
+    if (direction === 'LONG') {
+      if (currentPrice <= stopLoss)  this.finalizeShadow(shadow, 'STOP_HIT',   currentPrice);
+      else if (currentPrice >= target) this.finalizeShadow(shadow, 'TARGET_HIT', currentPrice);
+    } else {
+      if (currentPrice >= stopLoss)  this.finalizeShadow(shadow, 'STOP_HIT',   currentPrice);
+      else if (currentPrice <= target) this.finalizeShadow(shadow, 'TARGET_HIT', currentPrice);
+    }
+    if (ageHours >= 4) this.finalizeShadow(shadow, 'EXPIRED', null);
+  }
+
+  // ── Finalization ──────────────────────────────────────────────────────────
+
+  finalizePosition(tracking, outcome, exitPrice = null, metadata = {}) {
     tracking.outcome = outcome;
     tracking.endTime = new Date();
-    tracking.exitPrice = exitPrice;
 
-    // Use exact order levels as paper fill prices for clean P&L calculation.
-    // Gold contract spec: 1 standard lot = 100 oz → $100 per $1 price move per lot.
     let pnl = null;
     let fillPrice = exitPrice;
     if (outcome === 'TARGET_HIT') fillPrice = tracking.target;
@@ -188,40 +178,70 @@ class OutcomeTracker {
         : tracking.entryPrice - fillPrice;
       pnl = priceMove * 100 * lots;
 
-      const portfolio = database.getMechanicalPortfolio();
+      const portfolio = database.getPortfolioById(tracking.portfolioId);
       if (portfolio) {
         database.updatePortfolioBalance(portfolio.id, pnl);
         const today = new Date().toISOString().split('T')[0];
         database.upsertDailyPnl(today, portfolio.id, pnl, pnl > 0);
         const newBalance = portfolio.current_balance + pnl;
-        console.log(`💰 [${portfolio.name}] P&L ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} → balance $${newBalance.toFixed(2)}`);
+        console.log(`💰 [${portfolio.name}] P&L ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} → $${newBalance.toFixed(2)}`);
       }
     }
 
-    // Update database
-    database.updateSignalOutcome(tracking.signalId, {
-      outcome,
-      outcome_timestamp: tracking.endTime.toISOString(),
-      outcome_price: fillPrice,
-      outcome_pnl: pnl,
-      metadata: JSON.stringify(metadata)
-    });
-
-    console.log(`✅ Signal ${tracking.signalId} finalized: ${outcome}`);
-    if (metadata.move) {
-      console.log(`   Missed ${metadata.direction} move of ${metadata.move} points`);
+    // Update the signals table for mechanical (signalId is set), not for others
+    if (tracking.signalId) {
+      database.updateSignalOutcome(tracking.signalId, {
+        outcome,
+        outcome_timestamp: tracking.endTime.toISOString(),
+        outcome_price: fillPrice,
+        outcome_pnl: pnl,
+        metadata: JSON.stringify(metadata)
+      });
     }
 
-    // Remove from active tracking
-    this.activeTracking.delete(tracking.signalId);
+    // Update the trade row for any account that has one
+    if (tracking.tradeId && (outcome === 'TARGET_HIT' || outcome === 'STOP_HIT')) {
+      database.updateTradeExit(tracking.tradeId, {
+        exit_price: fillPrice,
+        exit_timestamp: tracking.endTime.toISOString(),
+        exit_reason: outcome,
+        pnl
+      });
+    }
+
+    console.log(`✅ Position finalized [${tracking.portfolioName}] ${outcome}${metadata.move ? ` (${metadata.direction} ${metadata.move} pts)` : ''}`);
+    this.activeTracking.delete(tracking.key);
   }
 
+  finalizeShadow(shadow, wouldBeOutcome, exitPrice) {
+    let pnl = null;
+    let fillPrice = exitPrice;
+    if (wouldBeOutcome === 'TARGET_HIT') fillPrice = shadow.target;
+    else if (wouldBeOutcome === 'STOP_HIT') fillPrice = shadow.stopLoss;
+
+    if (shadow.entryTriggered && (wouldBeOutcome === 'TARGET_HIT' || wouldBeOutcome === 'STOP_HIT')) {
+      const lots = shadow.lots || 0.01;
+      const priceMove = shadow.direction === 'LONG'
+        ? fillPrice - shadow.entryPrice
+        : shadow.entryPrice - fillPrice;
+      pnl = priceMove * 100 * lots;
+    }
+
+    database.updateVetoShadow(shadow.shadowId, wouldBeOutcome, pnl);
+    console.log(`👻 Shadow resolved [${shadow.portfolioName}] ${wouldBeOutcome}, would_be_pnl=${pnl !== null ? `$${pnl.toFixed(2)}` : 'n/a'}`);
+    this.shadowTracking.delete(shadow.key);
+  }
+
+  // ── Utilities ─────────────────────────────────────────────────────────────
+
   getStats() {
-    const stats = {
-      activeTracking: this.activeTracking.size,
-      signals: Array.from(this.activeTracking.values())
+    return {
+      activePositions: this.activeTracking.size,
+      shadowPositions: this.shadowTracking.size,
+      positions: Array.from(this.activeTracking.values()).map(t => ({
+        key: t.key, portfolio: t.portfolioName, type: t.type, direction: t.direction
+      }))
     };
-    return stats;
   }
 
   stopMonitoring() {
