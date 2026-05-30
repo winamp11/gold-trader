@@ -34,7 +34,8 @@ function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwn
     stop_loss:    decision.stop,
     take_profit:  decision.target,
     decider:      portfolio.name,
-    tag:          decision.tag
+    tag:          decision.tag,
+    reasoning:    decision.reasoning ?? null
   });
 
   const key = `${portfolio.id}_${signalId}`;
@@ -51,6 +52,8 @@ function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwn
     entryPrice:     decision.entry,
     stopLoss:       decision.stop,
     target:         decision.target,
+    tag:            decision.tag       ?? null,
+    reasoning:      decision.reasoning ?? null,
     startTime:      new Date(),
     entryTriggered: false,
     outcome:        null,
@@ -66,7 +69,9 @@ function openVetoShadow({ portfolio, decision, currentPrice }) {
     direction:   decision.direction,
     entry:       decision.entry,
     stop:        decision.stop,
-    target:      decision.target
+    target:      decision.target,
+    tag:         decision.tag       ?? null,
+    reasoning:   decision.reasoning ?? null
   });
 
   const key = `shadow_${shadowId}`;
@@ -80,6 +85,8 @@ function openVetoShadow({ portfolio, decision, currentPrice }) {
     entryPrice:     decision.entry,
     stopLoss:       decision.stop,
     target:         decision.target,
+    tag:            decision.tag       ?? null,
+    reasoning:      decision.reasoning ?? null,
     startTime:      new Date(),
     startPrice:     currentPrice,
     entryTriggered: false,
@@ -102,15 +109,17 @@ async function generateSignalIfTradingHours() {
     const marketData = await twelveData.getMarketDataStaggered();
     const atr        = { h1: marketData.h1.atr, m30: marketData.m30.atr };
     const currentPrice = marketData.h1.price || marketData.m30.price;
-    const lessons    = []; // stub; populated by lesson store in later phase
-
     // Load all three portfolios fresh from DB (balances may have changed)
     const mechPortfolio    = database.getPortfolioByName('mechanical');
     const overlayPortfolio = database.getPortfolioByName('claude_overlay');
     const soloPortfolio    = database.getPortfolioByName('claude_solo');
 
+    // Each Claude account reads its own recent lessons; mechanical gets none.
+    const overlayLessons = database.getRecentLessons(overlayPortfolio.id);
+    const soloLessons    = database.getRecentLessons(soloPortfolio.id);
+
     // ── Mechanical decider ──────────────────────────────────────────────────
-    const mechDecision = await mechanicalDecide(marketData, atr, mechPortfolio, lessons);
+    const mechDecision = await mechanicalDecide(marketData, atr, mechPortfolio, []);
 
     // Persist the mechanical signal (backward compat with /api/signal, history)
     const mechSignal = mechDecision._signal;
@@ -146,9 +155,9 @@ async function generateSignalIfTradingHours() {
     // Check outcomes against fresh price before opening new positions
     outcomeTracker.checkOutcomesWithPrice(currentPrice);
 
-    // ── Claude Overlay decider (stub: mirrors mechanical) ──────────────────
+    // ── Claude Overlay decider ────────────────────────────────────────────
     const overlayDecision = await claudeOverlayDecide(
-      marketData, atr, overlayPortfolio, lessons, mechDecision
+      marketData, atr, overlayPortfolio, overlayLessons, mechDecision
     );
     if (overlayDecision.action === 'TRADE') {
       openPosition({ portfolio: overlayPortfolio, decision: overlayDecision, signalId, currentPrice, isSignalOwner: false });
@@ -156,8 +165,8 @@ async function generateSignalIfTradingHours() {
       openVetoShadow({ portfolio: overlayPortfolio, decision: overlayDecision, currentPrice });
     }
 
-    // ── Claude Solo decider (stub: always NO_TRADE) ────────────────────────
-    const soloDecision = await claudeSoloDecide(marketData, atr, soloPortfolio, lessons);
+    // ── Claude Solo decider ───────────────────────────────────────────────
+    const soloDecision = await claudeSoloDecide(marketData, atr, soloPortfolio, soloLessons);
     if (soloDecision.action === 'TRADE') {
       openPosition({ portfolio: soloPortfolio, decision: soloDecision, signalId, currentPrice, isSignalOwner: false });
     } else if (soloDecision.action === 'VETO') {
@@ -327,19 +336,28 @@ app.get('/api/account/history', (req, res) => {
   }
 });
 
-// Three-account summary — balances, daily P&L, open position counts
+// Three-account summary — balances, win rate, daily P&L, open positions;
+// overlay additionally shows veto stats.
 app.get('/api/accounts', (req, res) => {
   try {
     const accounts = database.getAccountsSummary();
-    // Enrich with in-memory open-position counts
+
+    // In-memory open-position counts
     const openByPortfolio = {};
     for (const t of outcomeTracker.activeTracking.values()) {
       openByPortfolio[t.portfolioId] = (openByPortfolio[t.portfolioId] || 0) + 1;
     }
-    const result = accounts.map(a => ({
-      ...a,
-      open_positions: openByPortfolio[a.id] || 0
-    }));
+
+    const overlayPortfolio = database.getPortfolioByName('claude_overlay');
+
+    const result = accounts.map(a => {
+      const base = { ...a, open_positions: openByPortfolio[a.id] || 0 };
+      if (a.id === overlayPortfolio?.id) {
+        base.veto_stats = database.getVetoStats(a.id);
+      }
+      return base;
+    });
+
     res.json({ accounts: result });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch accounts', message: error.message });

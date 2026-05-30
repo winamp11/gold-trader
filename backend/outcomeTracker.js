@@ -1,5 +1,6 @@
 import database from './database.js';
 import { isTradingHours } from './tradingHours.js';
+import { reflect, reflectVeto } from './deciders/reflector.js';
 
 class OutcomeTracker {
   constructor() {
@@ -22,6 +23,7 @@ class OutcomeTracker {
   //   signalId (nullable — only mechanical updates signals table),
   //   tradeId  (nullable — set when a trade row was created),
   //   direction, lots, startPrice, entryPrice, stopLoss, target,
+  //   tag, reasoning (from the original Claude decision — used by reflector),
   //   startTime, entryTriggered, outcome, maxPrice, minPrice
   startTracking(key, tracking) {
     this.activeTracking.set(key, tracking);
@@ -34,6 +36,7 @@ class OutcomeTracker {
   // shadow shape:
   //   key, shadowId, portfolioId, portfolioName,
   //   direction, lots, startPrice, entryPrice, stopLoss, target,
+  //   tag, reasoning (from the original veto decision — used by reflector),
   //   startTime, entryTriggered, maxPrice, minPrice
   startShadow(key, shadow) {
     this.shadowTracking.set(key, shadow);
@@ -211,6 +214,11 @@ class OutcomeTracker {
 
     console.log(`✅ Position finalized [${tracking.portfolioName}] ${outcome}${metadata.move ? ` (${metadata.direction} ${metadata.move} pts)` : ''}`);
     this.activeTracking.delete(tracking.key);
+
+    // Fire-and-forget journal reflection for Claude accounts only.
+    // reflect() catches all errors internally — never crashes the cycle.
+    reflect(tracking, outcome, pnl)
+      .catch(err => console.error('reflect fire-and-forget error:', err.message));
   }
 
   finalizeShadow(shadow, wouldBeOutcome, exitPrice) {
@@ -230,6 +238,10 @@ class OutcomeTracker {
     database.updateVetoShadow(shadow.shadowId, wouldBeOutcome, pnl);
     console.log(`👻 Shadow resolved [${shadow.portfolioName}] ${wouldBeOutcome}, would_be_pnl=${pnl !== null ? `$${pnl.toFixed(2)}` : 'n/a'}`);
     this.shadowTracking.delete(shadow.key);
+
+    // Fire-and-forget veto reflection for Claude accounts only.
+    reflectVeto(shadow, wouldBeOutcome, pnl)
+      .catch(err => console.error('reflectVeto fire-and-forget error:', err.message));
   }
 
   // ── Utilities ─────────────────────────────────────────────────────────────
