@@ -17,6 +17,7 @@ class OutcomeTracker {
         signalId,
         type: 'GREEN',
         direction: recommendation.direction,
+        lots: recommendation.positionSize || 0.01,
         startPrice: currentPrice,
         entryPrice: recommendation.entry,
         stopLoss: recommendation.stop,
@@ -173,21 +174,26 @@ class OutcomeTracker {
     tracking.endTime = new Date();
     tracking.exitPrice = exitPrice;
 
-    // Calculate P&L for GREEN signals
+    // Use exact order levels as paper fill prices for clean P&L calculation.
+    // Gold contract spec: 1 standard lot = 100 oz → $100 per $1 price move per lot.
     let pnl = null;
-    if (tracking.type === 'GREEN' && outcome === 'TARGET_HIT') {
-      const points = Math.abs(tracking.target - tracking.entryPrice);
-      pnl = points * 10 * 0.01; // Rough estimate for 0.01 lot
-    } else if (tracking.type === 'GREEN' && outcome === 'STOP_HIT') {
-      const points = Math.abs(tracking.entryPrice - tracking.stopLoss);
-      pnl = -points * 10 * 0.01;
+    let fillPrice = exitPrice;
+    if (outcome === 'TARGET_HIT') fillPrice = tracking.target;
+    else if (outcome === 'STOP_HIT') fillPrice = tracking.stopLoss;
+
+    if (tracking.type === 'GREEN' && (outcome === 'TARGET_HIT' || outcome === 'STOP_HIT')) {
+      const lots = tracking.lots || 0.01;
+      const priceMove = tracking.direction === 'LONG'
+        ? fillPrice - tracking.entryPrice
+        : tracking.entryPrice - fillPrice;
+      pnl = priceMove * 100 * lots;
     }
 
     // Update database
     database.updateSignalOutcome(tracking.signalId, {
       outcome,
       outcome_timestamp: tracking.endTime.toISOString(),
-      outcome_price: exitPrice,
+      outcome_price: fillPrice,
       outcome_pnl: pnl,
       metadata: JSON.stringify(metadata)
     });
