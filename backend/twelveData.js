@@ -194,7 +194,7 @@ class TwelveDataService {
     }
   }
 
-  // 3-batch stagger — 17 calls/cycle spread so no 60-second window exceeds 8 calls.
+  // 3-batch stagger — 17 calls/cycle, max 7 in any 60-second window.
   //
   // ATR sources:
   //   H1, M30 — API /atr primary, local OHLC fallback if API errors
@@ -202,10 +202,10 @@ class TwelveDataService {
   //
   // Batch timing vs 1-min price poller worst case:
   //   t=0   Batch A (7 calls)
-  //   t=60  price poller (1 call)          ← 7+1 = 8 across [60,120)
-  //   t=65  Batch B (7 calls)
-  //   t=120 price poller (1 call)          ← 1+3 = 4 across [120,180)
-  //   t=130 Batch C (3 calls)
+  //   t=60  price poller (1 call)
+  //   t=65  Batch B (6 calls)             ← 6+1 = 7 across [60,120) ✓
+  //   t=120 price poller (1 call)
+  //   t=130 Batch C (4 calls)             ← 4+1 = 5 across [120,180) ✓
   async getMarketDataStaggered(symbol = 'XAU/USD') {
     console.log('\n🚀 Starting staggered market data fetch (3 batches, 17 calls)...\n');
     this.resetCallCount();
@@ -234,9 +234,9 @@ class TwelveDataService {
       console.log('⏳ Waiting 65 s before batch B...');
       await new Promise(resolve => setTimeout(resolve, 65000));
 
-      // === BATCH B (7 calls) — RSI M30+M15+M5, ATR H1+M30 (API), MACD H4+H1 ===
-      console.log('📞 Batch B/3: RSI M30+M15+M5 + ATR H1+M30 + MACD H4+H1 = 7 calls...');
-      const [rsiM30, rsiM15, rsiM5, h1AtrApi, m30AtrApi, macdH4, macdH1] = await Promise.all([
+      // === BATCH B (6 calls) — RSI M30+M15+M5, ATR H1+M30 (API), MACD H4 ===
+      console.log('📞 Batch B/3: RSI M30+M15+M5 + ATR H1+M30 + MACD H4 = 6 calls...');
+      const [rsiM30, rsiM15, rsiM5, h1AtrApi, m30AtrApi, macdH4] = await Promise.all([
         this.fetchRSI(symbol, '30min'),
         this.fetchRSI(symbol, '15min'),
         this.fetchRSI(symbol, '5min'),
@@ -244,8 +244,7 @@ class TwelveDataService {
           .catch(e => { console.warn(`⚠️  H1 ATR API failed (${e.message}) — local fallback`); return null; }),
         this.fetchATR(symbol, '30min')
           .catch(e => { console.warn(`⚠️  M30 ATR API failed (${e.message}) — local fallback`); return null; }),
-        this.fetchMACD(symbol, '4h'),
-        this.fetchMACD(symbol, '1h')
+        this.fetchMACD(symbol, '4h')
       ]);
       console.log(`✅ Batch B complete (${this.callCount} calls)`);
       console.log(`📐 ATR — H1: ${h1AtrApi !== null ? 'API' : 'local'}, M30: ${m30AtrApi !== null ? 'API' : 'local'}`);
@@ -253,9 +252,10 @@ class TwelveDataService {
       console.log('⏳ Waiting 65 s before batch C...');
       await new Promise(resolve => setTimeout(resolve, 65000));
 
-      // === BATCH C (3 calls) — MACD M30+M15+M5 ===
-      console.log('📞 Batch C/3: MACD M30+M15+M5 = 3 calls...');
-      const [macdM30, macdM15, macdM5] = await Promise.all([
+      // === BATCH C (4 calls) — MACD H1+M30+M15+M5 ===
+      console.log('📞 Batch C/3: MACD H1+M30+M15+M5 = 4 calls...');
+      const [macdH1, macdM30, macdM15, macdM5] = await Promise.all([
+        this.fetchMACD(symbol, '1h'),
         this.fetchMACD(symbol, '30min'),
         this.fetchMACD(symbol, '15min'),
         this.fetchMACD(symbol, '5min')
