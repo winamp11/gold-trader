@@ -1,57 +1,54 @@
-// Trading hours configuration for gold market
-// Dubai/UAE timezone (GMT+4)
+// Trading hours: single NY session window, Asia/Dubai timezone (GMT+4)
+// 16:30–20:30 UAE = 08:30–12:30 UTC = NY open through mid-morning
+
+const SESSION_START = 16 * 60 + 30; // 990 minutes since midnight
+const SESSION_END   = 20 * 60 + 30; // 1230 minutes since midnight
+
+function uaeMinutes() {
+  const uaeTime = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Dubai' }));
+  return { mins: uaeTime.getHours() * 60 + uaeTime.getMinutes(), day: uaeTime.getDay(), uaeTime };
+}
 
 export function isTradingHours() {
-  const now = new Date();
-  
-  // Convert to UAE time (GMT+4)
-  const uaeTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Dubai' }));
-  const hour = uaeTime.getHours();
-  const day = uaeTime.getDay(); // 0 = Sunday, 6 = Saturday
-  
-  // Markets closed on weekends
+  const { mins, day, uaeTime } = uaeMinutes();
+
   if (day === 0 || day === 6) {
-    console.log(`⏸️  Weekend (${day === 6 ? 'Saturday' : 'Sunday'}) - markets closed`);
+    console.log(`⏸️  Weekend - markets closed`);
     return false;
   }
-  
-  // Trading hours: 11:00-15:00 and 17:00-21:00 UAE time (8 hours total, split sessions)
-  // Morning session: London open + overlap (11:00-15:00)
-  // Evening session: NY session + London close (17:00-21:00)
-  const isMorningSession = hour >= 11 && hour < 15;
-  const isEveningSession = hour >= 17 && hour < 21;
-  const isTradingTime = isMorningSession || isEveningSession;
-  
-  if (!isTradingTime) {
-    console.log(`⏸️  Outside trading hours (${hour}:00 UAE time). Skipping signal generation.`);
+
+  const inSession = mins >= SESSION_START && mins < SESSION_END;
+
+  if (!inSession) {
+    const h = uaeTime.getHours().toString().padStart(2, '0');
+    const m = uaeTime.getMinutes().toString().padStart(2, '0');
+    console.log(`⏸️  Outside trading hours (${h}:${m} UAE). Session: 16:30–20:30.`);
   }
-  
-  return isTradingTime;
+
+  return inSession;
 }
 
 export function getNextTradingTime() {
-  const now = new Date();
-  const uaeTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Dubai' }));
-  const hour = uaeTime.getHours();
-  const day = uaeTime.getDay();
-  
-  // If Saturday
-  if (day === 6) {
-    return 'Markets closed (weekend). Opens Monday 11:00 UAE';
+  const { mins, day } = uaeMinutes();
+
+  if (day === 6 || day === 0) {
+    return 'Markets closed (weekend). Opens Monday 16:30 UAE';
   }
-  
-  // If Sunday
-  if (day === 0) {
-    return 'Markets closed (weekend). Opens Monday 11:00 UAE';
+
+  if (mins < SESSION_START) {
+    const remaining = SESSION_START - mins;
+    const h = Math.floor(remaining / 60);
+    const m = remaining % 60;
+    return h > 0
+      ? `${h}h ${m}m until session (16:30 UAE)`
+      : `${m}m until session (16:30 UAE)`;
   }
-  
-  if (hour < 11) {
-    return `${11 - hour} hours until morning session (11:00 UAE)`;
-  } else if (hour >= 15 && hour < 17) {
-    return `${17 - hour} hours until evening session (17:00 UAE)`;
-  } else if (hour >= 21) {
-    return `Markets closed. Opens tomorrow 11:00 UAE`;
+
+  if (mins >= SESSION_END) {
+    // Friday after close → next Monday; otherwise tomorrow
+    const nextDay = day === 5 ? 'Monday' : 'tomorrow';
+    return `Markets closed. Opens ${nextDay} 16:30 UAE`;
   }
-  
+
   return 'Currently in trading hours';
 }
