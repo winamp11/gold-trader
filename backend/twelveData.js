@@ -97,6 +97,24 @@ class TwelveDataService {
     }
   }
 
+  // Compute ATR(period) from Twelve Data time_series values (newest-first array).
+  // No extra API call — uses the OHLC already fetched by fetchTimeSeries.
+  computeATR(values, period = 14) {
+    if (!values || values.length < period + 1) return null;
+    // Reverse to chronological order (oldest first)
+    const candles = [...values].reverse();
+    const trs = [];
+    for (let i = 1; i < candles.length; i++) {
+      const high = parseFloat(candles[i].high);
+      const low = parseFloat(candles[i].low);
+      const prevClose = parseFloat(candles[i - 1].close);
+      const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
+      trs.push(tr);
+    }
+    const recent = trs.slice(-period);
+    return recent.reduce((sum, v) => sum + v, 0) / recent.length;
+  }
+
   async fetchAllIndicators(symbol, interval) {
     try {
       console.log(`\n📊 Fetching indicators for ${symbol} ${interval}...`);
@@ -173,6 +191,13 @@ class TwelveDataService {
       ]);
 
       console.log(`✅ Batch 1 complete (${this.callCount} calls)`);
+
+      // Compute ATR(14) from the fetched OHLC — no extra API call
+      const h4Atr = this.computeATR(batch1[0].values);
+      const h1Atr = this.computeATR(batch1[1].values);
+      const m30Atr = this.computeATR(batch1[2].values);
+      const m15Atr = this.computeATR(batch1[3].values);
+
       console.log('⏳ Waiting 90 seconds before batch 2...');
       
       // Wait 1.5 minutes (90 seconds) before next batch
@@ -200,7 +225,8 @@ class TwelveDataService {
           rsi: batch1[4],
           macd: batch2[0].macd,
           macd_signal: batch2[0].signal,
-          macd_hist: batch2[0].histogram
+          macd_hist: batch2[0].histogram,
+          atr: h4Atr
         },
         h1: {
           interval: '1h',
@@ -209,7 +235,8 @@ class TwelveDataService {
           rsi: batch1[5],
           macd: batch2[1].macd,
           macd_signal: batch2[1].signal,
-          macd_hist: batch2[1].histogram
+          macd_hist: batch2[1].histogram,
+          atr: h1Atr
         },
         m30: {
           interval: '30min',
@@ -218,7 +245,8 @@ class TwelveDataService {
           rsi: batch1[6],
           macd: batch2[2].macd,
           macd_signal: batch2[2].signal,
-          macd_hist: batch2[2].histogram
+          macd_hist: batch2[2].histogram,
+          atr: m30Atr
         },
         m15: {
           interval: '15min',
@@ -227,7 +255,8 @@ class TwelveDataService {
           rsi: batch1[7],
           macd: batch2[3].macd,
           macd_signal: batch2[3].signal,
-          macd_hist: batch2[3].histogram
+          macd_hist: batch2[3].histogram,
+          atr: m15Atr
         },
         apiCallCount: this.callCount
       };
