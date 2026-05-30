@@ -65,8 +65,10 @@ async function generateSignalIfTradingHours() {
     // First batch: 8 calls (time_series + RSI for all timeframes)
     console.log('📞 Making first batch of API calls (8 calls)...');
     const marketData = await twelveData.getMarketDataStaggered();
-    
-    const signal = signalEngine.generateSignal(marketData, 400); // Default balance
+
+    const portfolio = database.getMechanicalPortfolio();
+    const accountBalance = portfolio?.current_balance ?? 100000;
+    const signal = signalEngine.generateSignal(marketData, accountBalance);
     
     // Save to database
     const signalId = database.saveSignal(signal);

@@ -187,6 +187,15 @@ class OutcomeTracker {
         ? fillPrice - tracking.entryPrice
         : tracking.entryPrice - fillPrice;
       pnl = priceMove * 100 * lots;
+
+      const portfolio = database.getMechanicalPortfolio();
+      if (portfolio) {
+        database.updatePortfolioBalance(portfolio.id, pnl);
+        const today = new Date().toISOString().split('T')[0];
+        database.upsertDailyPnl(today, portfolio.id, pnl, pnl > 0);
+        const newBalance = portfolio.current_balance + pnl;
+        console.log(`💰 [${portfolio.name}] P&L ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} → balance $${newBalance.toFixed(2)}`);
+      }
     }
 
     // Update database

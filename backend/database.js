@@ -120,6 +120,39 @@ class DatabaseService {
       )
     `);
 
+    // Virtual portfolios - one row per paper-trading account
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS portfolios (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        starting_balance REAL NOT NULL,
+        current_balance REAL NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+
+    // Seed the mechanical portfolio once
+    this.db.exec(`
+      INSERT OR IGNORE INTO portfolios (name, starting_balance, current_balance)
+      VALUES ('mechanical', 100000, 100000)
+    `);
+
+    // Daily P&L roll-up per portfolio
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS account_pnl_daily (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT NOT NULL,
+        portfolio_id INTEGER NOT NULL,
+        realized_pnl REAL NOT NULL DEFAULT 0,
+        open_pnl REAL NOT NULL DEFAULT 0,
+        trades_count INTEGER NOT NULL DEFAULT 0,
+        wins INTEGER NOT NULL DEFAULT 0,
+        losses INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(date, portfolio_id),
+        FOREIGN KEY (portfolio_id) REFERENCES portfolios(id)
+      )
+    `);
+
     console.log('✅ Database initialized');
   }
 
@@ -391,6 +424,30 @@ class DatabaseService {
     `);
 
     stmt.run(outcome, new Date().toISOString(), price, pnl, patternId);
+  }
+
+  // ===== PORTFOLIO ACCOUNTING =====
+
+  getMechanicalPortfolio() {
+    return this.db.prepare('SELECT * FROM portfolios WHERE name = ?').get('mechanical');
+  }
+
+  updatePortfolioBalance(portfolioId, pnlDelta) {
+    this.db.prepare(
+      'UPDATE portfolios SET current_balance = current_balance + ? WHERE id = ?'
+    ).run(pnlDelta, portfolioId);
+  }
+
+  upsertDailyPnl(date, portfolioId, pnlDelta, isWin) {
+    this.db.prepare(`
+      INSERT INTO account_pnl_daily (date, portfolio_id, realized_pnl, trades_count, wins, losses)
+      VALUES (?, ?, ?, 1, ?, ?)
+      ON CONFLICT(date, portfolio_id) DO UPDATE SET
+        realized_pnl  = realized_pnl + excluded.realized_pnl,
+        trades_count  = trades_count + 1,
+        wins          = wins + excluded.wins,
+        losses        = losses + excluded.losses
+    `).run(date, portfolioId, pnlDelta, isWin ? 1 : 0, isWin ? 0 : 1);
   }
 
   close() {
