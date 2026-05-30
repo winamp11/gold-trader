@@ -36,7 +36,7 @@ function startPricePoller() {
     } catch (error) {
       console.error('❌ [POLLER] Price check failed:', error.message);
     }
-  }, 2 * 60 * 1000);
+  }, 60 * 1000); // 1 minute
 }
 
 // Background job to generate signals every 8 minutes during trading hours
@@ -358,9 +358,9 @@ app.listen(PORT, () => {
   console.log(`📡 Server running on http://localhost:${PORT}`);
   console.log(`🔑 API Key configured: ${process.env.TWELVE_DATA_API_KEY ? 'YES' : 'NO'}`);
   console.log(`⏰ Trading window: 16:30–20:30 UAE (4 h, NY session, Mon–Fri)`);
-  console.log(`🔄 Signal cron: every 8 min → ~30 cycles × 12 calls = 360 calls/day`);
-  console.log(`📡 Price poller: every 2 min → ~120 checks × 1 call  = 120 calls/day`);
-  console.log(`📊 Projected daily total: ~480 calls  (budget: 800, headroom: ~320)`);
+  console.log(`🔄 Signal cron:  every 8 min  → ~30 cycles × 17 calls = ~510 calls/day`);
+  console.log(`📡 Price poller: every 1 min  → ~240 checks × 1 call  = ~240 calls/day`);
+  console.log(`📊 Projected daily total: ~750 calls  (budget: 800, margin: ~50)`);
   console.log('='.repeat(50) + '\n');
   
   // Start background signal generation
