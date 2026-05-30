@@ -202,6 +202,10 @@ function startBackgroundSignalGeneration() {
 
 // ── REST API ───────────────────────────────────────────────────────────────
 
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', service: 'gold-trader-backend', timestamp: new Date().toISOString() });
+});
+
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
