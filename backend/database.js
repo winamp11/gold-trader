@@ -110,14 +110,20 @@ class DatabaseService {
         notes TEXT,
         decider TEXT,
         tag TEXT,
+        reasoning TEXT,
         FOREIGN KEY (signal_id) REFERENCES signals(id),
         FOREIGN KEY (portfolio_id) REFERENCES portfolios(id)
       )
     `);
 
-    // Migrate trades table — add portfolio_id, decider, tag (for DBs created before Phase 1)
+    // Migrate trades table — add columns added after initial schema
     const tradeCols = this.db.prepare('PRAGMA table_info(trades)').all().map(c => c.name);
-    for (const [col, def] of [['portfolio_id', 'INTEGER DEFAULT 1'], ['decider', 'TEXT'], ['tag', 'TEXT']]) {
+    for (const [col, def] of [
+      ['portfolio_id', 'INTEGER DEFAULT 1'],
+      ['decider',      'TEXT'],
+      ['tag',          'TEXT'],
+      ['reasoning',    'TEXT'],
+    ]) {
       if (!tradeCols.includes(col)) {
         this.db.exec(`ALTER TABLE trades ADD COLUMN ${col} ${def}`);
         console.log(`🔧 Migrated: added trades.${col}`);
@@ -165,9 +171,34 @@ class DatabaseService {
         entry REAL NOT NULL,
         stop REAL NOT NULL,
         target REAL NOT NULL,
+        tag TEXT,
+        reasoning TEXT,
         would_be_outcome TEXT,
         would_be_pnl REAL,
         shadow_metadata TEXT,
+        FOREIGN KEY (portfolio_id) REFERENCES portfolios(id)
+      )
+    `);
+
+    // Migrate veto_shadows — add tag and reasoning (for DBs created before Phase 3)
+    const shadowCols = this.db.prepare('PRAGMA table_info(veto_shadows)').all().map(c => c.name);
+    for (const col of ['tag', 'reasoning']) {
+      if (!shadowCols.includes(col)) {
+        this.db.exec(`ALTER TABLE veto_shadows ADD COLUMN ${col} TEXT`);
+        console.log(`🔧 Migrated: added veto_shadows.${col}`);
+      }
+    }
+
+    // Journal — per-account learning log (Claude accounts only; mechanical writes nothing)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS journal (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        portfolio_id INTEGER NOT NULL,
+        timestamp TEXT NOT NULL,
+        signal_or_trade_id INTEGER,
+        entry_type TEXT NOT NULL,
+        lesson_text TEXT NOT NULL,
+        tag TEXT,
         FOREIGN KEY (portfolio_id) REFERENCES portfolios(id)
       )
     `);
@@ -332,25 +363,24 @@ class DatabaseService {
   }
 
   saveTrade(tradeData) {
-    const stmt = this.db.prepare(`
+    const info = this.db.prepare(`
       INSERT INTO trades (
         signal_id, portfolio_id, timestamp, direction, entry_price, lot_size,
-        stop_loss, take_profit, notes, decider, tag
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    const info = stmt.run(
-      tradeData.signal_id || null,
+        stop_loss, take_profit, notes, decider, tag, reasoning
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      tradeData.signal_id   || null,
       tradeData.portfolio_id || 1,
       tradeData.timestamp,
       tradeData.direction,
       tradeData.entry_price,
       tradeData.lot_size,
-      tradeData.stop_loss || null,
+      tradeData.stop_loss   || null,
       tradeData.take_profit || null,
-      tradeData.notes || null,
-      tradeData.decider || null,
-      tradeData.tag || null
+      tradeData.notes       || null,
+      tradeData.decider     || null,
+      tradeData.tag         || null,
+      tradeData.reasoning   || null
     );
 
     console.log(`💾 Trade saved (ID: ${info.lastInsertRowid}, portfolio: ${tradeData.portfolio_id || 1})`);
@@ -495,11 +525,11 @@ class DatabaseService {
 
   // ===== VETO SHADOW TRACKING =====
 
-  saveVetoShadow({ portfolioId, direction, entry, stop, target }) {
+  saveVetoShadow({ portfolioId, direction, entry, stop, target, tag = null, reasoning = null }) {
     const id = this.db.prepare(`
-      INSERT INTO veto_shadows (portfolio_id, timestamp, direction, entry, stop, target)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(portfolioId, new Date().toISOString(), direction, entry, stop, target).lastInsertRowid;
+      INSERT INTO veto_shadows (portfolio_id, timestamp, direction, entry, stop, target, tag, reasoning)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(portfolioId, new Date().toISOString(), direction, entry, stop, target, tag, reasoning).lastInsertRowid;
     console.log(`👻 Veto shadow saved (ID: ${id}, portfolio: ${portfolioId})`);
     return id;
   }
@@ -513,26 +543,91 @@ class DatabaseService {
     console.log(`👻 Veto shadow ${shadowId} resolved: ${wouldBeOutcome}`);
   }
 
+  // ===== JOURNAL =====
+
+  saveJournalEntry({ portfolioId, signalOrTradeId = null, entryType, lessonText, tag = null }) {
+    const id = this.db.prepare(`
+      INSERT INTO journal (portfolio_id, timestamp, signal_or_trade_id, entry_type, lesson_text, tag)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(portfolioId, new Date().toISOString(), signalOrTradeId, entryType, lessonText, tag).lastInsertRowid;
+    console.log(`📓 Journal entry saved (ID: ${id}, portfolio: ${portfolioId}, type: ${entryType})`);
+    return id;
+  }
+
+  // Returns last `limit` entries, losses-first within recent entries, with recurring flag.
+  getRecentLessons(portfolioId, limit = 8) {
+    const rows = this.db.prepare(`
+      SELECT lesson_text, tag, entry_type, timestamp
+      FROM journal
+      WHERE portfolio_id = ?
+      ORDER BY
+        CASE entry_type WHEN 'loss' THEN 0 WHEN 'veto' THEN 1 ELSE 2 END ASC,
+        timestamp DESC
+      LIMIT ?
+    `).all(portfolioId, limit);
+
+    // Mark recurring tags (appear more than once in this slice)
+    const tagCount = {};
+    for (const r of rows) { if (r.tag) tagCount[r.tag] = (tagCount[r.tag] || 0) + 1; }
+    return rows.map(r => ({ ...r, recurring: (tagCount[r.tag] ?? 0) > 1 }));
+  }
+
   // ===== ACCOUNTS SUMMARY =====
 
   getAccountsSummary() {
     const today = new Date().toISOString().split('T')[0];
-    return this.db.prepare(`
+    // Main balances + daily P&L, enriched with all-time closed-trade win-rate via subquery
+    const rows = this.db.prepare(`
       SELECT
         p.id,
         p.name,
         p.starting_balance,
         p.current_balance,
-        COALESCE(d.realized_pnl, 0)  AS daily_realized_pnl,
-        COALESCE(d.open_pnl, 0)      AS daily_open_pnl,
-        COALESCE(d.trades_count, 0)  AS daily_trades,
-        COALESCE(d.wins, 0)          AS daily_wins,
-        COALESCE(d.losses, 0)        AS daily_losses
+        COALESCE(d.realized_pnl, 0)   AS daily_realized_pnl,
+        COALESCE(d.open_pnl, 0)       AS daily_open_pnl,
+        COALESCE(d.trades_count, 0)   AS daily_trades,
+        COALESCE(d.wins, 0)           AS daily_wins,
+        COALESCE(d.losses, 0)         AS daily_losses,
+        COALESCE(wr.closed_trades, 0) AS closed_trades,
+        COALESCE(wr.wins, 0)          AS wins,
+        COALESCE(wr.losses, 0)        AS losses
       FROM portfolios p
       LEFT JOIN account_pnl_daily d
         ON d.portfolio_id = p.id AND d.date = ?
+      LEFT JOIN (
+        SELECT
+          portfolio_id,
+          COUNT(*)                                             AS closed_trades,
+          SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)           AS wins,
+          SUM(CASE WHEN pnl IS NOT NULL AND pnl <= 0 THEN 1 ELSE 0 END) AS losses
+        FROM trades
+        WHERE exit_reason IS NOT NULL
+        GROUP BY portfolio_id
+      ) wr ON wr.portfolio_id = p.id
       ORDER BY p.id
     `).all(today);
+
+    return rows.map(r => ({
+      ...r,
+      win_rate: r.closed_trades > 0
+        ? Math.round((r.wins / r.closed_trades) * 1000) / 10
+        : null
+    }));
+  }
+
+  getVetoStats(portfolioId) {
+    return this.db.prepare(`
+      SELECT
+        COUNT(*)                                                              AS veto_count,
+        SUM(CASE WHEN would_be_outcome = 'STOP_HIT'
+                 OR (would_be_pnl IS NOT NULL AND would_be_pnl < 0)
+                 THEN 1 ELSE 0 END)                                          AS correctly_avoided,
+        SUM(CASE WHEN would_be_outcome = 'TARGET_HIT'
+                 OR (would_be_pnl IS NOT NULL AND would_be_pnl > 0)
+                 THEN 1 ELSE 0 END)                                          AS missed_wins
+      FROM veto_shadows
+      WHERE portfolio_id = ?
+    `).get(portfolioId) ?? { veto_count: 0, correctly_avoided: 0, missed_wins: 0 };
   }
 
   updatePortfolioBalance(portfolioId, pnlDelta) {
