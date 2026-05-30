@@ -33,16 +33,16 @@ class DatabaseService {
         
         h4_macd REAL,
         h4_rsi REAL,
-        h4_mfi REAL,
+        h4_atr REAL,
         h1_macd REAL,
         h1_rsi REAL,
-        h1_mfi REAL,
+        h1_atr REAL,
         m30_macd REAL,
         m30_rsi REAL,
-        m30_mfi REAL,
+        m30_atr REAL,
         m15_macd REAL,
         m15_rsi REAL,
-        m15_mfi REAL,
+        m15_atr REAL,
         
         outcome TEXT,
         outcome_timestamp TEXT,
@@ -51,6 +51,21 @@ class DatabaseService {
         outcome_metadata TEXT
       )
     `);
+
+    // Migrate existing databases: drop MFI columns, add ATR columns
+    const sigCols = this.db.prepare('PRAGMA table_info(signals)').all().map(c => c.name);
+    for (const col of ['h4_mfi', 'h1_mfi', 'm30_mfi', 'm15_mfi']) {
+      if (sigCols.includes(col)) {
+        this.db.exec(`ALTER TABLE signals DROP COLUMN ${col}`);
+        console.log(`🔧 Migrated: dropped signals.${col}`);
+      }
+    }
+    for (const col of ['h4_atr', 'h1_atr', 'm30_atr', 'm15_atr']) {
+      if (!sigCols.includes(col)) {
+        this.db.exec(`ALTER TABLE signals ADD COLUMN ${col} REAL`);
+        console.log(`🔧 Migrated: added signals.${col}`);
+      }
+    }
 
     // Autochartist patterns table - stores manually logged patterns from Autochartist
     this.db.exec(`

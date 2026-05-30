@@ -77,34 +77,6 @@ class TwelveDataService {
     }
   }
 
-  async fetchMFI(symbol, interval, timePeriod = 14) {
-    const url = `${BASE_URL}/mfi?apikey=${API_KEY}&symbol=${symbol}&interval=${interval}&time_period=${timePeriod}`;
-    
-    try {
-      const response = await fetch(url);
-      const data = await response.json();
-      
-      this.callCount++;
-      console.log(`API Call #${this.callCount}: MFI ${symbol} ${interval}`);
-      
-      // DEBUG: Log raw MFI response
-      console.log(`🔍 DEBUG MFI Response:`, JSON.stringify(data, null, 2));
-      
-      if (data.status === 'error') {
-        console.error(`❌ MFI API Error: ${data.message || 'Unknown error'}`);
-        throw new Error(data.message || 'API error');
-      }
-      
-      const mfiValue = parseFloat(data.values?.[0]?.mfi || 0);
-      console.log(`📊 MFI Value parsed: ${mfiValue}`);
-      
-      return mfiValue;
-    } catch (error) {
-      console.error('Error fetching MFI:', error.message);
-      throw error;
-    }
-  }
-
   async fetchAllIndicators(symbol, interval) {
     try {
       console.log(`\n📊 Fetching indicators for ${symbol} ${interval}...`);
