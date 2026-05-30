@@ -43,7 +43,10 @@ class DatabaseService {
         m15_macd REAL,
         m15_rsi REAL,
         m15_atr REAL,
-        
+        m5_macd REAL,
+        m5_rsi REAL,
+        m5_atr REAL,
+
         outcome TEXT,
         outcome_timestamp TEXT,
         outcome_price REAL,
@@ -60,7 +63,7 @@ class DatabaseService {
         console.log(`🔧 Migrated: dropped signals.${col}`);
       }
     }
-    for (const col of ['h4_atr', 'h1_atr', 'm30_atr', 'm15_atr']) {
+    for (const col of ['h4_atr', 'h1_atr', 'm30_atr', 'm15_atr', 'm5_macd', 'm5_rsi', 'm5_atr']) {
       if (!sigCols.includes(col)) {
         this.db.exec(`ALTER TABLE signals ADD COLUMN ${col} REAL`);
         console.log(`🔧 Migrated: added signals.${col}`);
@@ -164,8 +167,9 @@ class DatabaseService {
         h4_macd, h4_rsi, h4_atr,
         h1_macd, h1_rsi, h1_atr,
         m30_macd, m30_rsi, m30_atr,
-        m15_macd, m15_rsi, m15_atr
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        m15_macd, m15_rsi, m15_atr,
+        m5_macd, m5_rsi, m5_atr
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const rec = signalData.recommendation || {};
@@ -195,7 +199,10 @@ class DatabaseService {
       md.m30?.atr ?? null,
       tf.m15?.macd ?? null,
       tf.m15?.rsi ?? null,
-      md.m15?.atr ?? null
+      md.m15?.atr ?? null,
+      md.m5?.macd ?? null,
+      md.m5?.rsi ?? null,
+      md.m5?.atr ?? null
     );
 
     console.log(`💾 Signal saved to database (ID: ${info.lastInsertRowid})`);

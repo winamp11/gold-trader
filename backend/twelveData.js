@@ -194,99 +194,121 @@ class TwelveDataService {
     }
   }
 
-  // Staggered version - splits 12 calls into 2 batches to stay under 8/min limit
+  // 3-batch stagger — 17 calls/cycle spread so no 60-second window exceeds 8 calls.
+  //
+  // ATR sources:
+  //   H1, M30 — API /atr primary, local OHLC fallback if API errors
+  //   H4, M15, M5 — local OHLC only (no API call allocated)
+  //
+  // Batch timing vs 1-min price poller worst case:
+  //   t=0   Batch A (7 calls)
+  //   t=60  price poller (1 call)          ← 7+1 = 8 across [60,120)
+  //   t=65  Batch B (7 calls)
+  //   t=120 price poller (1 call)          ← 1+3 = 4 across [120,180)
+  //   t=130 Batch C (3 calls)
   async getMarketDataStaggered(symbol = 'XAU/USD') {
-    console.log('\n🚀 Starting staggered market data fetch...\n');
+    console.log('\n🚀 Starting staggered market data fetch (3 batches, 17 calls)...\n');
     this.resetCallCount();
-    
+
     try {
-      // BATCH 1: First 8 calls (time_series + RSI for all timeframes)
-      console.log('📞 Batch 1/2: Fetching time_series & RSI (8 calls)...');
-      const batch1 = await Promise.all([
-        this.fetchTimeSeries(symbol, '4h', 50),
-        this.fetchTimeSeries(symbol, '1h', 50),
-        this.fetchTimeSeries(symbol, '30min', 50),
-        this.fetchTimeSeries(symbol, '15min', 50),
-        this.fetchRSI(symbol, '4h'),
-        this.fetchRSI(symbol, '1h'),
+      // === BATCH A (7 calls) — all time_series + RSI for H4 and H1 ===
+      console.log('📞 Batch A/3: time_series×5 + RSI H4+H1 = 7 calls...');
+      const batchA = await Promise.all([
+        this.fetchTimeSeries(symbol, '4h',    50),  // [0]
+        this.fetchTimeSeries(symbol, '1h',    50),  // [1]
+        this.fetchTimeSeries(symbol, '30min', 50),  // [2]
+        this.fetchTimeSeries(symbol, '15min', 50),  // [3]
+        this.fetchTimeSeries(symbol, '5min',  50),  // [4]
+        this.fetchRSI(symbol, '4h'),                // [5]
+        this.fetchRSI(symbol, '1h')                 // [6]
+      ]);
+      console.log(`✅ Batch A complete (${this.callCount} calls)`);
+
+      // Local ATR for all timeframes — computed from OHLC already in hand
+      const localH4Atr  = this.computeATR(batchA[0].values);
+      const localH1Atr  = this.computeATR(batchA[1].values);
+      const localM30Atr = this.computeATR(batchA[2].values);
+      const localM15Atr = this.computeATR(batchA[3].values);
+      const localM5Atr  = this.computeATR(batchA[4].values);
+
+      console.log('⏳ Waiting 65 s before batch B...');
+      await new Promise(resolve => setTimeout(resolve, 65000));
+
+      // === BATCH B (7 calls) — RSI M30+M15+M5, ATR H1+M30 (API), MACD H4+H1 ===
+      console.log('📞 Batch B/3: RSI M30+M15+M5 + ATR H1+M30 + MACD H4+H1 = 7 calls...');
+      const [rsiM30, rsiM15, rsiM5, h1AtrApi, m30AtrApi, macdH4, macdH1] = await Promise.all([
         this.fetchRSI(symbol, '30min'),
-        this.fetchRSI(symbol, '15min')
-      ]);
-
-      console.log(`✅ Batch 1 complete (${this.callCount} calls)`);
-
-      // Compute ATR(14) from the fetched OHLC — no extra API call
-      const h4Atr = this.computeATR(batch1[0].values);
-      const h1Atr = this.computeATR(batch1[1].values);
-      const m30Atr = this.computeATR(batch1[2].values);
-      const m15Atr = this.computeATR(batch1[3].values);
-
-      console.log('⏳ Waiting 90 seconds before batch 2...');
-      
-      // Wait 1.5 minutes (90 seconds) before next batch
-      await new Promise(resolve => setTimeout(resolve, 90000));
-
-      // BATCH 2: Next 4 calls (MACD for all timeframes)
-      console.log('📞 Batch 2/2: Fetching MACD (4 calls)...');
-      const batch2 = await Promise.all([
+        this.fetchRSI(symbol, '15min'),
+        this.fetchRSI(symbol, '5min'),
+        this.fetchATR(symbol, '1h')
+          .catch(e => { console.warn(`⚠️  H1 ATR API failed (${e.message}) — local fallback`); return null; }),
+        this.fetchATR(symbol, '30min')
+          .catch(e => { console.warn(`⚠️  M30 ATR API failed (${e.message}) — local fallback`); return null; }),
         this.fetchMACD(symbol, '4h'),
-        this.fetchMACD(symbol, '1h'),
-        this.fetchMACD(symbol, '30min'),
-        this.fetchMACD(symbol, '15min')
+        this.fetchMACD(symbol, '1h')
       ]);
+      console.log(`✅ Batch B complete (${this.callCount} calls)`);
+      console.log(`📐 ATR — H1: ${h1AtrApi !== null ? 'API' : 'local'}, M30: ${m30AtrApi !== null ? 'API' : 'local'}`);
 
-      console.log(`✅ Batch 2 complete (${this.callCount} total calls)`);
+      console.log('⏳ Waiting 65 s before batch C...');
+      await new Promise(resolve => setTimeout(resolve, 65000));
 
-      // Combine results
+      // === BATCH C (3 calls) — MACD M30+M15+M5 ===
+      console.log('📞 Batch C/3: MACD M30+M15+M5 = 3 calls...');
+      const [macdM30, macdM15, macdM5] = await Promise.all([
+        this.fetchMACD(symbol, '30min'),
+        this.fetchMACD(symbol, '15min'),
+        this.fetchMACD(symbol, '5min')
+      ]);
+      console.log(`✅ Batch C complete — ${this.callCount} total calls this cycle`);
+
       const result = {
         symbol,
         timestamp: new Date().toISOString(),
         h4: {
           interval: '4h',
-          price: parseFloat(batch1[0].values?.[0]?.close || 0),
-          timestamp: batch1[0].values?.[0]?.datetime,
-          rsi: batch1[4],
-          macd: batch2[0].macd,
-          macd_signal: batch2[0].signal,
-          macd_hist: batch2[0].histogram,
-          atr: h4Atr
+          price: parseFloat(batchA[0].values?.[0]?.close || 0),
+          timestamp: batchA[0].values?.[0]?.datetime,
+          rsi: batchA[5],
+          macd: macdH4.macd, macd_signal: macdH4.signal, macd_hist: macdH4.histogram,
+          atr: localH4Atr           // local only
         },
         h1: {
           interval: '1h',
-          price: parseFloat(batch1[1].values?.[0]?.close || 0),
-          timestamp: batch1[1].values?.[0]?.datetime,
-          rsi: batch1[5],
-          macd: batch2[1].macd,
-          macd_signal: batch2[1].signal,
-          macd_hist: batch2[1].histogram,
-          atr: h1Atr
+          price: parseFloat(batchA[1].values?.[0]?.close || 0),
+          timestamp: batchA[1].values?.[0]?.datetime,
+          rsi: batchA[6],
+          macd: macdH1.macd, macd_signal: macdH1.signal, macd_hist: macdH1.histogram,
+          atr: h1AtrApi ?? localH1Atr   // API primary, local fallback
         },
         m30: {
           interval: '30min',
-          price: parseFloat(batch1[2].values?.[0]?.close || 0),
-          timestamp: batch1[2].values?.[0]?.datetime,
-          rsi: batch1[6],
-          macd: batch2[2].macd,
-          macd_signal: batch2[2].signal,
-          macd_hist: batch2[2].histogram,
-          atr: m30Atr
+          price: parseFloat(batchA[2].values?.[0]?.close || 0),
+          timestamp: batchA[2].values?.[0]?.datetime,
+          rsi: rsiM30,
+          macd: macdM30.macd, macd_signal: macdM30.signal, macd_hist: macdM30.histogram,
+          atr: m30AtrApi ?? localM30Atr // API primary, local fallback
         },
         m15: {
           interval: '15min',
-          price: parseFloat(batch1[3].values?.[0]?.close || 0),
-          timestamp: batch1[3].values?.[0]?.datetime,
-          rsi: batch1[7],
-          macd: batch2[3].macd,
-          macd_signal: batch2[3].signal,
-          macd_hist: batch2[3].histogram,
-          atr: m15Atr
+          price: parseFloat(batchA[3].values?.[0]?.close || 0),
+          timestamp: batchA[3].values?.[0]?.datetime,
+          rsi: rsiM15,
+          macd: macdM15.macd, macd_signal: macdM15.signal, macd_hist: macdM15.histogram,
+          atr: localM15Atr           // local only
+        },
+        m5: {
+          interval: '5min',
+          price: parseFloat(batchA[4].values?.[0]?.close || 0),
+          timestamp: batchA[4].values?.[0]?.datetime,
+          rsi: rsiM5,
+          macd: macdM5.macd, macd_signal: macdM5.signal, macd_hist: macdM5.histogram,
+          atr: localM5Atr            // local only
         },
         apiCallCount: this.callCount
       };
 
-      console.log(`\n✅ Staggered market data fetch complete`);
-      console.log(`📞 Total API calls: ${this.callCount}`);
-      
+      console.log(`📞 Total API calls this cycle: ${this.callCount}`);
       return result;
     } catch (error) {
       console.error('Error getting staggered market data:', error.message);

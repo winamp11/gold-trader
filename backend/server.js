@@ -69,7 +69,9 @@ async function generateSignalIfTradingHours() {
     const portfolio = database.getMechanicalPortfolio();
     const accountBalance = portfolio?.current_balance ?? 100000;
     const signal = signalEngine.generateSignal(marketData, accountBalance);
-    
+    // signalEngine only touches h4/h1/m30/m15; attach m5 so it persists to DB
+    signal.marketData.m5 = marketData.m5;
+
     // Save to database
     const signalId = database.saveSignal(signal);
     
