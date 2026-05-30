@@ -20,6 +20,25 @@ app.use(express.json());
 let currentSignal = null;
 let lastUpdate = null;
 
+// Lightweight price poller: 1 API call every 2 minutes during trading hours.
+// Decoupled from signal generation so outcome checks run continuously.
+function startPricePoller() {
+  console.log('📡 Starting price poller (every 2 minutes during trading hours)...');
+
+  setInterval(async () => {
+    if (!isTradingHours()) return;
+    if (outcomeTracker.activeTracking.size === 0) return;
+
+    try {
+      const price = await twelveData.fetchPrice('XAU/USD');
+      console.log(`📡 [POLLER] XAU/USD: $${price.toFixed(2)} | Active: ${outcomeTracker.activeTracking.size}`);
+      outcomeTracker.checkOutcomesWithPrice(price);
+    } catch (error) {
+      console.error('❌ [POLLER] Price check failed:', error.message);
+    }
+  }, 2 * 60 * 1000);
+}
+
 // Background job to generate signals every 8 minutes during trading hours
 function startBackgroundSignalGeneration() {
   console.log('🤖 Starting background signal generation...');
@@ -341,6 +360,7 @@ app.listen(PORT, () => {
   
   // Start background signal generation
   startBackgroundSignalGeneration();
+  startPricePoller();
 });
 
 // Graceful shutdown

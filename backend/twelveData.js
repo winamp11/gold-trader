@@ -77,6 +77,26 @@ class TwelveDataService {
     }
   }
 
+  async fetchPrice(symbol) {
+    const url = `${BASE_URL}/price?apikey=${API_KEY}&symbol=${symbol}`;
+
+    try {
+      const response = await fetch(url);
+      const data = await response.json();
+
+      this.callCount++;
+
+      if (data.status === 'error') {
+        throw new Error(data.message || 'API error');
+      }
+
+      return parseFloat(data.price);
+    } catch (error) {
+      console.error('Error fetching price:', error.message);
+      throw error;
+    }
+  }
+
   async fetchAllIndicators(symbol, interval) {
     try {
       console.log(`\n📊 Fetching indicators for ${symbol} ${interval}...`);
