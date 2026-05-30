@@ -77,6 +77,29 @@ class TwelveDataService {
     }
   }
 
+  async fetchATR(symbol, interval, timePeriod = 14) {
+    const url = `${BASE_URL}/atr?apikey=${API_KEY}&symbol=${symbol}&interval=${interval}&time_period=${timePeriod}`;
+
+    try {
+      const response = await fetch(url);
+      const data = await response.json();
+
+      this.callCount++;
+      console.log(`API Call #${this.callCount}: ATR ${symbol} ${interval}`);
+
+      if (data.status === 'error') {
+        throw new Error(data.message || 'API error');
+      }
+
+      const val = parseFloat(data.values?.[0]?.atr);
+      if (!isFinite(val)) throw new Error('ATR value missing or non-finite');
+      return val;
+    } catch (error) {
+      console.error(`Error fetching ATR ${interval}:`, error.message);
+      throw error;
+    }
+  }
+
   async fetchPrice(symbol) {
     const url = `${BASE_URL}/price?apikey=${API_KEY}&symbol=${symbol}`;
 
