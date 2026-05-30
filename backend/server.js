@@ -2,373 +2,391 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import twelveData from './twelveData.js';
-import signalEngine from './signalEngine.js';
 import database from './database.js';
 import outcomeTracker from './outcomeTracker.js';
 import { isTradingHours, getNextTradingTime } from './tradingHours.js';
+
+import { decide as mechanicalDecide }    from './deciders/mechanicalDecider.js';
+import { decide as claudeOverlayDecide } from './deciders/claudeOverlayDecider.js';
+import { decide as claudeSoloDecide }    from './deciders/claudeSoloDecider.js';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Store current signal in memory
+// In-memory cache for the current mechanical signal
 let currentSignal = null;
-let lastUpdate = null;
+let lastUpdate    = null;
 
-// Lightweight price poller: 1 API call every 2 minutes during trading hours.
-// Decoupled from signal generation so outcome checks run continuously.
-function startPricePoller() {
-  console.log('📡 Starting price poller (every 2 minutes during trading hours)...');
+// ── Helper: open a real position for one portfolio ─────────────────────────
+function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwner }) {
+  const tradeId = database.saveTrade({
+    signal_id:    signalId,
+    portfolio_id: portfolio.id,
+    timestamp:    new Date().toISOString(),
+    direction:    decision.direction,
+    entry_price:  decision.entry,
+    lot_size:     decision.lots,
+    stop_loss:    decision.stop,
+    take_profit:  decision.target,
+    decider:      portfolio.name,
+    tag:          decision.tag
+  });
 
-  setInterval(async () => {
-    if (!isTradingHours()) return;
-    if (outcomeTracker.activeTracking.size === 0) return;
-
-    try {
-      const price = await twelveData.fetchPrice('XAU/USD');
-      console.log(`📡 [POLLER] XAU/USD: $${price.toFixed(2)} | Active: ${outcomeTracker.activeTracking.size}`);
-      outcomeTracker.checkOutcomesWithPrice(price);
-    } catch (error) {
-      console.error('❌ [POLLER] Price check failed:', error.message);
-    }
-  }, 60 * 1000); // 1 minute
+  const key = `${portfolio.id}_${signalId}`;
+  outcomeTracker.startTracking(key, {
+    key,
+    portfolioId:    portfolio.id,
+    portfolioName:  portfolio.name,
+    signalId:       isSignalOwner ? signalId : null,
+    tradeId,
+    type:           'GREEN',
+    direction:      decision.direction,
+    lots:           decision.lots,
+    startPrice:     currentPrice,
+    entryPrice:     decision.entry,
+    stopLoss:       decision.stop,
+    target:         decision.target,
+    startTime:      new Date(),
+    entryTriggered: false,
+    outcome:        null,
+    maxPrice:       currentPrice,
+    minPrice:       currentPrice
+  });
 }
 
-// Background job to generate signals every 8 minutes during trading hours
-function startBackgroundSignalGeneration() {
-  console.log('🤖 Starting background signal generation...');
-  
-  // Run immediately on startup if within trading hours
-  generateSignalIfTradingHours();
-  
-  // Then run every 8 minutes
-  setInterval(() => {
-    generateSignalIfTradingHours();
-  }, 8 * 60 * 1000); // 8 minutes
+// ── Helper: open a veto shadow for one portfolio ───────────────────────────
+function openVetoShadow({ portfolio, decision, currentPrice }) {
+  const shadowId = database.saveVetoShadow({
+    portfolioId: portfolio.id,
+    direction:   decision.direction,
+    entry:       decision.entry,
+    stop:        decision.stop,
+    target:      decision.target
+  });
+
+  const key = `shadow_${shadowId}`;
+  outcomeTracker.startShadow(key, {
+    key,
+    shadowId,
+    portfolioId:    portfolio.id,
+    portfolioName:  portfolio.name,
+    direction:      decision.direction,
+    lots:           decision.lots,
+    entryPrice:     decision.entry,
+    stopLoss:       decision.stop,
+    target:         decision.target,
+    startTime:      new Date(),
+    startPrice:     currentPrice,
+    entryTriggered: false,
+    maxPrice:       currentPrice,
+    minPrice:       currentPrice
+  });
 }
 
+// ── Signal generation cycle ────────────────────────────────────────────────
 async function generateSignalIfTradingHours() {
   if (!isTradingHours()) {
     console.log('⏸️  Outside trading hours - skipping signal generation');
     return;
   }
-  
+
   try {
-    console.log('\n🔄 [BACKGROUND] Generating fresh signal...');
-    
-    // Stagger API calls to stay under 8 calls/minute limit
-    // First batch: 8 calls (time_series + RSI for all timeframes)
-    console.log('📞 Making first batch of API calls (8 calls)...');
+    console.log('\n🔄 [CYCLE] Starting three-decider cycle...');
+
+    // ONE shared fetch — all three accounts read the same snapshot
     const marketData = await twelveData.getMarketDataStaggered();
+    const atr        = { h1: marketData.h1.atr, m30: marketData.m30.atr };
+    const currentPrice = marketData.h1.price || marketData.m30.price;
+    const lessons    = []; // stub; populated by lesson store in later phase
 
-    const portfolio = database.getMechanicalPortfolio();
-    const accountBalance = portfolio?.current_balance ?? 100000;
-    const signal = signalEngine.generateSignal(marketData, accountBalance);
-    // signalEngine only touches h4/h1/m30/m15; attach m5 so it persists to DB
-    signal.marketData.m5 = marketData.m5;
+    // Load all three portfolios fresh from DB (balances may have changed)
+    const mechPortfolio    = database.getPortfolioByName('mechanical');
+    const overlayPortfolio = database.getPortfolioByName('claude_overlay');
+    const soloPortfolio    = database.getPortfolioByName('claude_solo');
 
-    // Save to database
-    const signalId = database.saveSignal(signal);
-    
-    // Start outcome tracking
-    outcomeTracker.startTracking(signalId, signal);
-    
-    // Check outcomes using current price
-    const currentPrice = signal.currentPrice || marketData.m15?.price;
-    if (currentPrice) {
-      outcomeTracker.checkOutcomesWithPrice(currentPrice);
+    // ── Mechanical decider ──────────────────────────────────────────────────
+    const mechDecision = await mechanicalDecide(marketData, atr, mechPortfolio, lessons);
+
+    // Persist the mechanical signal (backward compat with /api/signal, history)
+    const mechSignal = mechDecision._signal;
+    mechSignal.marketData.m5 = marketData.m5;
+    const signalId = database.saveSignal(mechSignal);
+
+    if (mechDecision.action === 'TRADE') {
+      openPosition({
+        portfolio:     mechPortfolio,
+        decision:      mechDecision,
+        signalId,
+        currentPrice,
+        isSignalOwner: true   // updates signals table on close
+      });
+    } else {
+      // Track RED signal for missed-opportunity detection
+      const key = `${mechPortfolio.id}_${signalId}`;
+      outcomeTracker.startTracking(key, {
+        key,
+        portfolioId:   mechPortfolio.id,
+        portfolioName: 'mechanical',
+        signalId,
+        tradeId:       null,
+        type:          'RED',
+        startPrice:    currentPrice,
+        startTime:     new Date(),
+        outcome:       null,
+        maxPrice:      currentPrice,
+        minPrice:      currentPrice
+      });
     }
-    
-    // Cache it
-    currentSignal = signal;
-    lastUpdate = Date.now();
-    
-    console.log(`✅ [BACKGROUND] Signal cached: ${signal.signal}`);
+
+    // Check outcomes against fresh price before opening new positions
+    outcomeTracker.checkOutcomesWithPrice(currentPrice);
+
+    // ── Claude Overlay decider (stub: mirrors mechanical) ──────────────────
+    const overlayDecision = await claudeOverlayDecide(
+      marketData, atr, overlayPortfolio, lessons, mechDecision
+    );
+    if (overlayDecision.action === 'TRADE') {
+      openPosition({ portfolio: overlayPortfolio, decision: overlayDecision, signalId, currentPrice, isSignalOwner: false });
+    } else if (overlayDecision.action === 'VETO') {
+      openVetoShadow({ portfolio: overlayPortfolio, decision: overlayDecision, currentPrice });
+    }
+
+    // ── Claude Solo decider (stub: always NO_TRADE) ────────────────────────
+    const soloDecision = await claudeSoloDecide(marketData, atr, soloPortfolio, lessons);
+    if (soloDecision.action === 'TRADE') {
+      openPosition({ portfolio: soloPortfolio, decision: soloDecision, signalId, currentPrice, isSignalOwner: false });
+    } else if (soloDecision.action === 'VETO') {
+      openVetoShadow({ portfolio: soloPortfolio, decision: soloDecision, currentPrice });
+    }
+
+    // Cache the mechanical signal for /api/signal
+    currentSignal = mechSignal;
+    lastUpdate    = Date.now();
+
+    console.log(`✅ [CYCLE] mech=${mechDecision.action}, overlay=${overlayDecision.action}, solo=${soloDecision.action}`);
   } catch (error) {
-    console.error('❌ [BACKGROUND] Error generating signal:', error.message);
+    console.error('❌ [CYCLE] Error:', error.message);
   }
 }
 
-// Health check
+// ── Price poller — 1 API call/minute, gated to trading hours ─────────────
+function startPricePoller() {
+  console.log('📡 Starting price poller (every 1 minute during trading hours)...');
+
+  setInterval(async () => {
+    if (!isTradingHours()) return;
+    const total = outcomeTracker.activeTracking.size + outcomeTracker.shadowTracking.size;
+    if (total === 0) return;
+
+    try {
+      const price = await twelveData.fetchPrice('XAU/USD');
+      console.log(`📡 [POLLER] $${price.toFixed(2)} | positions=${outcomeTracker.activeTracking.size}, shadows=${outcomeTracker.shadowTracking.size}`);
+      outcomeTracker.checkOutcomesWithPrice(price);
+    } catch (error) {
+      console.error('❌ [POLLER] Price check failed:', error.message);
+    }
+  }, 60 * 1000);
+}
+
+// ── Signal cron ────────────────────────────────────────────────────────────
+function startBackgroundSignalGeneration() {
+  console.log('🤖 Starting background signal generation (every 8 min)...');
+  generateSignalIfTradingHours();
+  setInterval(() => generateSignalIfTradingHours(), 8 * 60 * 1000);
+}
+
+// ── REST API ───────────────────────────────────────────────────────────────
+
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Get current signal (returns cached data - NO API calls)
-app.get('/api/signal', async (req, res) => {
+app.get('/api/signal', (req, res) => {
   try {
-    // Check if within trading hours
     if (!isTradingHours()) {
       return res.json({
         signal: 'CLOSED',
-        message: 'Outside trading hours (11:00-15:00 & 17:00-21:00 UAE time)',
+        message: 'Outside trading hours (16:30–20:30 UAE)',
         nextTradingTime: getNextTradingTime(),
         timestamp: new Date().toISOString()
       });
     }
-
-    // Return cached signal (no fresh API calls)
     if (currentSignal && lastUpdate) {
-      const age = Math.floor((Date.now() - lastUpdate) / 1000);
-      return res.json({
-        ...currentSignal,
-        cached: true,
-        age
-      });
+      return res.json({ ...currentSignal, cached: true, age: Math.floor((Date.now() - lastUpdate) / 1000) });
     }
-
-    // No signal yet (shouldn't happen after background job starts)
-    return res.json({
-      signal: 'PENDING',
-      message: 'Waiting for first signal generation...',
-      timestamp: new Date().toISOString()
-    });
+    return res.json({ signal: 'PENDING', message: 'Waiting for first signal generation...', timestamp: new Date().toISOString() });
   } catch (error) {
-    console.error('Error fetching signal:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Force refresh endpoint removed - background job handles signal generation
-
-// Get signal history
 app.get('/api/signals/history', (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 20;
-    const signals = database.getRecentSignals(limit);
-    res.json({ signals });
+    res.json({ signals: database.getRecentSignals(limit) });
   } catch (error) {
-    console.error('Error fetching signal history:', error);
-    res.status(500).json({ 
-      error: 'Failed to fetch history', 
-      message: error.message 
-    });
+    res.status(500).json({ error: 'Failed to fetch history', message: error.message });
   }
 });
 
-// Save a trade
 app.post('/api/trades', (req, res) => {
   try {
     const tradeId = database.saveTrade({
-      signal_id: req.body.signal_id,
-      timestamp: req.body.timestamp || new Date().toISOString(),
-      direction: req.body.direction,
-      entry_price: req.body.entry_price,
-      lot_size: req.body.lot_size,
-      stop_loss: req.body.stop_loss,
-      take_profit: req.body.take_profit,
-      notes: req.body.notes
+      signal_id:    req.body.signal_id,
+      portfolio_id: req.body.portfolio_id,
+      timestamp:    req.body.timestamp || new Date().toISOString(),
+      direction:    req.body.direction,
+      entry_price:  req.body.entry_price,
+      lot_size:     req.body.lot_size,
+      stop_loss:    req.body.stop_loss,
+      take_profit:  req.body.take_profit,
+      notes:        req.body.notes,
+      decider:      req.body.decider,
+      tag:          req.body.tag
     });
-    
     res.json({ success: true, tradeId });
   } catch (error) {
-    console.error('Error saving trade:', error);
-    res.status(500).json({ 
-      error: 'Failed to save trade', 
-      message: error.message 
-    });
+    res.status(500).json({ error: 'Failed to save trade', message: error.message });
   }
 });
 
-// Update trade exit
 app.put('/api/trades/:id/exit', (req, res) => {
   try {
     database.updateTradeExit(req.params.id, {
-      exit_price: req.body.exit_price,
+      exit_price:     req.body.exit_price,
       exit_timestamp: req.body.exit_timestamp || new Date().toISOString(),
-      exit_reason: req.body.exit_reason,
-      pnl: req.body.pnl
+      exit_reason:    req.body.exit_reason,
+      pnl:            req.body.pnl
     });
-    
     res.json({ success: true });
   } catch (error) {
-    console.error('Error updating trade:', error);
-    res.status(500).json({ 
-      error: 'Failed to update trade', 
-      message: error.message 
-    });
+    res.status(500).json({ error: 'Failed to update trade', message: error.message });
   }
 });
 
-// Get trades
 app.get('/api/trades', (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 20;
-    const trades = database.getRecentTrades(limit);
-    res.json({ trades });
+    res.json({ trades: database.getRecentTrades(parseInt(req.query.limit) || 20) });
   } catch (error) {
-    console.error('Error fetching trades:', error);
-    res.status(500).json({ 
-      error: 'Failed to fetch trades', 
-      message: error.message 
-    });
+    res.status(500).json({ error: 'Failed to fetch trades', message: error.message });
   }
 });
 
-// Get today's stats
 app.get('/api/stats/today', (req, res) => {
   try {
-    const stats = database.getTodayStats();
-    res.json(stats);
+    res.json(database.getTodayStats());
   } catch (error) {
-    console.error('Error fetching stats:', error);
-    res.status(500).json({ 
-      error: 'Failed to fetch stats', 
-      message: error.message 
-    });
+    res.status(500).json({ error: 'Failed to fetch stats', message: error.message });
   }
 });
 
-// Get signal performance stats
 app.get('/api/stats/performance', (req, res) => {
   try {
-    const days = parseInt(req.query.days) || 7;
-    const performance = database.getSignalPerformance(days);
-    res.json(performance);
+    res.json(database.getSignalPerformance(parseInt(req.query.days) || 7));
   } catch (error) {
-    console.error('Error fetching performance:', error);
-    res.status(500).json({ 
-      error: 'Failed to fetch performance', 
-      message: error.message 
-    });
+    res.status(500).json({ error: 'Failed to fetch performance', message: error.message });
   }
 });
 
-// Export all signals data (for data analysis)
-app.get('/api/export-all', async (req, res) => {
+app.get('/api/export-all', (req, res) => {
   try {
-    const signals = database.getAllSignals(); // We'll need to add this method to database.js
+    const signals = database.getAllSignals();
     res.json({ count: signals.length, data: signals });
   } catch (error) {
-    console.error('Error exporting signals:', error);
-    res.status(500).json({ 
-      error: 'Failed to export signals', 
-      message: error.message 
-    });
+    res.status(500).json({ error: 'Failed to export signals', message: error.message });
   }
 });
 
-// Update account balance
 app.post('/api/account/update', (req, res) => {
   try {
     const { date, balance, dailyPnl, tradesCount, winRate } = req.body;
-    
     database.updateAccountSnapshot(
       date || new Date().toISOString().split('T')[0],
-      balance,
-      dailyPnl || 0,
-      tradesCount || 0,
-      winRate || 0
+      balance, dailyPnl || 0, tradesCount || 0, winRate || 0
     );
-    
     res.json({ success: true });
   } catch (error) {
-    console.error('Error updating account:', error);
-    res.status(500).json({ 
-      error: 'Failed to update account', 
-      message: error.message 
-    });
+    res.status(500).json({ error: 'Failed to update account', message: error.message });
   }
 });
 
-// Get account history
 app.get('/api/account/history', (req, res) => {
   try {
-    const days = parseInt(req.query.days) || 30;
-    const history = database.getAccountHistory(days);
-    res.json({ history });
+    res.json({ history: database.getAccountHistory(parseInt(req.query.days) || 30) });
   } catch (error) {
-    console.error('Error fetching account history:', error);
-    res.status(500).json({ 
-      error: 'Failed to fetch history', 
-      message: error.message 
-    });
+    res.status(500).json({ error: 'Failed to fetch history', message: error.message });
   }
 });
 
-// ===== AUTOCHARTIST PATTERNS ENDPOINTS =====
+// Three-account summary — balances, daily P&L, open position counts
+app.get('/api/accounts', (req, res) => {
+  try {
+    const accounts = database.getAccountsSummary();
+    // Enrich with in-memory open-position counts
+    const openByPortfolio = {};
+    for (const t of outcomeTracker.activeTracking.values()) {
+      openByPortfolio[t.portfolioId] = (openByPortfolio[t.portfolioId] || 0) + 1;
+    }
+    const result = accounts.map(a => ({
+      ...a,
+      open_positions: openByPortfolio[a.id] || 0
+    }));
+    res.json({ accounts: result });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch accounts', message: error.message });
+  }
+});
 
-// Get all logged Autochartist patterns
+// ── Autochartist endpoints (unchanged) ────────────────────────────────────
+
 app.get('/api/autochartist/patterns', (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 100;
-    const patterns = database.getAutochartistPatterns(limit);
-    res.json({ patterns });
+    res.json({ patterns: database.getAutochartistPatterns(parseInt(req.query.limit) || 100) });
   } catch (error) {
-    console.error('Error fetching Autochartist patterns:', error);
-    res.status(500).json({ 
-      error: 'Failed to fetch patterns', 
-      message: error.message 
-    });
+    res.status(500).json({ error: 'Failed to fetch patterns', message: error.message });
   }
 });
 
-// Log a new Autochartist pattern
-app.post('/api/autochartist/patterns', async (req, res) => {
+app.post('/api/autochartist/patterns', (req, res) => {
   try {
     const { patternType, timeframe, timeIdentified, entryPrice, stopLoss, target, successProbability } = req.body;
-
-    // Get current price from latest signal
-    let currentPrice = null;
-    let ourSignal = null;
-    
-    if (currentSignal) {
-      currentPrice = currentSignal.currentPrice || currentSignal.marketData?.m15?.price;
-      ourSignal = currentSignal.signal;
-    }
-
-    const patternData = {
-      patternType,
-      timeframe,
-      timeIdentified,
-      entryPrice,
-      stopLoss,
-      target,
-      successProbability,
-      currentPrice,
-      ourSignal
-    };
-
-    const patternId = database.saveAutochartistPattern(patternData);
-    
-    res.json({ 
-      success: true, 
-      patternId,
-      message: 'Pattern logged successfully'
+    const currentPrice = currentSignal?.currentPrice || currentSignal?.marketData?.m15?.price || null;
+    const ourSignal    = currentSignal?.signal || null;
+    const patternId    = database.saveAutochartistPattern({
+      patternType, timeframe, timeIdentified, entryPrice, stopLoss, target,
+      successProbability, currentPrice, ourSignal
     });
+    res.json({ success: true, patternId, message: 'Pattern logged successfully' });
   } catch (error) {
-    console.error('Error logging Autochartist pattern:', error);
-    res.status(500).json({ 
-      error: 'Failed to log pattern', 
-      message: error.message 
-    });
+    res.status(500).json({ error: 'Failed to log pattern', message: error.message });
   }
 });
 
-// Start server
+// ── Startup ────────────────────────────────────────────────────────────────
+
 app.listen(PORT, () => {
-  console.log('\n' + '='.repeat(50));
+  console.log('\n' + '='.repeat(55));
   console.log('🚀 GOLD TRADER BACKEND STARTED');
-  console.log('='.repeat(50));
+  console.log('='.repeat(55));
   console.log(`📡 Server running on http://localhost:${PORT}`);
   console.log(`🔑 API Key configured: ${process.env.TWELVE_DATA_API_KEY ? 'YES' : 'NO'}`);
   console.log(`⏰ Trading window: 16:30–20:30 UAE (4 h, NY session, Mon–Fri)`);
   console.log(`🔄 Signal cron:  every 8 min  → ~30 cycles × 17 calls = ~510 calls/day`);
   console.log(`📡 Price poller: every 1 min  → ~240 checks × 1 call  = ~240 calls/day`);
   console.log(`📊 Projected daily total: ~750 calls  (budget: 800, margin: ~50)`);
-  console.log('='.repeat(50) + '\n');
-  
-  // Start background signal generation
+  console.log(`⚡ Max calls/60s window: 7  (Batch B 6 + poller 1)`);
+  console.log(`🏦 Accounts: mechanical | claude_overlay (stub) | claude_solo (stub)`);
+  console.log('='.repeat(55) + '\n');
+
   startBackgroundSignalGeneration();
   startPricePoller();
 });
 
-// Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\n👋 Shutting down gracefully...');
   outcomeTracker.stopMonitoring();
