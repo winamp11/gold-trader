@@ -70,6 +70,15 @@ class DatabaseService {
       }
     }
 
+    // Migrate trades table — add portfolio_id, decider, tag
+    const tradeCols = this.db.prepare('PRAGMA table_info(trades)').all().map(c => c.name);
+    for (const [col, def] of [['portfolio_id', 'INTEGER DEFAULT 1'], ['decider', 'TEXT'], ['tag', 'TEXT']]) {
+      if (!tradeCols.includes(col)) {
+        this.db.exec(`ALTER TABLE trades ADD COLUMN ${col} ${def}`);
+        console.log(`🔧 Migrated: added trades.${col}`);
+      }
+    }
+
     // Autochartist patterns table - stores manually logged patterns from Autochartist
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS autochartist_patterns (
@@ -91,11 +100,12 @@ class DatabaseService {
       )
     `);
 
-    // Trades table - stores actual trades taken by user
+    // Trades table - one row per simulated position, per portfolio
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS trades (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         signal_id INTEGER,
+        portfolio_id INTEGER DEFAULT 1,
         timestamp TEXT NOT NULL,
         direction TEXT NOT NULL,
         entry_price REAL NOT NULL,
@@ -107,7 +117,10 @@ class DatabaseService {
         exit_timestamp TEXT,
         exit_reason TEXT,
         notes TEXT,
-        FOREIGN KEY (signal_id) REFERENCES signals(id)
+        decider TEXT,
+        tag TEXT,
+        FOREIGN KEY (signal_id) REFERENCES signals(id),
+        FOREIGN KEY (portfolio_id) REFERENCES portfolios(id)
       )
     `);
 
@@ -134,10 +147,29 @@ class DatabaseService {
       )
     `);
 
-    // Seed the mechanical portfolio once
+    // Seed all three portfolios — idempotent via OR IGNORE + UNIQUE(name)
     this.db.exec(`
-      INSERT OR IGNORE INTO portfolios (name, starting_balance, current_balance)
-      VALUES ('mechanical', 100000, 100000)
+      INSERT OR IGNORE INTO portfolios (name, starting_balance, current_balance) VALUES
+        ('mechanical',     100000, 100000),
+        ('claude_overlay', 100000, 100000),
+        ('claude_solo',    100000, 100000)
+    `);
+
+    // Veto shadow tracking — counterfactual outcomes for VETO decisions
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS veto_shadows (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        portfolio_id INTEGER NOT NULL,
+        timestamp TEXT NOT NULL,
+        direction TEXT NOT NULL,
+        entry REAL NOT NULL,
+        stop REAL NOT NULL,
+        target REAL NOT NULL,
+        would_be_outcome TEXT,
+        would_be_pnl REAL,
+        shadow_metadata TEXT,
+        FOREIGN KEY (portfolio_id) REFERENCES portfolios(id)
+      )
     `);
 
     // Daily P&L roll-up per portfolio
@@ -302,23 +334,26 @@ class DatabaseService {
   saveTrade(tradeData) {
     const stmt = this.db.prepare(`
       INSERT INTO trades (
-        signal_id, timestamp, direction, entry_price, lot_size,
-        stop_loss, take_profit, notes
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        signal_id, portfolio_id, timestamp, direction, entry_price, lot_size,
+        stop_loss, take_profit, notes, decider, tag
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const info = stmt.run(
       tradeData.signal_id || null,
+      tradeData.portfolio_id || 1,
       tradeData.timestamp,
       tradeData.direction,
       tradeData.entry_price,
       tradeData.lot_size,
       tradeData.stop_loss || null,
       tradeData.take_profit || null,
-      tradeData.notes || null
+      tradeData.notes || null,
+      tradeData.decider || null,
+      tradeData.tag || null
     );
 
-    console.log(`💾 Trade saved (ID: ${info.lastInsertRowid})`);
+    console.log(`💾 Trade saved (ID: ${info.lastInsertRowid}, portfolio: ${tradeData.portfolio_id || 1})`);
     return info.lastInsertRowid;
   }
 
@@ -443,7 +478,61 @@ class DatabaseService {
   // ===== PORTFOLIO ACCOUNTING =====
 
   getMechanicalPortfolio() {
-    return this.db.prepare('SELECT * FROM portfolios WHERE name = ?').get('mechanical');
+    return this.getPortfolioByName('mechanical');
+  }
+
+  getAllPortfolios() {
+    return this.db.prepare('SELECT * FROM portfolios ORDER BY id').all();
+  }
+
+  getPortfolioByName(name) {
+    return this.db.prepare('SELECT * FROM portfolios WHERE name = ?').get(name);
+  }
+
+  getPortfolioById(id) {
+    return this.db.prepare('SELECT * FROM portfolios WHERE id = ?').get(id);
+  }
+
+  // ===== VETO SHADOW TRACKING =====
+
+  saveVetoShadow({ portfolioId, direction, entry, stop, target }) {
+    const id = this.db.prepare(`
+      INSERT INTO veto_shadows (portfolio_id, timestamp, direction, entry, stop, target)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(portfolioId, new Date().toISOString(), direction, entry, stop, target).lastInsertRowid;
+    console.log(`👻 Veto shadow saved (ID: ${id}, portfolio: ${portfolioId})`);
+    return id;
+  }
+
+  updateVetoShadow(shadowId, wouldBeOutcome, wouldBePnl, metadata = {}) {
+    this.db.prepare(`
+      UPDATE veto_shadows
+      SET would_be_outcome = ?, would_be_pnl = ?, shadow_metadata = ?
+      WHERE id = ?
+    `).run(wouldBeOutcome, wouldBePnl, JSON.stringify(metadata), shadowId);
+    console.log(`👻 Veto shadow ${shadowId} resolved: ${wouldBeOutcome}`);
+  }
+
+  // ===== ACCOUNTS SUMMARY =====
+
+  getAccountsSummary() {
+    const today = new Date().toISOString().split('T')[0];
+    return this.db.prepare(`
+      SELECT
+        p.id,
+        p.name,
+        p.starting_balance,
+        p.current_balance,
+        COALESCE(d.realized_pnl, 0)  AS daily_realized_pnl,
+        COALESCE(d.open_pnl, 0)      AS daily_open_pnl,
+        COALESCE(d.trades_count, 0)  AS daily_trades,
+        COALESCE(d.wins, 0)          AS daily_wins,
+        COALESCE(d.losses, 0)        AS daily_losses
+      FROM portfolios p
+      LEFT JOIN account_pnl_daily d
+        ON d.portfolio_id = p.id AND d.date = ?
+      ORDER BY p.id
+    `).all(today);
   }
 
   updatePortfolioBalance(portfolioId, pnlDelta) {
