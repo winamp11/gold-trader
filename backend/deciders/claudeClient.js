@@ -90,6 +90,59 @@ function noTrade(deciderName, reason) {
 // userContent   dynamic market snapshot + lessons for this cycle
 // deciderName   'overlay' | 'solo'  (used in logs)
 
+// ── Reflection call — returns { lesson_text, tag } or null ─────────────
+// Shares the same client, counter, and last-usage tracker as callDecider
+// but validates for { lesson_text, tag } instead of a trading decision.
+
+export async function callReflector({ systemPrompt, userContent, deciderName }) {
+  const n = nextCallNum();
+  console.log(`🪞 [${deciderName}] reflection call #${n} today`);
+
+  try {
+    const resp = await getClient().messages.create(
+      {
+        model:      MODEL,
+        max_tokens: 300,
+        system: [
+          { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }
+        ],
+        messages: [{ role: 'user', content: userContent }]
+      },
+      { timeout: 30_000 }
+    );
+
+    const u = resp.usage;
+    const cacheCreate = u.cache_creation_input_tokens ?? 0;
+    const cacheRead   = u.cache_read_input_tokens   ?? 0;
+    _lastUsage = { input: u.input_tokens, cache_create: cacheCreate, cache_read: cacheRead, output: u.output_tokens };
+    console.log(
+      `📊 [${deciderName}] tokens: in=${u.input_tokens}` +
+      ` (cache_create=${cacheCreate} cache_read=${cacheRead}) out=${u.output_tokens}`
+    );
+
+    const raw   = resp.content[0]?.text ?? '';
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error('no JSON in reflection response');
+
+    let parsed;
+    try   { parsed = JSON.parse(match[0]); }
+    catch (e) { throw new Error(`JSON.parse failed: ${e.message}`); }
+
+    if (typeof parsed.lesson_text !== 'string' || !parsed.lesson_text.trim())
+      throw new Error('lesson_text missing or empty');
+    if (typeof parsed.tag !== 'string' || !parsed.tag.trim())
+      throw new Error('tag missing or empty');
+
+    const result = { lesson_text: parsed.lesson_text.trim(), tag: parsed.tag.trim() };
+    console.log(`✅ [${deciderName}] lesson saved | tag=${result.tag}`);
+    return result;
+
+  } catch (err) {
+    console.error(`❌ [${deciderName}] reflection failed: ${err.message}`);
+    return null; // safe fallback — caller skips journal write
+  }
+}
+
 export async function callDecider({ systemPrompt, userContent, deciderName }) {
   const n = nextCallNum();
   console.log(`🤖 [${deciderName}] Claude call #${n} today`);
