@@ -76,7 +76,7 @@ export async function reflect(tracking, outcome, pnl) {
     });
 
     if (lesson) {
-      database.saveJournalEntry({
+      await database.saveJournalEntry({
         portfolioId:      tracking.portfolioId,
         signalOrTradeId:  tracking.tradeId ?? null,
         entryType,
@@ -130,7 +130,7 @@ export async function reflectVeto(shadow, wouldBeOutcome, wouldBePnl) {
     });
 
     if (lesson) {
-      database.saveJournalEntry({
+      await database.saveJournalEntry({
         portfolioId:      shadow.portfolioId,
         signalOrTradeId:  shadow.shadowId ?? null,
         entryType,
