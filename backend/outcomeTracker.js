@@ -174,7 +174,9 @@ class OutcomeTracker {
     if (outcome === 'TARGET_HIT') fillPrice = tracking.target;
     else if (outcome === 'STOP_HIT') fillPrice = tracking.stopLoss;
 
-    if (tracking.type === 'GREEN' && (outcome === 'TARGET_HIT' || outcome === 'STOP_HIT')) {
+    if (tracking.type === 'GREEN' &&
+        (outcome === 'TARGET_HIT' || outcome === 'STOP_HIT' ||
+         (outcome === 'WINDOW_CLOSE' && tracking.entryTriggered))) {
       const lots = tracking.lots || 0.01;
       const priceMove = tracking.direction === 'LONG'
         ? fillPrice - tracking.entryPrice
@@ -203,7 +205,7 @@ class OutcomeTracker {
     }
 
     // Update the trade row for any account that has one
-    if (tracking.tradeId && (outcome === 'TARGET_HIT' || outcome === 'STOP_HIT')) {
+    if (tracking.tradeId && (outcome === 'TARGET_HIT' || outcome === 'STOP_HIT' || outcome === 'WINDOW_CLOSE')) {
       database.updateTradeExit(tracking.tradeId, {
         exit_price: fillPrice,
         exit_timestamp: tracking.endTime.toISOString(),
@@ -215,7 +217,11 @@ class OutcomeTracker {
     if (tracking.type === 'GREEN') {
       const exitStr = fillPrice != null ? ` @ $${fillPrice.toFixed(2)}` : '';
       const pnlStr  = pnl      != null ? ` · ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}` : '';
-      console.log(`🔴 [CLOSE] ${tracking.portfolioName} | ${outcome}${exitStr}${pnlStr}`);
+      if (outcome === 'WINDOW_CLOSE') {
+        console.log(`🔔 [WINDOW CLOSE] ${tracking.portfolioName} | ${tracking.direction} closed${exitStr}${pnlStr} · WINDOW_CLOSE`);
+      } else {
+        console.log(`🔴 [CLOSE] ${tracking.portfolioName} | ${outcome}${exitStr}${pnlStr}`);
+      }
     } else {
       console.log(`✅ Position finalized [${tracking.portfolioName}] ${outcome}${metadata.move ? ` (${metadata.direction} ${metadata.move} pts)` : ''}`);
     }
@@ -233,7 +239,7 @@ class OutcomeTracker {
     if (wouldBeOutcome === 'TARGET_HIT') fillPrice = shadow.target;
     else if (wouldBeOutcome === 'STOP_HIT') fillPrice = shadow.stopLoss;
 
-    if (shadow.entryTriggered && (wouldBeOutcome === 'TARGET_HIT' || wouldBeOutcome === 'STOP_HIT')) {
+    if (shadow.entryTriggered && (wouldBeOutcome === 'TARGET_HIT' || wouldBeOutcome === 'STOP_HIT' || wouldBeOutcome === 'WINDOW_CLOSE')) {
       const lots = shadow.lots || 0.01;
       const priceMove = shadow.direction === 'LONG'
         ? fillPrice - shadow.entryPrice
@@ -242,12 +248,56 @@ class OutcomeTracker {
     }
 
     database.updateVetoShadow(shadow.shadowId, wouldBeOutcome, pnl);
-    console.log(`👻 Shadow resolved [${shadow.portfolioName}] ${wouldBeOutcome}, would_be_pnl=${pnl !== null ? `$${pnl.toFixed(2)}` : 'n/a'}`);
+    if (wouldBeOutcome === 'WINDOW_CLOSE') {
+      const priceStr = exitPrice != null ? ` @ $${exitPrice.toFixed(2)}` : '';
+      const pnlDisp  = pnl       != null ? ` · would_be_pnl=${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}` : '';
+      console.log(`🔔 [WINDOW CLOSE] ${shadow.portfolioName} shadow | ${shadow.direction} closed${priceStr}${pnlDisp} · WINDOW_CLOSE`);
+    } else {
+      console.log(`👻 Shadow resolved [${shadow.portfolioName}] ${wouldBeOutcome}, would_be_pnl=${pnl !== null ? `$${pnl.toFixed(2)}` : 'n/a'}`);
+    }
     this.shadowTracking.delete(shadow.key);
 
     // Fire-and-forget veto reflection for Claude accounts only.
     reflectVeto(shadow, wouldBeOutcome, pnl)
       .catch(err => console.error('reflectVeto fire-and-forget error:', err.message));
+  }
+
+  // ── Window-close sweep ───────────────────────────────────────────────────
+  //
+  // Called once when isTradingHours() transitions true→false (20:30 UAE).
+  // Snapshots all in-memory positions/shadows, closes every GREEN at the
+  // final mark price, clears RED monitors, and resolves shadows.
+  forceCloseAll(price) {
+    const greenPositions = Array.from(this.activeTracking.values()).filter(t => t.type === 'GREEN');
+    const redMonitors    = Array.from(this.activeTracking.values()).filter(t => t.type === 'RED');
+    const shadows        = Array.from(this.shadowTracking.values());
+
+    const total = greenPositions.length + redMonitors.length + shadows.length;
+    if (total === 0) {
+      console.log('🔔 [WINDOW CLOSE] No open positions to close.');
+      return;
+    }
+
+    console.log(`🔔 [WINDOW CLOSE] Closing ${greenPositions.length} position(s), ${shadows.length} shadow(s), clearing ${redMonitors.length} RED monitor(s) @ $${price.toFixed(2)}`);
+
+    for (const t of greenPositions) {
+      if (t.entryTriggered) {
+        this.finalizePosition(t, 'WINDOW_CLOSE', price);
+      } else {
+        // Pending entry — session ended before fill; cancel without P&L
+        this.finalizePosition(t, 'NO_ENTRY', null);
+      }
+    }
+
+    // Session ended — RED monitors that never hit 15 pts are CORRECT_RED
+    for (const t of redMonitors) {
+      this.finalizePosition(t, 'CORRECT_RED', price);
+    }
+
+    // Resolve all veto shadows at the session-close mark
+    for (const s of shadows) {
+      this.finalizeShadow(s, 'WINDOW_CLOSE', price);
+    }
   }
 
   // ── Utilities ─────────────────────────────────────────────────────────────

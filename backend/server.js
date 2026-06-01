@@ -25,6 +25,8 @@ let lastUpdate          = null;
 let lastCycleDecisions  = null;
 // Most-recent price seen by either the poller or the market-data cycle
 let lastKnownPrice      = null;
+// Tracks previous poller-tick state so we detect the 20:30 window-close edge
+let wasInTradingHours   = isTradingHours();
 
 // ── Helper: open a real position for one portfolio ─────────────────────────
 function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwner }) {
@@ -197,12 +199,48 @@ async function generateSignalIfTradingHours() {
   }
 }
 
+// ── Window-close sweep — fires once at the 20:30 UAE edge ─────────────────
+async function runWindowClose() {
+  console.log('\n🔔 [WINDOW CLOSE] ─────────────────────────────────────────');
+  console.log('🔔 [WINDOW CLOSE] Trading window ended (20:30 UAE) — force-closing all positions');
+
+  // Try to get a fresh final mark price; fall back to the last poller tick
+  let price = lastKnownPrice;
+  try {
+    price = await twelveData.fetchPrice('XAU/USD');
+    lastKnownPrice = price;
+    console.log(`🔔 [WINDOW CLOSE] Final mark price: $${price.toFixed(2)}`);
+  } catch (err) {
+    const fallback = price != null ? `$${price.toFixed(2)}` : 'NONE';
+    console.warn(`⚠️  [WINDOW CLOSE] Price fetch failed (${err.message}) — using last-known ${fallback}`);
+  }
+
+  if (price == null) {
+    console.error('❌ [WINDOW CLOSE] Cannot force-close: no price available. Positions left open.');
+    return;
+  }
+
+  outcomeTracker.forceCloseAll(price);
+  console.log('🔔 [WINDOW CLOSE] ─────────────────────────────────────────\n');
+}
+
 // ── Price poller — 1 API call/minute, gated to trading hours ─────────────
 function startPricePoller() {
   console.log('📡 Starting price poller (every 1 minute during trading hours)...');
 
   setInterval(async () => {
-    if (!isTradingHours()) return;
+    const nowInHours = isTradingHours();
+
+    // Detect the 20:30 window-close edge: was trading, now not
+    if (wasInTradingHours && !nowInHours) {
+      wasInTradingHours = false;
+      await runWindowClose();
+      return; // poller goes dormant until next session
+    }
+    wasInTradingHours = nowInHours;
+
+    if (!nowInHours) return;
+
     const total = outcomeTracker.activeTracking.size + outcomeTracker.shadowTracking.size;
     if (total === 0) return;
 
