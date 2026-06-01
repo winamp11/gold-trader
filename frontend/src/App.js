@@ -73,18 +73,23 @@ function entryTypeColor(t) {
   return C.obs;
 }
 
+function price(n) {
+  if (n == null) return '—';
+  return n.toFixed(2);
+}
+
 // ─── AccountCard ─────────────────────────────────────────────────────────────
 
-function AccountCard({ account }) {
+function AccountCard({ account, positions }) {
   if (!account) return null;
   const color = accountColor(account.name);
   const label = accountLabel(account.name);
   const dailyPnl = account.daily_realized_pnl || 0;
   const hasWinRate = account.closed_trades > 0;
-  const winRate = hasWinRate
-    ? `${account.win_rate}% win rate`
-    : '—';
+  const winRate = hasWinRate ? `${account.win_rate}% win rate` : '—';
   const tradesStat = `${account.closed_trades} trade${account.closed_trades !== 1 ? 's' : ''} · ${winRate}`;
+
+  const myPositions = (positions || []).filter(p => p.portfolioName === account.name);
 
   return (
     <div className="account-card" style={{ '--accent': color }}>
@@ -112,6 +117,35 @@ function AccountCard({ account }) {
             : ''}
         </div>
       )}
+
+      {myPositions.map(p => (
+        <div className="pos-row" key={p.key}>
+          <span
+            className="pos-row__dir"
+            style={{ color: p.direction === 'LONG' ? C.win : C.loss }}
+          >
+            {p.direction === 'LONG' ? '↑' : '↓'} {p.direction}
+          </span>
+          <span className="pos-row__field">
+            {price(p.entryPrice)}
+            {p.currentPrice != null && p.entryTriggered
+              ? <> → {price(p.currentPrice)}</>
+              : null}
+          </span>
+          <span className="pos-row__field pos-row__field--muted">
+            SL {price(p.stopLoss)}
+          </span>
+          <span className="pos-row__field pos-row__field--muted">
+            TP {price(p.target)}
+          </span>
+          {p.entryTriggered && p.unrealizedPnl != null
+            ? <span className={`pos-row__pnl ${pnlClass(p.unrealizedPnl)}`}>
+                {pnlStr(p.unrealizedPnl)}
+              </span>
+            : <span className="pos-row__pending">pending entry</span>
+          }
+        </div>
+      ))}
     </div>
   );
 }
@@ -120,14 +154,12 @@ function AccountCard({ account }) {
 
 function toChartData(equity) {
   if (!equity) return [];
-  // Merge all timestamps from all portfolios into one sorted timeline
   const allTs = new Set();
   for (const pts of Object.values(equity)) {
     pts.forEach(p => allTs.add(p.t));
   }
   const sorted = [...allTs].sort();
 
-  // For each timestamp, carry-forward the last known balance per account
   const last = {};
   return sorted.map(t => {
     const row = { t };
@@ -200,6 +232,63 @@ function EquityChart({ equity }) {
   );
 }
 
+// ─── RecentTradesPanel ────────────────────────────────────────────────────────
+
+function RecentTradesPanel({ trades }) {
+  if (!trades?.length) {
+    return (
+      <div className="panel-placeholder">
+        No closed trades yet — positions appear here once they exit.
+      </div>
+    );
+  }
+
+  function outcomeLabel(r) {
+    if (r === 'TARGET_HIT') return 'TARGET';
+    if (r === 'STOP_HIT')   return 'STOP';
+    if (r === 'NO_ENTRY')   return 'NO ENTRY';
+    if (r === 'EXPIRED')    return 'EXPIRED';
+    return r ?? '—';
+  }
+
+  function outcomeClass(r) {
+    if (r === 'TARGET_HIT') return 'outcome--win';
+    if (r === 'STOP_HIT')   return 'outcome--loss';
+    return 'outcome--neutral';
+  }
+
+  return (
+    <div className="trades-list">
+      {trades.map(t => (
+        <div className="trade-row" key={t.id}>
+          <span
+            className="trade-row__account"
+            style={{ color: accountColor(t.portfolio_name) }}
+          >
+            {accountLabel(t.portfolio_name)}
+          </span>
+          <span
+            className="trade-row__dir"
+            style={{ color: t.direction === 'LONG' ? C.win : C.loss }}
+          >
+            {t.direction === 'LONG' ? '↑' : '↓'} {t.direction}
+          </span>
+          <span className="trade-row__prices">
+            {price(t.entry_price)} → {price(t.exit_price)}
+          </span>
+          <span className={`trade-row__outcome ${outcomeClass(t.exit_reason)}`}>
+            {outcomeLabel(t.exit_reason)}
+          </span>
+          <span className={`trade-row__pnl ${pnlClass(t.pnl)}`}>
+            {pnlStr(t.pnl)}
+          </span>
+          <span className="trade-row__time">{fmtDateTime(t.exit_timestamp)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ─── TFRow — one timeframe row ────────────────────────────────────────────────
 
 function TFRow({ label, tf }) {
@@ -224,7 +313,9 @@ function TFRow({ label, tf }) {
 
 // ─── MarketPanel ──────────────────────────────────────────────────────────────
 
-function MarketPanel({ snapshot }) {
+function MarketPanel({ snapshot, missed }) {
+  const [showMissed, setShowMissed] = useState(false);
+
   if (!snapshot) return <div className="panel-placeholder">Loading market data…</div>;
 
   if (!snapshot.tradingHours) {
@@ -237,17 +328,21 @@ function MarketPanel({ snapshot }) {
           <div className="market-closed__next">Next session: {snapshot.nextTradingTime}</div>
         )}
         {snapshot.missedOpportunitiesToday > 0 && (
-          <div className="market-closed__missed">
-            {snapshot.missedOpportunitiesToday} missed opportunit{snapshot.missedOpportunitiesToday > 1 ? 'ies' : 'y'} today
-          </div>
+          <button
+            className="market-closed__missed market-closed__missed--btn"
+            onClick={() => setShowMissed(v => !v)}
+          >
+            {snapshot.missedOpportunitiesToday} missed opportunit{snapshot.missedOpportunitiesToday > 1 ? 'ies' : 'y'} today {showMissed ? '▲' : '▼'}
+          </button>
         )}
+        {showMissed && <MissedList missed={missed} />}
       </div>
     );
   }
 
   const sig     = snapshot.signal;
   const lcd     = snapshot.lastCycleDecisions;
-  const price   = sig?.marketData?.h1?.price ?? sig?.marketData?.m30?.price;
+  const price_  = sig?.marketData?.h1?.price ?? sig?.marketData?.m30?.price;
   const allNoTrade = lcd &&
     lcd.mechanical.action === 'NO_TRADE' &&
     lcd.overlay.action    === 'NO_TRADE' &&
@@ -257,10 +352,10 @@ function MarketPanel({ snapshot }) {
     <div className="market-panel">
       {/* Price + signal state */}
       <div className="market-panel__price-row">
-        {price != null && (
+        {price_ != null && (
           <div className="market-panel__price">
             <span className="market-panel__price-label">XAU/USD</span>
-            <span className="market-panel__price-val">${price.toFixed(2)}</span>
+            <span className="market-panel__price-val">${price_.toFixed(2)}</span>
           </div>
         )}
         {sig && (
@@ -269,11 +364,17 @@ function MarketPanel({ snapshot }) {
           </div>
         )}
         {snapshot.missedOpportunitiesToday > 0 && (
-          <div className="market-panel__missed">
-            {snapshot.missedOpportunitiesToday} missed today
-          </div>
+          <button
+            className="market-panel__missed market-panel__missed--btn"
+            onClick={() => setShowMissed(v => !v)}
+          >
+            {snapshot.missedOpportunitiesToday} missed today {showMissed ? '▲' : '▼'}
+          </button>
         )}
       </div>
+
+      {/* Missed opportunities — expandable */}
+      {showMissed && <MissedList missed={missed} />}
 
       {/* 5-timeframe grid */}
       {sig?.marketData && (
@@ -308,7 +409,6 @@ function MarketPanel({ snapshot }) {
         </div>
       )}
 
-      {/* If there IS a trade, show the active setup summary */}
       {!allNoTrade && lcd && (
         <div className="why-flat">
           <div className="why-flat__title">Cycle decisions</div>
@@ -333,6 +433,35 @@ function MarketPanel({ snapshot }) {
       {!sig && !lcd && (
         <div className="panel-placeholder">Waiting for first cycle…</div>
       )}
+    </div>
+  );
+}
+
+// ─── MissedList ───────────────────────────────────────────────────────────────
+
+function MissedList({ missed }) {
+  if (!missed?.length) {
+    return <div className="missed-empty">No missed-opportunity detail yet.</div>;
+  }
+  return (
+    <div className="missed-list">
+      {missed.map(m => (
+        <div className="missed-row" key={m.id}>
+          <span className="missed-row__time">{fmtTime(m.timestamp)}</span>
+          <span className="missed-row__badge">RED</span>
+          <span
+            className="missed-row__move"
+            style={{ color: m.direction === 'UP' ? C.win : m.direction === 'DOWN' ? C.loss : '#888' }}
+          >
+            {m.direction === 'UP' ? '↑' : m.direction === 'DOWN' ? '↓' : ''}{' '}
+            {m.direction ?? '?'}{' '}
+            {m.movePts != null ? `${m.movePts.toFixed(1)} pts` : ''}
+          </span>
+          {m.outcomePrice != null && (
+            <span className="missed-row__price">@ ${m.outcomePrice.toFixed(2)}</span>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
@@ -373,29 +502,39 @@ function JournalPanel({ entries }) {
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [showCalc, setShowCalc]       = useState(false);
-  const [accounts, setAccounts]       = useState(null);
-  const [snapshot, setSnapshot]       = useState(null);
-  const [journal, setJournal]         = useState(null);
-  const [equity, setEquity]           = useState(null);
-  const [lastUpdated, setLastUpdated] = useState(null);
-  const [error, setError]             = useState(null);
+  const [showCalc, setShowCalc]         = useState(false);
+  const [accounts, setAccounts]         = useState(null);
+  const [snapshot, setSnapshot]         = useState(null);
+  const [journal, setJournal]           = useState(null);
+  const [equity, setEquity]             = useState(null);
+  const [positions, setPositions]       = useState(null);
+  const [recentTrades, setRecentTrades] = useState(null);
+  const [missed, setMissed]             = useState(null);
+  const [lastUpdated, setLastUpdated]   = useState(null);
+  const [error, setError]               = useState(null);
 
   const fetchAll = useCallback(async () => {
     try {
-      const [accRes, snapRes, journalRes, equityRes] = await Promise.all([
+      const [accRes, snapRes, journalRes, equityRes, posRes, tradesRes, missedRes] = await Promise.all([
         fetch(`${API}/api/accounts`),
         fetch(`${API}/api/market-snapshot`),
         fetch(`${API}/api/journal?limit=20`),
         fetch(`${API}/api/equity`),
+        fetch(`${API}/api/positions`),
+        fetch(`${API}/api/trades/recent?limit=30`),
+        fetch(`${API}/api/missed?limit=20`),
       ]);
-      const [accData, snapData, journalData, equityData] = await Promise.all([
+      const [accData, snapData, journalData, equityData, posData, tradesData, missedData] = await Promise.all([
         accRes.json(), snapRes.json(), journalRes.json(), equityRes.json(),
+        posRes.json(), tradesRes.json(), missedRes.json(),
       ]);
-      setAccounts(accData.accounts  || []);
+      setAccounts(accData.accounts    || []);
       setSnapshot(snapData);
-      setJournal(journalData.entries || []);
-      setEquity(equityData.equity    || null);
+      setJournal(journalData.entries  || []);
+      setEquity(equityData.equity     || null);
+      setPositions(posData.positions  || []);
+      setRecentTrades(tradesData.trades || []);
+      setMissed(missedData.missed     || []);
       setLastUpdated(new Date());
       setError(null);
     } catch (e) {
@@ -441,14 +580,20 @@ export default function App() {
 
       <main className="main">
 
-        {/* ── Scoreboard ── */}
+        {/* ── Scoreboard (with inline open positions) ── */}
         <section className="section">
           <h2 className="section__title">Accounts</h2>
           <div className="scoreboard">
-            <AccountCard account={mech}    />
-            <AccountCard account={overlay} />
-            <AccountCard account={solo}    />
+            <AccountCard account={mech}    positions={positions} />
+            <AccountCard account={overlay} positions={positions} />
+            <AccountCard account={solo}    positions={positions} />
           </div>
+        </section>
+
+        {/* ── Recent Trades ── */}
+        <section className="section">
+          <h2 className="section__title">Recent Trades</h2>
+          <RecentTradesPanel trades={recentTrades} />
         </section>
 
         {/* ── Equity curves ── */}
@@ -459,10 +604,10 @@ export default function App() {
           </div>
         </section>
 
-        {/* ── Market read ── */}
+        {/* ── Market read (with expandable missed list) ── */}
         <section className="section">
           <h2 className="section__title">Market Read</h2>
-          <MarketPanel snapshot={snapshot} />
+          <MarketPanel snapshot={snapshot} missed={missed} />
         </section>
 
         {/* ── Journal ── */}

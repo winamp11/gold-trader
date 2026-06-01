@@ -212,7 +212,13 @@ class OutcomeTracker {
       });
     }
 
-    console.log(`✅ Position finalized [${tracking.portfolioName}] ${outcome}${metadata.move ? ` (${metadata.direction} ${metadata.move} pts)` : ''}`);
+    if (tracking.type === 'GREEN') {
+      const exitStr = fillPrice != null ? ` @ $${fillPrice.toFixed(2)}` : '';
+      const pnlStr  = pnl      != null ? ` · ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}` : '';
+      console.log(`🔴 [CLOSE] ${tracking.portfolioName} | ${outcome}${exitStr}${pnlStr}`);
+    } else {
+      console.log(`✅ Position finalized [${tracking.portfolioName}] ${outcome}${metadata.move ? ` (${metadata.direction} ${metadata.move} pts)` : ''}`);
+    }
     this.activeTracking.delete(tracking.key);
 
     // Fire-and-forget journal reflection for Claude accounts only.

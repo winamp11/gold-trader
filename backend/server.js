@@ -23,6 +23,8 @@ let currentSignal       = null;
 let lastUpdate          = null;
 // In-memory cache of last cycle's per-account decisions (for market-snapshot endpoint)
 let lastCycleDecisions  = null;
+// Most-recent price seen by either the poller or the market-data cycle
+let lastKnownPrice      = null;
 
 // ── Helper: open a real position for one portfolio ─────────────────────────
 function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwner }) {
@@ -62,6 +64,7 @@ function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwn
     maxPrice:       currentPrice,
     minPrice:       currentPrice
   });
+  console.log(`🟢 [OPEN] ${portfolio.name} | ${decision.direction} entry=${decision.entry?.toFixed(2)} stop=${decision.stop?.toFixed(2)} target=${decision.target?.toFixed(2)} lots=${decision.lots}`);
 }
 
 // ── Helper: open a veto shadow for one portfolio ───────────────────────────
@@ -111,6 +114,7 @@ async function generateSignalIfTradingHours() {
     const marketData = await twelveData.getMarketDataStaggered();
     const atr        = { h1: marketData.h1.atr, m30: marketData.m30.atr };
     const currentPrice = marketData.h1.price || marketData.m30.price;
+    lastKnownPrice = currentPrice;
     // Load all three portfolios fresh from DB (balances may have changed)
     const mechPortfolio    = database.getPortfolioByName('mechanical');
     const overlayPortfolio = database.getPortfolioByName('claude_overlay');
@@ -204,6 +208,7 @@ function startPricePoller() {
 
     try {
       const price = await twelveData.fetchPrice('XAU/USD');
+      lastKnownPrice = price;
       console.log(`📡 [POLLER] $${price.toFixed(2)} | positions=${outcomeTracker.activeTracking.size}, shadows=${outcomeTracker.shadowTracking.size}`);
       outcomeTracker.checkOutcomesWithPrice(price);
     } catch (error) {
@@ -478,6 +483,101 @@ app.get('/api/equity', (req, res) => {
     }
 
     res.json({ equity, startingBalance: 100000 });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Open GREEN positions — for the dashboard positions drawer.
+// Unrealized P&L is approximated from lastKnownPrice (null if not yet seen).
+app.get('/api/positions', (req, res) => {
+  try {
+    const positions = [];
+    for (const t of outcomeTracker.activeTracking.values()) {
+      if (t.type !== 'GREEN') continue;
+      let unrealizedPnl = null;
+      if (t.entryTriggered && lastKnownPrice != null) {
+        const priceMove = t.direction === 'LONG'
+          ? lastKnownPrice - t.entryPrice
+          : t.entryPrice - lastKnownPrice;
+        unrealizedPnl = Math.round(priceMove * 100 * (t.lots || 0.01) * 100) / 100;
+      }
+      positions.push({
+        key:            t.key,
+        portfolioName:  t.portfolioName,
+        direction:      t.direction,
+        entryPrice:     t.entryPrice,
+        stopLoss:       t.stopLoss,
+        target:         t.target,
+        lots:           t.lots,
+        startTime:      t.startTime,
+        entryTriggered: t.entryTriggered,
+        currentPrice:   lastKnownPrice,
+        unrealizedPnl,
+        tag:            t.tag,
+      });
+    }
+    res.json({ positions });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Recent closed trades — optionally filtered by account name.
+app.get('/api/trades/recent', (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+    const account = req.query.account;
+    let query = `
+      SELECT t.id, t.timestamp, t.direction, t.entry_price, t.exit_price,
+             t.lot_size, t.stop_loss, t.take_profit, t.pnl,
+             t.exit_timestamp, t.exit_reason, t.tag,
+             p.name AS portfolio_name
+      FROM trades t
+      JOIN portfolios p ON p.id = t.portfolio_id
+      WHERE t.exit_reason IS NOT NULL
+    `;
+    const params = [];
+    if (account) {
+      const p = database.getPortfolioByName(account);
+      if (!p) return res.json({ trades: [] });
+      query += ' AND t.portfolio_id = ?';
+      params.push(p.id);
+    }
+    query += ' ORDER BY t.exit_timestamp DESC LIMIT ?';
+    params.push(limit);
+    const trades = database.db.prepare(query).all(...params);
+    res.json({ trades });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Missed-opportunity detail — direction and size of move for each RED signal
+// that crossed the 15-pt threshold. Metadata stored by checkRedPosition.
+app.get('/api/missed', (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+    const rows = database.db.prepare(`
+      SELECT id, timestamp, outcome_timestamp, outcome_price, outcome_metadata
+      FROM signals
+      WHERE outcome = 'MISSED_OPPORTUNITY'
+      ORDER BY outcome_timestamp DESC
+      LIMIT ?
+    `).all(limit);
+    const missed = rows.map(r => {
+      let meta = {};
+      try { meta = JSON.parse(r.outcome_metadata || '{}'); } catch {}
+      return {
+        id:               r.id,
+        timestamp:        r.timestamp,
+        outcomeTimestamp: r.outcome_timestamp,
+        outcomePrice:     r.outcome_price,
+        direction:        meta.direction ?? null,
+        movePts:          meta.move != null ? parseFloat(meta.move) : null,
+      };
+    });
+    res.json({ missed });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
