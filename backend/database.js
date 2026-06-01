@@ -9,26 +9,32 @@ class DatabaseService {
 
   async init() {
     const connectionString = process.env.DATABASE_URL;
-    if (!connectionString) {
-      throw new Error('DATABASE_URL is required — set it to your Railway PostgreSQL connection string');
+    const pgHost           = process.env.PGHOST || '';
+
+    if (!connectionString && !pgHost) {
+      throw new Error(
+        'No database config found. Set DATABASE_URL, or reference PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE from the Postgres service.'
+      );
     }
 
-    // Internal Railway URLs (*.railway.internal) don't use SSL.
-    // External proxy URLs (*.proxy.rlwy.net / external) require SSL.
-    const ssl = connectionString.includes('railway.internal')
-      ? false
-      : { rejectUnauthorized: false };
+    // Internal Railway hostnames (*.railway.internal) don't need SSL.
+    // External proxy hostnames require SSL with self-signed cert.
+    const isInternal = connectionString
+      ? connectionString.includes('railway.internal')
+      : pgHost.includes('railway.internal');
+    const ssl = isInternal ? false : { rejectUnauthorized: false };
 
+    // If DATABASE_URL is set use it; otherwise pg reads PG* env vars natively.
     this.pool = new Pool({
-      connectionString,
+      ...(connectionString ? { connectionString } : {}),
       ssl,
       max: 10,
-      connectionTimeoutMillis: 10000,  // fail fast if DB is unreachable
+      connectionTimeoutMillis: 15000,
       idleTimeoutMillis: 30000,
     });
 
-    console.log(`🔌 Connecting to PostgreSQL (ssl=${ssl ? 'on' : 'off'})...`);
-    await this.pool.query('SELECT 1');  // verify connection
+    console.log(`🔌 Connecting to PostgreSQL via ${connectionString ? 'DATABASE_URL' : 'PGHOST=' + pgHost} (ssl=${ssl ? 'on' : 'off'})...`);
+    await this.pool.query('SELECT 1');
     await this.initialize();
     console.log('✅ Database initialized (PostgreSQL)');
   }
