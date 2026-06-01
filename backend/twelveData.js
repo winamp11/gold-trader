@@ -208,7 +208,9 @@ class TwelveDataService {
   //   t=130 Batch C (4 calls)             ← 4+1 = 5 across [120,180) ✓
   async getMarketDataStaggered(symbol = 'XAU/USD') {
     console.log('\n🚀 Starting staggered market data fetch (3 batches, 17 calls)...\n');
-    this.resetCallCount();
+    // NOTE: this.callCount is a running daily total — NOT reset here.
+    // Resetting it would include the price poller's concurrent fetchPrice()
+    // calls (fired during the 65 s waits) and make the cycle show 19 instead of 17.
 
     try {
       // === BATCH A (7 calls) — all time_series + RSI for H4 and H1 ===
@@ -222,7 +224,7 @@ class TwelveDataService {
         this.fetchRSI(symbol, '4h'),                // [5]
         this.fetchRSI(symbol, '1h')                 // [6]
       ]);
-      console.log(`✅ Batch A complete (${this.callCount} calls)`);
+      console.log(`✅ Batch A complete ( 7/17 this cycle)`);
 
       // Local ATR for all timeframes — computed from OHLC already in hand
       const localH4Atr  = this.computeATR(batchA[0].values);
@@ -246,7 +248,7 @@ class TwelveDataService {
           .catch(e => { console.warn(`⚠️  M30 ATR API failed (${e.message}) — local fallback`); return null; }),
         this.fetchMACD(symbol, '4h')
       ]);
-      console.log(`✅ Batch B complete (${this.callCount} calls)`);
+      console.log(`✅ Batch B complete (13/17 this cycle)`);
       console.log(`📐 ATR — H1: ${h1AtrApi !== null ? 'API' : 'local'}, M30: ${m30AtrApi !== null ? 'API' : 'local'}`);
 
       console.log('⏳ Waiting 65 s before batch C...');
@@ -260,7 +262,7 @@ class TwelveDataService {
         this.fetchMACD(symbol, '15min'),
         this.fetchMACD(symbol, '5min')
       ]);
-      console.log(`✅ Batch C complete — ${this.callCount} total calls this cycle`);
+      console.log(`✅ Batch C complete — 17/17 this cycle`);
 
       const result = {
         symbol,
@@ -305,10 +307,10 @@ class TwelveDataService {
           macd: macdM5.macd, macd_signal: macdM5.signal, macd_hist: macdM5.histogram,
           atr: localM5Atr            // local only
         },
-        apiCallCount: this.callCount
+        apiCallCount: 17
       };
 
-      console.log(`📞 Total API calls this cycle: ${this.callCount}`);
+      console.log(`📞 Total API calls this cycle: 17 (daily running total: ${this.callCount})`);
       return result;
     } catch (error) {
       console.error('Error getting staggered market data:', error.message);
