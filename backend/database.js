@@ -12,11 +12,22 @@ class DatabaseService {
     if (!connectionString) {
       throw new Error('DATABASE_URL is required — set it to your Railway PostgreSQL connection string');
     }
+
+    // Internal Railway URLs (*.railway.internal) don't use SSL.
+    // External proxy URLs (*.proxy.rlwy.net / external) require SSL.
+    const ssl = connectionString.includes('railway.internal')
+      ? false
+      : { rejectUnauthorized: false };
+
     this.pool = new Pool({
       connectionString,
-      ssl: { rejectUnauthorized: false },
+      ssl,
       max: 10,
+      connectionTimeoutMillis: 10000,  // fail fast if DB is unreachable
+      idleTimeoutMillis: 30000,
     });
+
+    console.log(`🔌 Connecting to PostgreSQL (ssl=${ssl ? 'on' : 'off'})...`);
     await this.pool.query('SELECT 1');  // verify connection
     await this.initialize();
     console.log('✅ Database initialized (PostgreSQL)');
