@@ -352,10 +352,14 @@ app.get('/api/accounts', (req, res) => {
   try {
     const accounts = database.getAccountsSummary();
 
-    // In-memory open-position counts
+    // In-memory open-position counts — GREEN only.
+    // RED entries in activeTracking are missed-opportunity monitors (no trade,
+    // no capital at risk) and must not appear as open positions on the dashboard.
     const openByPortfolio = {};
     for (const t of outcomeTracker.activeTracking.values()) {
-      openByPortfolio[t.portfolioId] = (openByPortfolio[t.portfolioId] || 0) + 1;
+      if (t.type === 'GREEN') {
+        openByPortfolio[t.portfolioId] = (openByPortfolio[t.portfolioId] || 0) + 1;
+      }
     }
 
     const overlayPortfolio = database.getPortfolioByName('claude_overlay');
