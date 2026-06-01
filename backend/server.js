@@ -630,6 +630,16 @@ app.listen(PORT, () => {
   console.log(`📡 Server running on http://localhost:${PORT}`);
   console.log(`🔑 TwelveData key: ${process.env.TWELVE_DATA_API_KEY ? 'YES' : 'NO'}`);
   console.log(`🤖 Claude key:     ${process.env.CLAUDE_API_KEY    ? 'YES' : 'NO'}`);
+
+  // ── Persistence check ─────────────────────────────────────────────────────
+  if (process.env.DATABASE_PATH) {
+    console.log(`💾 DB path:        ${process.env.DATABASE_PATH}  ✅ persistent`);
+  } else {
+    console.warn('⚠️  DATABASE_PATH not set — DB is EPHEMERAL (in-container, wiped on redeploy)');
+    console.warn('⚠️  Fix: create a Railway volume, mount at /data, set DATABASE_PATH=/data/trading.db');
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   console.log(`⏰ Trading window: 16:30–20:30 UAE (4 h, NY session, Mon–Fri)`);
   console.log(`🔄 Signal cron:  every 8 min  → ~30 cycles × 17 calls = ~510 calls/day`);
   console.log(`📡 Price poller: every 1 min  → ~240 checks × 1 call  = ~240 calls/day`);
