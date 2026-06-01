@@ -19,8 +19,10 @@ app.use(cors());
 app.use(express.json());
 
 // In-memory cache for the current mechanical signal
-let currentSignal = null;
-let lastUpdate    = null;
+let currentSignal       = null;
+let lastUpdate          = null;
+// In-memory cache of last cycle's per-account decisions (for market-snapshot endpoint)
+let lastCycleDecisions  = null;
 
 // ── Helper: open a real position for one portfolio ─────────────────────────
 function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwner }) {
@@ -176,6 +178,14 @@ async function generateSignalIfTradingHours() {
     // Cache the mechanical signal for /api/signal
     currentSignal = mechSignal;
     lastUpdate    = Date.now();
+
+    // Cache per-account decisions for /api/market-snapshot
+    lastCycleDecisions = {
+      timestamp:  new Date().toISOString(),
+      mechanical: { action: mechDecision.action,    reasoning: mechDecision.reasoning,    tag: mechDecision.tag    },
+      overlay:    { action: overlayDecision.action, reasoning: overlayDecision.reasoning, tag: overlayDecision.tag },
+      solo:       { action: soloDecision.action,    reasoning: soloDecision.reasoning,    tag: soloDecision.tag    },
+    };
 
     console.log(`✅ [CYCLE] mech=${mechDecision.action}, overlay=${overlayDecision.action}, solo=${soloDecision.action}`);
   } catch (error) {
@@ -389,6 +399,85 @@ app.post('/api/autochartist/patterns', (req, res) => {
   }
 });
 
+
+// ── Dashboard endpoints ───────────────────────────────────────────────────
+
+// Recent journal entries across both Claude accounts, newest-first.
+app.get('/api/journal', (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+    const entries = database.db.prepare(`
+      SELECT j.id, j.portfolio_id, p.name AS portfolio_name,
+             j.timestamp, j.entry_type, j.lesson_text, j.tag
+      FROM journal j
+      JOIN portfolios p ON p.id = j.portfolio_id
+      ORDER BY j.timestamp DESC
+      LIMIT ?
+    `).all(limit);
+    res.json({ entries });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Current market state: signal, 5-timeframe snapshot, per-account last-cycle
+// decisions, today's missed-opportunity count.
+app.get('/api/market-snapshot', (req, res) => {
+  try {
+    const tradingHours = isTradingHours();
+    const today = new Date().toISOString().split('T')[0];
+    const missedOpportunitiesToday = database.db.prepare(
+      `SELECT COUNT(*) AS n FROM signals WHERE date(timestamp) = ? AND outcome = 'MISSED_OPPORTUNITY'`
+    ).get(today).n;
+
+    res.json({
+      tradingHours,
+      nextTradingTime:         tradingHours ? null : getNextTradingTime(),
+      signal:                  currentSignal   || null,
+      lastCycleDecisions:      lastCycleDecisions || null,
+      missedOpportunitiesToday,
+      timestamp:               new Date().toISOString(),
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Per-portfolio equity curve: [{ t, b }] points from closed trades.
+// Flat at starting_balance when no trades exist — chart still renders.
+app.get('/api/equity', (req, res) => {
+  try {
+    const portfolios = database.getAllPortfolios();
+    const equity = {};
+    const dayStart = new Date();
+    dayStart.setHours(0, 0, 0, 0);
+
+    for (const p of portfolios) {
+      const trades = database.db.prepare(`
+        SELECT exit_timestamp AS t, pnl
+        FROM trades
+        WHERE portfolio_id = ? AND exit_reason IS NOT NULL AND pnl IS NOT NULL
+        ORDER BY exit_timestamp ASC
+      `).all(p.id);
+
+      const points = [{ t: dayStart.toISOString(), b: p.starting_balance }];
+      let running = p.starting_balance;
+      for (const tr of trades) {
+        running = Math.round((running + tr.pnl) * 100) / 100;
+        points.push({ t: tr.t, b: running });
+      }
+      // Ensure the most recent balance is reflected even if we have open P&L
+      if (points[points.length - 1].b !== p.current_balance) {
+        points.push({ t: new Date().toISOString(), b: p.current_balance });
+      }
+      equity[p.name] = points;
+    }
+
+    res.json({ equity, startingBalance: 100000 });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // ── Startup ────────────────────────────────────────────────────────────────
 
