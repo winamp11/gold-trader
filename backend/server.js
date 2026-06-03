@@ -138,7 +138,11 @@ async function generateSignalIfTradingHours() {
     const overlayLessons = await database.getRecentLessons(overlayPortfolio.id);
     const soloLessons    = await database.getRecentLessons(soloPortfolio.id);
 
-    // ── Mechanical decider ──────────────────────────────────────────────────
+    // ── Mechanical decider — pure market-analysis proposal ─────────────────
+    // mechDecision reflects technical analysis ONLY — no position/budget gating.
+    // It is ALWAYS passed to the overlay decider unchanged below.
+    // Whether mechanical itself executes is determined separately; a full
+    // mechanical budget must never blind or block the overlay account.
     const mechDecision = await mechanicalDecide(marketData, atr, mechPortfolio, []);
 
     // Persist the mechanical signal (backward compat with /api/signal, history)
@@ -146,6 +150,7 @@ async function generateSignalIfTradingHours() {
     mechSignal.marketData.m5 = marketData.m5;
     const signalId = await database.saveSignal(mechSignal);
 
+    // ── Mechanical execution — gated by its own book, independent of overlay ─
     if (mechDecision.action === 'TRADE') {
       await openPosition({
         portfolio:     mechPortfolio,
@@ -175,9 +180,17 @@ async function generateSignalIfTradingHours() {
     // Check outcomes against fresh price before opening new positions
     await outcomeTracker.checkOutcomesWithPrice(currentPrice);
 
+    // ── Each Claude account queries its OWN open positions only ──────────
+    // Isolation is strict: overlay never sees solo's positions and vice versa,
+    // and neither sees mechanical's. Each account self-manages concentration
+    // and risk budget from this data.
+    const overlayOpenPositions = outcomeTracker.getOpenPositionsForPortfolio(overlayPortfolio.id);
+    const soloOpenPositions    = outcomeTracker.getOpenPositionsForPortfolio(soloPortfolio.id);
+
     // ── Claude Overlay decider ────────────────────────────────────────────
+    // Receives mechDecision regardless of whether mechanical opened above.
     const overlayDecision = await claudeOverlayDecide(
-      marketData, atr, overlayPortfolio, overlayLessons, mechDecision
+      marketData, atr, overlayPortfolio, overlayLessons, mechDecision, overlayOpenPositions
     );
     if (overlayDecision.action === 'TRADE') {
       await openPosition({ portfolio: overlayPortfolio, decision: overlayDecision, signalId, currentPrice, isSignalOwner: false });
@@ -186,7 +199,9 @@ async function generateSignalIfTradingHours() {
     }
 
     // ── Claude Solo decider ───────────────────────────────────────────────
-    const soloDecision = await claudeSoloDecide(marketData, atr, soloPortfolio, soloLessons);
+    const soloDecision = await claudeSoloDecide(
+      marketData, atr, soloPortfolio, soloLessons, soloOpenPositions
+    );
     if (soloDecision.action === 'TRADE') {
       await openPosition({ portfolio: soloPortfolio, decision: soloDecision, signalId, currentPrice, isSignalOwner: false });
     } else if (soloDecision.action === 'VETO') {

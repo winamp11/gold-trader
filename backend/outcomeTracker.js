@@ -54,6 +54,19 @@ class OutcomeTracker {
     }
   }
 
+  // ── Own-account position query ───────────────────────────────────────────
+  // Returns active GREEN positions for ONE portfolio only.
+  // Used to give each Claude account visibility into its own book without
+  // leaking another account's positions into the prompt.
+
+  getOpenPositionsForPortfolio(portfolioId) {
+    const out = [];
+    for (const [, t] of this.activeTracking) {
+      if (t.portfolioId === portfolioId && t.type === 'GREEN') out.push(t);
+    }
+    return out;
+  }
+
   // ── Price-tick evaluation (called by the 1-min poller) ───────────────────
 
   async checkOutcomesWithPrice(currentPrice) {

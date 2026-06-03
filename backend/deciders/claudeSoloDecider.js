@@ -131,6 +131,19 @@ function formatSnapshot(marketData, atr, portfolio) {
   return lines.join('\n');
 }
 
+function formatOpenPositions(positions) {
+  if (!positions || positions.length === 0) return 'OPEN POSITIONS: none';
+  const lines = [`OPEN POSITIONS (${positions.length}):`];
+  for (const p of positions) {
+    const status = p.entryTriggered ? 'active' : 'pending fill';
+    lines.push(
+      `  ${p.direction}  entry=${fmt(p.entryPrice)}  stop=${fmt(p.stopLoss)}` +
+      `  target=${fmt(p.target)}  lots=${fmt(p.lots, 2)}  [${status}]`
+    );
+  }
+  return lines.join('\n');
+}
+
 function formatLessons(lessons) {
   if (!Array.isArray(lessons) || lessons.length === 0) {
     return 'No lessons recorded yet.';
@@ -142,9 +155,11 @@ function formatLessons(lessons) {
 
 // ── Decider ──────────────────────────────────────────────────────────────
 
-export async function decide(marketData, atr, portfolio, recentLessons) {
+export async function decide(marketData, atr, portfolio, recentLessons, openPositions = []) {
   const userContent = [
     formatSnapshot(marketData, atr, portfolio),
+    '',
+    formatOpenPositions(openPositions),
     '',
     `RECENT LESSONS (${recentLessons?.length ?? 0}):`,
     formatLessons(recentLessons),
