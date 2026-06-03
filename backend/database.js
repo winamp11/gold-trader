@@ -40,6 +40,14 @@ class DatabaseService {
   }
 
   async initialize() {
+    // Row-count audit — logged before and after so any accidental data loss is visible.
+    let tradesBefore = 0;
+    try {
+      const r = await this.pool.query('SELECT COUNT(*) AS n FROM trades');
+      tradesBefore = parseInt(r.rows[0].n) || 0;
+      console.log(`🔍 trades table: ${tradesBefore} rows before schema sync`);
+    } catch { /* table doesn't exist yet on first boot */ }
+
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS signals (
         id SERIAL PRIMARY KEY,
@@ -196,7 +204,27 @@ class DatabaseService {
       )
     `);
 
+    // Additive columns: per-signal overlay and solo decision labels.
+    // Existing rows remain NULL; new rows populated after each cycle.
+    // Values: 'TRADE' | 'VETO' | 'NO_TRADE' | 'PARSE_FAILURE' | 'VALIDATION_ERROR' | 'API_ERROR'
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS overlay_decision TEXT`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS solo_decision TEXT`);
+
+    // Confirm row count unchanged after all DDL
+    try {
+      const r = await this.pool.query('SELECT COUNT(*) AS n FROM trades');
+      const tradesAfter = parseInt(r.rows[0].n) || 0;
+      console.log(`✅ trades table: ${tradesAfter} rows after schema sync${tradesAfter === tradesBefore ? ' (unchanged ✓)' : ' ⚠️ COUNT CHANGED'}`);
+    } catch { /* ignore */ }
+
     console.log('✅ Schema up to date');
+  }
+
+  async updateSignalDecisions(signalId, overlayDecision, soloDecision) {
+    await this.pool.query(
+      'UPDATE signals SET overlay_decision = $1, solo_decision = $2 WHERE id = $3',
+      [overlayDecision, soloDecision, signalId]
+    );
   }
 
   async saveSignal(signalData) {

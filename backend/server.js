@@ -102,6 +102,18 @@ async function openVetoShadow({ portfolio, decision, currentPrice }) {
   });
 }
 
+// ── Helper: classify a decision for experiment tracking ───────────────────
+// Maps a decision object to a short label stored in signals.overlay_decision
+// / signals.solo_decision. Parse/validation/API failures are stored as
+// distinct strings so they're never conflated with genuine NO_TRADE verdicts.
+function decisionLabel(decision) {
+  const tag = decision?.tag ?? '';
+  if (tag.endsWith('_parse_failure'))    return 'PARSE_FAILURE';
+  if (tag.endsWith('_validation_error')) return 'VALIDATION_ERROR';
+  if (tag.endsWith('_api_error'))        return 'API_ERROR';
+  return decision?.action ?? 'NO_TRADE';
+}
+
 // ── Signal generation cycle ────────────────────────────────────────────────
 async function generateSignalIfTradingHours() {
   if (!isTradingHours()) {
@@ -180,6 +192,14 @@ async function generateSignalIfTradingHours() {
     } else if (soloDecision.action === 'VETO') {
       await openVetoShadow({ portfolio: soloPortfolio, decision: soloDecision, currentPrice });
     }
+
+    // Record which decision each Claude account reached (distinguishes
+    // parse/API failures from genuine TRADE / VETO / NO_TRADE verdicts).
+    await database.updateSignalDecisions(
+      signalId,
+      decisionLabel(overlayDecision),
+      decisionLabel(soloDecision)
+    );
 
     // Cache the mechanical signal for /api/signal
     currentSignal = mechSignal;

@@ -5,7 +5,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 
 export const MODEL      = 'claude-sonnet-4-6';
-export const MAX_TOKENS = 500;
+export const MAX_TOKENS = 1024;  // raised from 500 — preamble prose can consume ~200 tokens before JSON
 
 const LOT_MIN = 0.01;
 const LOT_MAX = 1.0;
@@ -70,8 +70,12 @@ function clampLots(raw, deciderName) {
 }
 
 // ── Safe fallback ────────────────────────────────────────────────────────
+// failureType values:
+//   'parse_failure'      — response had no JSON, or JSON.parse failed
+//   'validation_error'   — JSON parsed but failed schema/geometry checks
+//   'api_error'          — network timeout, rate-limit, or SDK error
 
-function noTrade(deciderName, reason) {
+function noTrade(deciderName, reason, failureType = 'api_error') {
   return {
     action:    'NO_TRADE',
     direction: null,
@@ -80,7 +84,7 @@ function noTrade(deciderName, reason) {
     target:    null,
     lots:      null,
     reasoning: `decision unavailable: ${reason}`,
-    tag:       `${deciderName}_error`
+    tag:       `${deciderName}_${failureType}`
   };
 }
 
@@ -147,6 +151,10 @@ export async function callDecider({ systemPrompt, userContent, deciderName }) {
   const n = nextCallNum();
   console.log(`🤖 [${deciderName}] Claude call #${n} today`);
 
+  // Tracks which stage we reached — determines the noTrade tag on failure.
+  // Starts as 'api_error'; updated as we pass each parsing stage.
+  let failureType = 'api_error';
+
   try {
     const resp = await getClient().messages.create(
       {
@@ -160,7 +168,6 @@ export async function callDecider({ systemPrompt, userContent, deciderName }) {
       { timeout: 30_000 }
     );
 
-    // Log and capture token usage for cost visibility
     const u = resp.usage;
     const cacheCreate = u.cache_creation_input_tokens ?? 0;
     const cacheRead   = u.cache_read_input_tokens   ?? 0;
@@ -173,23 +180,35 @@ export async function callDecider({ systemPrompt, userContent, deciderName }) {
 
     const raw = resp.content[0]?.text ?? '';
 
-    // Strip markdown code fences if Claude wrapped the JSON
+    // Any failure from here is a content/parse problem, not an API problem.
+    failureType = 'parse_failure';
+
+    // Extract the first {...} block — handles markdown fences and prose preambles.
     const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error('response contained no JSON object');
+    if (!match) {
+      console.error(`❌ [${deciderName}] no JSON object found in response. Raw text (${raw.length} chars):\n─────\n${raw}\n─────`);
+      throw new Error('response contained no JSON object');
+    }
 
     let parsed;
     try   { parsed = JSON.parse(match[0]); }
-    catch (e) { throw new Error(`JSON.parse failed: ${e.message}`); }
+    catch (e) {
+      console.error(`❌ [${deciderName}] JSON.parse failed. Raw text (${raw.length} chars):\n─────\n${raw}\n─────`);
+      throw new Error(`JSON.parse failed: ${e.message}`);
+    }
 
+    // Schema/geometry validation failures are distinct from parse failures.
+    failureType = 'validation_error';
     const err = validateDecision(parsed);
-    if (err) throw new Error(err);
+    if (err) {
+      console.error(`❌ [${deciderName}] validation failed: ${err}. Parsed object: ${JSON.stringify(parsed)}`);
+      throw new Error(err);
+    }
 
-    // Clamp lots for any TRADE
     if (parsed.action === 'TRADE') {
       parsed.lots = clampLots(parsed.lots, deciderName);
     }
 
-    // Ensure string fields are present
     if (typeof parsed.tag !== 'string')       parsed.tag       = `${deciderName}_decision`;
     if (typeof parsed.reasoning !== 'string') parsed.reasoning = '(no reasoning provided)';
 
@@ -198,6 +217,6 @@ export async function callDecider({ systemPrompt, userContent, deciderName }) {
 
   } catch (err) {
     console.error(`❌ [${deciderName}] ${err.message}`);
-    return noTrade(deciderName, err.message);
+    return noTrade(deciderName, err.message, failureType);
   }
 }
