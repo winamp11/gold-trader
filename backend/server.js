@@ -5,6 +5,7 @@ import twelveData from './twelveData.js';
 import database from './database.js';
 import outcomeTracker from './outcomeTracker.js';
 import { isTradingHours, getNextTradingTime } from './tradingHours.js';
+import { VALUE_PER_LOT } from './contractSpec.js';
 
 import { decide as mechanicalDecide }    from './deciders/mechanicalDecider.js';
 import { decide as claudeOverlayDecide } from './deciders/claudeOverlayDecider.js';
@@ -27,6 +28,38 @@ let lastCycleDecisions  = null;
 let lastKnownPrice      = null;
 // Tracks previous poller-tick state so we detect the 20:30 window-close edge
 let wasInTradingHours   = isTradingHours();
+
+// ── Risk-budget helpers ────────────────────────────────────────────────────
+// All three use VALUE_PER_LOT so sizing and P&L share the same contract value.
+
+function computeOpenRisk(positions) {
+  return positions.reduce(
+    (sum, p) => sum + Math.abs(p.entryPrice - p.stopLoss) * (p.lots || 0.01) * VALUE_PER_LOT,
+    0
+  );
+}
+
+function computeProposedRisk(decision) {
+  return Math.abs(decision.entry - decision.stop) * decision.lots * VALUE_PER_LOT;
+}
+
+// Returns true if opening the position keeps combined risk ≤ 10% of balance.
+// Logs a one-liner and returns false if the ceiling would be breached.
+function checkRiskBudget(portfolio, openPositions, decision) {
+  const maxRisk  = portfolio.current_balance * 0.10;
+  const existing = computeOpenRisk(openPositions);
+  const added    = computeProposedRisk(decision);
+  const combined = existing + added;
+  if (combined > maxRisk) {
+    console.log(
+      `⛔ [${portfolio.name}] risk budget full: combined would be ` +
+      `$${combined.toFixed(0)} (${(combined / portfolio.current_balance * 100).toFixed(1)}%)` +
+      ` > 10% ceiling $${maxRisk.toFixed(0)}`
+    );
+    return false;
+  }
+  return true;
+}
 
 // ── Helper: open a real position for one portfolio ─────────────────────────
 async function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwner }) {
@@ -150,17 +183,26 @@ async function generateSignalIfTradingHours() {
     mechSignal.marketData.m5 = marketData.m5;
     const signalId = await database.saveSignal(mechSignal);
 
-    // ── Mechanical execution — gated by its own book, independent of overlay ─
+    // ── Close stale positions BEFORE opening any new ones ─────────────────
+    await outcomeTracker.checkOutcomesWithPrice(currentPrice);
+
+    // ── Mechanical execution — gated by its own risk budget ───────────────
+    // Budget check is separate from the proposal so mechDecision still reaches
+    // the overlay unchanged even when mechanical cannot open.
+    const mechOpenPositions = outcomeTracker.getOpenPositionsForPortfolio(mechPortfolio.id);
     if (mechDecision.action === 'TRADE') {
-      await openPosition({
-        portfolio:     mechPortfolio,
-        decision:      mechDecision,
-        signalId,
-        currentPrice,
-        isSignalOwner: true   // updates signals table on close
-      });
+      if (checkRiskBudget(mechPortfolio, mechOpenPositions, mechDecision)) {
+        await openPosition({
+          portfolio:     mechPortfolio,
+          decision:      mechDecision,
+          signalId,
+          currentPrice,
+          isSignalOwner: true   // updates signals table on close
+        });
+      }
+      // else: budget full — logged by checkRiskBudget; mechDecision still flows to overlay
     } else {
-      // Track RED signal for missed-opportunity detection
+      // No setup → track RED for missed-opportunity detection
       const key = `${mechPortfolio.id}_${signalId}`;
       outcomeTracker.startTracking(key, {
         key,
@@ -177,13 +219,11 @@ async function generateSignalIfTradingHours() {
       });
     }
 
-    // Check outcomes against fresh price before opening new positions
-    await outcomeTracker.checkOutcomesWithPrice(currentPrice);
-
     // ── Each Claude account queries its OWN open positions only ──────────
     // Isolation is strict: overlay never sees solo's positions and vice versa,
     // and neither sees mechanical's. Each account self-manages concentration
-    // and risk budget from this data.
+    // and risk budget from this data. Positions are read after checkOutcomes
+    // so any that just closed are already gone.
     const overlayOpenPositions = outcomeTracker.getOpenPositionsForPortfolio(overlayPortfolio.id);
     const soloOpenPositions    = outcomeTracker.getOpenPositionsForPortfolio(soloPortfolio.id);
 
@@ -193,7 +233,9 @@ async function generateSignalIfTradingHours() {
       marketData, atr, overlayPortfolio, overlayLessons, mechDecision, overlayOpenPositions
     );
     if (overlayDecision.action === 'TRADE') {
-      await openPosition({ portfolio: overlayPortfolio, decision: overlayDecision, signalId, currentPrice, isSignalOwner: false });
+      if (checkRiskBudget(overlayPortfolio, overlayOpenPositions, overlayDecision)) {
+        await openPosition({ portfolio: overlayPortfolio, decision: overlayDecision, signalId, currentPrice, isSignalOwner: false });
+      }
     } else if (overlayDecision.action === 'VETO') {
       await openVetoShadow({ portfolio: overlayPortfolio, decision: overlayDecision, currentPrice });
     }
@@ -203,7 +245,9 @@ async function generateSignalIfTradingHours() {
       marketData, atr, soloPortfolio, soloLessons, soloOpenPositions
     );
     if (soloDecision.action === 'TRADE') {
-      await openPosition({ portfolio: soloPortfolio, decision: soloDecision, signalId, currentPrice, isSignalOwner: false });
+      if (checkRiskBudget(soloPortfolio, soloOpenPositions, soloDecision)) {
+        await openPosition({ portfolio: soloPortfolio, decision: soloDecision, signalId, currentPrice, isSignalOwner: false });
+      }
     } else if (soloDecision.action === 'VETO') {
       await openVetoShadow({ portfolio: soloPortfolio, decision: soloDecision, currentPrice });
     }

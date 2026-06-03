@@ -1,3 +1,5 @@
+import { VALUE_PER_LOT } from './contractSpec.js';
+
 class SignalEngine {
   constructor() {
     this.lastSignal = null;
@@ -76,26 +78,21 @@ class SignalEngine {
 
   calculatePositionSize(accountBalance, entryPrice, stopLoss, riskPercent = 2) {
     const riskAmount = accountBalance * (riskPercent / 100);
-    const pointRisk = Math.abs(entryPrice - stopLoss);
-    const pointValue = 0.10; // Per 0.01 lot
-    
-    const optimalLots = riskAmount / (pointRisk * pointValue);
-    
-    // Round to nearest 0.01 lot
-    const lots = Math.floor(optimalLots * 100) / 100;
-    
-    // Cap at maximum safe size for account
-    const maxLots = accountBalance < 500 ? 0.10 : 
-                    accountBalance < 1000 ? 0.20 : 0.50;
-    
-    const finalLots = Math.min(lots, maxLots);
-    
+    const pointRisk  = Math.abs(entryPrice - stopLoss);
+
+    // lots = riskAmount / (stopDistance × VALUE_PER_LOT)
+    // e.g. $100k account, 2% risk = $2,000, 20pt stop:
+    //   lots = 2000 / (20 × 100) = 1.0 lot → risk verified = 1.0×20×100 = $2,000 ✓
+    const rawLots   = riskAmount / (pointRisk * VALUE_PER_LOT);
+    const finalLots = Math.max(0.01, Math.min(Math.floor(rawLots * 100) / 100, 1.0));
+
+    const actualRisk = finalLots * pointRisk * VALUE_PER_LOT;
     return {
-      lots: finalLots,
-      riskAmount: finalLots * pointRisk * pointValue,
-      riskPercent: (finalLots * pointRisk * pointValue / accountBalance) * 100,
+      lots:           finalLots,
+      riskAmount:     actualRisk,
+      riskPercent:    (actualRisk / accountBalance) * 100,
       pointRisk,
-      potentialProfit: 0  // Will be calculated with target
+      potentialProfit: 0  // filled in by caller with target
     };
   }
 

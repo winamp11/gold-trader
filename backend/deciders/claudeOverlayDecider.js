@@ -6,6 +6,7 @@
 //   Wire the parameter through now; the prompt already has a lessons section.
 
 import { callDecider } from './claudeClient.js';
+import { VALUE_PER_LOT } from '../contractSpec.js';
 
 // ── System prompt (static → prompt-cached after first call) ─────────────
 
@@ -139,17 +140,29 @@ function formatProposal(proposal) {
   ].join('\n');
 }
 
-function formatOpenPositions(positions) {
-  if (!positions || positions.length === 0) return 'OPEN POSITIONS: none';
-  const lines = [`OPEN POSITIONS (${positions.length}):`];
+function formatOpenPositions(positions, accountBalance) {
+  const maxRisk = accountBalance * 0.10;
+  let usedRisk = 0;
+  const posLines = [];
+
   for (const p of positions) {
+    const posRisk = Math.abs(p.entryPrice - p.stopLoss) * (p.lots || 0.01) * VALUE_PER_LOT;
+    usedRisk += posRisk;
     const status = p.entryTriggered ? 'active' : 'pending fill';
-    lines.push(
+    posLines.push(
       `  ${p.direction}  entry=${fmt(p.entryPrice)}  stop=${fmt(p.stopLoss)}` +
-      `  target=${fmt(p.target)}  lots=${fmt(p.lots, 2)}  [${status}]`
+      `  target=${fmt(p.target)}  lots=${fmt(p.lots, 2)}` +
+      `  risk=$${posRisk.toFixed(0)}  [${status}]`
     );
   }
-  return lines.join('\n');
+
+  const usedPct    = (usedRisk / accountBalance * 100).toFixed(1);
+  const remainPct  = Math.max(0, 10.0 - usedRisk / accountBalance * 100).toFixed(1);
+  const budgetLine = `RISK BUDGET: $${usedRisk.toFixed(0)} used / $${maxRisk.toFixed(0)} limit` +
+                     ` (${usedPct}% used, ${remainPct}% of 10% remaining)`;
+
+  if (positions.length === 0) return `OPEN POSITIONS: none\n${budgetLine}`;
+  return [`OPEN POSITIONS (${positions.length}):`, ...posLines, budgetLine].join('\n');
 }
 
 function formatLessons(lessons) {
@@ -181,7 +194,7 @@ export async function decide(marketData, atr, portfolio, recentLessons, mechanic
   const userContent = [
     formatSnapshot(marketData, atr, portfolio),
     '',
-    formatOpenPositions(openPositions),
+    formatOpenPositions(openPositions, portfolio.current_balance),
     '',
     formatProposal(mechanicalProposal),
     '',
