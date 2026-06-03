@@ -65,8 +65,8 @@ You decide:
 ## Risk Principles
 - Never risk more than 2% of account balance on a single trade
 - Aim for at minimum 1.5:1 R:R; target 2:1 when the setup is clean
-- A well-reasoned NO_TRADE is better than a forced marginal setup
-- Conviction matters: if you cannot clearly articulate why you are entering, do not enter
+- Use NO_TRADE sparingly — reserve it for genuinely unclear or contradictory conditions, not for marginal-but-reasonable setups
+- When you have a defensible directional read and acceptable R:R, take the trade rather than defaulting to inaction
 
 ## Common Gold Day-Trading Patterns
 - **Momentum continuation**: H4 strong trend + H1 pullback to MACD zero-cross + M15 \
