@@ -135,6 +135,19 @@ async function openVetoShadow({ portfolio, decision, currentPrice }) {
   });
 }
 
+// ── Session label — UTC-hour based forex session identifier ───────────────
+function sessionLabel(ts) {
+  if (!ts) return '';
+  const d    = new Date(ts);
+  const mins = d.getUTCHours() * 60 + d.getUTCMinutes();
+  if (mins < 300)  return 'JP';       // 00:00–05:00 UTC  (Tokyo)
+  if (mins < 420)  return 'JP-EUR';   // 05:00–07:00 UTC  (Tokyo/London overlap)
+  if (mins < 510)  return 'EUR';      // 07:00–08:30 UTC  (London)
+  if (mins < 750)  return 'EUR-US';   // 08:30–12:30 UTC  (trading window: London/NY overlap)
+  if (mins < 1020) return 'US';       // 12:30–17:00 UTC  (New York)
+  return 'JP';                        // 17:00–00:00 UTC  (overnight)
+}
+
 // ── Helper: classify a decision for experiment tracking ───────────────────
 // Maps a decision object to a short label stored in signals.overlay_decision
 // / signals.solo_decision. Parse/validation/API failures are stored as
@@ -526,11 +539,19 @@ app.post('/api/autochartist/patterns', async (req, res) => {
 
 // ── Dashboard endpoints ───────────────────────────────────────────────────
 
-// Recent journal entries across both Claude accounts, newest-first.
+// Recent journal entries — optionally filtered by account name and/or offset.
 app.get('/api/journal', async (req, res) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
-    const entries = await database.getJournalEntries(limit);
+    const limit  = Math.min(Math.max(parseInt(req.query.limit)  || 20, 1), 100);
+    const offset = Math.max(parseInt(req.query.offset) || 0, 0);
+    const account = req.query.account;
+    let portfolioId = null;
+    if (account) {
+      const p = await database.getPortfolioByName(account);
+      if (!p) return res.json({ entries: [] });
+      portfolioId = p.id;
+    }
+    const entries = await database.getJournalEntries(limit, portfolioId, offset);
     res.json({ entries });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -620,10 +641,11 @@ app.get('/api/positions', (req, res) => {
   }
 });
 
-// Recent closed trades — optionally filtered by account name.
+// Recent closed trades — optionally filtered by account name and/or offset.
 app.get('/api/trades/recent', async (req, res) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+    const limit  = Math.min(Math.max(parseInt(req.query.limit)  || 20, 1), 100);
+    const offset = Math.max(parseInt(req.query.offset) || 0, 0);
     const account = req.query.account;
     let portfolioId = null;
     if (account) {
@@ -631,7 +653,7 @@ app.get('/api/trades/recent', async (req, res) => {
       if (!p) return res.json({ trades: [] });
       portfolioId = p.id;
     }
-    const trades = await database.getRecentClosedTrades(limit, portfolioId);
+    const trades = await database.getRecentClosedTrades(limit, portfolioId, offset);
     res.json({ trades });
   } catch (error) {
     res.status(500).json({ error: error.message });

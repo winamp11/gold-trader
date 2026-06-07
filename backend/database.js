@@ -567,6 +567,11 @@ class DatabaseService {
         FROM trades WHERE exit_reason IS NOT NULL
         GROUP BY portfolio_id
       ) wr ON wr.portfolio_id = p.id
+      LEFT JOIN (
+        SELECT portfolio_id, COUNT(*) AS journal_count
+        FROM journal
+        GROUP BY portfolio_id
+      ) jc ON jc.portfolio_id = p.id
       ORDER BY p.id
     `, [today]);
 
@@ -581,6 +586,7 @@ class DatabaseService {
         daily_trades:   parseInt(row.daily_trades) || 0,
         daily_wins:     parseInt(row.daily_wins)   || 0,
         daily_losses:   parseInt(row.daily_losses) || 0,
+        journal_count:  parseInt(row.journal_count) || 0,
         win_rate: closed > 0 ? Math.round((wins / closed) * 1000) / 10 : null,
       };
     });
@@ -628,15 +634,26 @@ class DatabaseService {
 
   // ── Composite queries used by specific endpoints ───────────────────────────
 
-  async getJournalEntries(limit = 20) {
-    const r = await this.pool.query(`
+  async getJournalEntries(limit = 20, portfolioId = null, offset = 0) {
+    const params = [];
+    let sql = `
       SELECT j.id, j.portfolio_id, p.name AS portfolio_name,
              j.timestamp, j.entry_type, j.lesson_text, j.tag
       FROM journal j
       JOIN portfolios p ON p.id = j.portfolio_id
-      ORDER BY j.timestamp DESC
-      LIMIT $1
-    `, [limit]);
+      WHERE 1=1
+    `;
+    if (portfolioId != null) {
+      params.push(portfolioId);
+      sql += ` AND j.portfolio_id = $${params.length}`;
+    }
+    params.push(limit);
+    sql += ` ORDER BY j.timestamp DESC LIMIT $${params.length}`;
+    if (offset > 0) {
+      params.push(offset);
+      sql += ` OFFSET $${params.length}`;
+    }
+    const r = await this.pool.query(sql, params);
     return r.rows;
   }
 
@@ -659,7 +676,7 @@ class DatabaseService {
     return r.rows;
   }
 
-  async getRecentClosedTrades(limit, portfolioId = null) {
+  async getRecentClosedTrades(limit, portfolioId = null, offset = 0) {
     const params = [];
     let sql = `
       SELECT t.id, t.timestamp, t.direction, t.entry_price, t.exit_price,
@@ -676,6 +693,10 @@ class DatabaseService {
     }
     params.push(limit);
     sql += ` ORDER BY t.exit_timestamp DESC LIMIT $${params.length}`;
+    if (offset > 0) {
+      params.push(offset);
+      sql += ` OFFSET $${params.length}`;
+    }
     const r = await this.pool.query(sql, params);
     return r.rows;
   }
