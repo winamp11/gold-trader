@@ -98,32 +98,42 @@ reasoning and tag are both mandatory.`;
 
 function fmt(n, dp = 2) { return n != null ? Number(n).toFixed(dp) : 'n/a'; }
 
-function formatSnapshot(marketData, atr, portfolio) {
+function formatSnapshot(marketData, atr, portfolio, session = null) {
   const price = marketData.h1?.price ?? marketData.m30?.price ?? '?';
   const lines = [
     `MARKET SNAPSHOT — XAU/USD`,
     `Current price: $${fmt(price)}`,
+    `Current session: ${session ?? 'n/a'}`,
     `Account balance: $${fmt(portfolio.current_balance)}`,
     ``,
     `TIMEFRAMES:`,
   ];
 
-  for (const [label, tf] of [
-    ['H4 ', marketData.h4],
-    ['H1 ', marketData.h1],
-    ['M30', marketData.m30],
-    ['M15', marketData.m15],
-    ['M5 ', marketData.m5],
+  for (const [label, tf, hasAdx] of [
+    ['H4 ', marketData.h4,  true],
+    ['H1 ', marketData.h1,  true],
+    ['M30', marketData.m30, true],
+    ['M15', marketData.m15, false],
+    ['M5 ', marketData.m5,  false],
   ]) {
     if (!tf) continue;
+    const adxPart = hasAdx && tf.adx != null ? `  ADX=${fmt(tf.adx, 1)}` : '';
     lines.push(
       `${label}: price=${fmt(tf.price)}  RSI=${fmt(tf.rsi, 1)}` +
       `  MACD=${fmt(tf.macd)}/sig=${fmt(tf.macd_signal)}/hist=${fmt(tf.macd_hist)}` +
-      `  ATR=${fmt(tf.atr, 1)}`
+      `  ATR=${fmt(tf.atr, 1)}${adxPart}`
     );
   }
 
   lines.push(``, `PRIMARY ATR: H1=${fmt(atr?.h1, 1)}  M30=${fmt(atr?.m30, 1)}`);
+
+  if (marketData.atrCaveat) {
+    lines.push(
+      ``,
+      `⚠️  Note: short-timeframe ATR (esp. H1) appears understated — the volatility lookback is still normalizing after a market closure. RSI/MACD are unaffected; only treat ATR-based stop sizing with caution and consider using H4 ATR as the volatility reference until H1 normalizes.`
+    );
+  }
+
   return lines.join('\n');
 }
 
@@ -176,7 +186,7 @@ function formatLessons(lessons) {
 
 // ── Decider ──────────────────────────────────────────────────────────────
 
-export async function decide(marketData, atr, portfolio, recentLessons, mechanicalProposal = null, openPositions = []) {
+export async function decide(marketData, atr, portfolio, recentLessons, mechanicalProposal = null, _reserved = null, session = null) {
   // Nothing to overlay when mechanical did not produce a trade.
   if (!mechanicalProposal || mechanicalProposal.action !== 'TRADE') {
     return {
@@ -192,7 +202,7 @@ export async function decide(marketData, atr, portfolio, recentLessons, mechanic
   }
 
   const userContent = [
-    formatSnapshot(marketData, atr, portfolio),
+    formatSnapshot(marketData, atr, portfolio, session),
     '',
     formatOpenPositions(openPositions, portfolio.current_balance),
     '',

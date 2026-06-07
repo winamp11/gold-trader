@@ -82,6 +82,7 @@ export async function reflect(tracking, outcome, pnl) {
         entryType,
         lessonText:       lesson.lesson_text,
         tag:              lesson.tag,
+        session:          tracking.session ?? null,
       });
     }
   } catch (err) {
@@ -136,6 +137,7 @@ export async function reflectVeto(shadow, wouldBeOutcome, wouldBePnl) {
         entryType,
         lessonText:       lesson.lesson_text,
         tag:              lesson.tag,
+        session:          shadow.session ?? null,
       });
     }
   } catch (err) {

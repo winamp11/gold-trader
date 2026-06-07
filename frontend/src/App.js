@@ -49,22 +49,30 @@ function fmtTime(ts) {
 
 function fmtDateTime(ts) {
   if (!ts) return '';
-  return new Date(ts).toLocaleString('en-GB', {
-    month: 'short', day: 'numeric',
-    hour: '2-digit', minute: '2-digit',
-  });
+  const d = new Date(ts);
+  const day   = d.getDate();
+  const month = d.toLocaleString('en-GB', { month: 'short' });
+  const time  = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  return `${day} ${month} ${time}`;
+}
+
+function fmtDate(dateStr) {
+  if (!dateStr) return '';
+  const s = dateStr.length === 10 ? dateStr + 'T00:00:00Z' : dateStr;
+  return new Date(s).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
 }
 
 function sessionLabel(ts) {
   if (!ts) return '';
-  const d    = new Date(ts);
-  const mins = d.getUTCHours() * 60 + d.getUTCMinutes();
-  if (mins < 300)  return 'JP';
-  if (mins < 420)  return 'JP-EUR';
-  if (mins < 510)  return 'EUR';
-  if (mins < 750)  return 'EUR-US';
-  if (mins < 1020) return 'US';
-  return 'JP';
+  const uae  = new Date(new Date(ts).getTime() + 4 * 3600 * 1000);
+  const mins = uae.getUTCHours() * 60 + uae.getUTCMinutes();
+  if (mins < 360)  return '';
+  if (mins < 600)  return 'JP';
+  if (mins < 660)  return 'JP-EUR';
+  if (mins < 960)  return 'EUR';
+  if (mins < 1140) return 'EUR-US';
+  if (mins < 1260) return 'US';
+  return '';
 }
 
 function accountColor(name) {
@@ -164,7 +172,7 @@ function OpenSection({ positions }) {
               : <span className="open-row__pending">pending</span>
             }
             <span className="open-row__time">
-              {fmtTime(p.startTime)}
+              {fmtDateTime(p.startTime)}
               {sl && <span className="session-tag">{sl}</span>}
             </span>
           </div>
@@ -206,7 +214,10 @@ function HistorySection({ trades, hasMore, onLoadMore }) {
               {pnlStr(t.pnl)}
             </span>
             <span className="history-row__time">
-              {fmtTime(t.exit_timestamp || t.timestamp)}
+              {t.exit_timestamp
+                ? <>{fmtDateTime(t.timestamp)} → {fmtTime(t.exit_timestamp)}</>
+                : fmtDateTime(t.timestamp)
+              }
               {sl && <span className="session-tag">{sl}</span>}
             </span>
           </div>
@@ -334,10 +345,13 @@ function toChartData(equity) {
   });
 }
 
-const CustomTooltip = ({ active, payload }) => {
+const CustomTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
   return (
     <div className="chart-tooltip">
+      {label && (
+        <div className="chart-tooltip__date">{fmtDate(label)}</div>
+      )}
       {payload.map(p => (
         <div key={p.dataKey} className="chart-tooltip__row">
           <span style={{ color: p.color }}>{accountLabel(p.dataKey)}</span>
@@ -364,7 +378,7 @@ function EquityChart({ equity }) {
       <LineChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
         <XAxis
           dataKey="t"
-          tickFormatter={fmtTime}
+          tickFormatter={fmtDate}
           tick={{ fontSize: 10, fill: '#4b6070', fontFamily: 'Space Mono, monospace' }}
           axisLine={false} tickLine={false} interval="preserveStartEnd"
         />
@@ -379,9 +393,9 @@ function EquityChart({ equity }) {
           formatter={v => <span style={{ color: accountColor(v), fontSize: 11 }}>{accountLabel(v)}</span>}
           iconType="circle" iconSize={7}
         />
-        <Line dataKey="mechanical"     stroke={C.mech}    strokeWidth={2} dot={false} connectNulls />
-        <Line dataKey="claude_overlay" stroke={C.overlay} strokeWidth={2} dot={false} connectNulls />
-        <Line dataKey="claude_solo"    stroke={C.solo}    strokeWidth={2} dot={false} connectNulls />
+        <Line dataKey="mechanical"     stroke={C.mech}    strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.mech    }} connectNulls />
+        <Line dataKey="claude_overlay" stroke={C.overlay} strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.overlay }} connectNulls />
+        <Line dataKey="claude_solo"    stroke={C.solo}    strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.solo    }} connectNulls />
       </LineChart>
     </ResponsiveContainer>
   );

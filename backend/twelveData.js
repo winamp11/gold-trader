@@ -194,126 +194,117 @@ class TwelveDataService {
     }
   }
 
-  // 3-batch stagger — 17 calls/cycle, max 7 in any 60-second window.
-  //
-  // ATR sources:
-  //   H1, M30 — API /atr primary, local OHLC fallback if API errors
-  //   H4, M15, M5 — local OHLC only (no API call allocated)
-  //
-  // Batch timing vs 1-min price poller worst case:
-  //   t=0   Batch A (7 calls)
-  //   t=60  price poller (1 call)
-  //   t=65  Batch B (6 calls)             ← 6+1 = 7 across [60,120) ✓
-  //   t=120 price poller (1 call)
-  //   t=130 Batch C (4 calls)             ← 4+1 = 5 across [120,180) ✓
-  async getMarketDataStaggered(symbol = 'XAU/USD') {
-    console.log('\n🚀 Starting staggered market data fetch (3 batches, 17 calls)...\n');
-    // NOTE: this.callCount is a running daily total — NOT reset here.
-    // Resetting it would include the price poller's concurrent fetchPrice()
-    // calls (fired during the 65 s waits) and make the cycle show 19 instead of 17.
+  // Single bulk POST to /complex_data — 2 API calls per cycle (1 POST + 1 price).
+  // Bulk POST: 4 indicators × 5 intervals = 20 items.
+  // complex_data does NOT support time_series; price comes from /price endpoint.
+  // ADX: returned for all intervals; callers use h4/h1/m30 only.
+  async getMarketDataBulk(symbol = 'XAU/USD') {
+    console.log('\n🚀 Starting bulk complex_data fetch (POST + price = 2 calls)...\n');
+    this.resetCallCount();
+
+    const payload = {
+      symbols:  [symbol],
+      methods: [
+        { name: 'rsi',  params: { time_period: 14 } },
+        { name: 'macd', params: { fast_period: 12, slow_period: 26, signal_period: 9 } },
+        { name: 'atr',  params: { time_period: 14 } },
+        { name: 'adx',  params: { time_period: 14 } },
+      ],
+      intervals: ['4h', '1h', '30min', '15min', '5min'],
+    };
 
     try {
-      // === BATCH A (7 calls) — all time_series + RSI for H4 and H1 ===
-      console.log('📞 Batch A/3: time_series×5 + RSI H4+H1 = 7 calls...');
-      const batchA = await Promise.all([
-        this.fetchTimeSeries(symbol, '4h',    50),  // [0]
-        this.fetchTimeSeries(symbol, '1h',    50),  // [1]
-        this.fetchTimeSeries(symbol, '30min', 50),  // [2]
-        this.fetchTimeSeries(symbol, '15min', 50),  // [3]
-        this.fetchTimeSeries(symbol, '5min',  50),  // [4]
-        this.fetchRSI(symbol, '4h'),                // [5]
-        this.fetchRSI(symbol, '1h')                 // [6]
+      // Run bulk indicators and price fetch in parallel
+      const [response, currentPrice] = await Promise.all([
+        fetch(
+          `${BASE_URL}/complex_data?apikey=${API_KEY}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          }
+        ),
+        this.fetchPrice(symbol),
       ]);
-      console.log(`✅ Batch A complete ( 7/17 this cycle)`);
+      this.callCount++; // bulk POST counts as 1; fetchPrice() increments itself
 
-      // Local ATR for all timeframes — computed from OHLC already in hand
-      const localH4Atr  = this.computeATR(batchA[0].values);
-      const localH1Atr  = this.computeATR(batchA[1].values);
-      const localM30Atr = this.computeATR(batchA[2].values);
-      const localM15Atr = this.computeATR(batchA[3].values);
-      const localM5Atr  = this.computeATR(batchA[4].values);
+      const raw = await response.json();
+      console.log(`✅ complex_data POST returned ${raw.data?.length ?? 0} items`);
 
-      console.log('⏳ Waiting 65 s before batch B...');
-      await new Promise(resolve => setTimeout(resolve, 65000));
+      if (raw.status === 'error') {
+        throw new Error(raw.message || 'complex_data API error');
+      }
 
-      // === BATCH B (6 calls) — RSI M30+M15+M5, ATR H1+M30 (API), MACD H4 ===
-      console.log('📞 Batch B/3: RSI M30+M15+M5 + ATR H1+M30 + MACD H4 = 6 calls...');
-      const [rsiM30, rsiM15, rsiM5, h1AtrApi, m30AtrApi, macdH4] = await Promise.all([
-        this.fetchRSI(symbol, '30min'),
-        this.fetchRSI(symbol, '15min'),
-        this.fetchRSI(symbol, '5min'),
-        this.fetchATR(symbol, '1h')
-          .catch(e => { console.warn(`⚠️  H1 ATR API failed (${e.message}) — local fallback`); return null; }),
-        this.fetchATR(symbol, '30min')
-          .catch(e => { console.warn(`⚠️  M30 ATR API failed (${e.message}) — local fallback`); return null; }),
-        this.fetchMACD(symbol, '4h')
-      ]);
-      console.log(`✅ Batch B complete (13/17 this cycle)`);
-      console.log(`📐 ATR — H1: ${h1AtrApi !== null ? 'API' : 'local'}, M30: ${m30AtrApi !== null ? 'API' : 'local'}`);
+      // Per-item error guard — any bad item means dirty data; skip the cycle.
+      const errorItems = raw.data?.filter(item => item.status === 'error') ?? [];
+      if (errorItems.length > 0) {
+        for (const item of errorItems) {
+          console.error(`❌ complex_data item error [${item.meta?.interval ?? '?'} ${item.meta?.indicator?.name ?? '?'}]: ${item.message ?? item.code}`);
+        }
+        throw new Error(`complex_data returned ${errorItems.length} error item(s) — skipping cycle to avoid null snapshot`);
+      }
 
-      console.log('⏳ Waiting 65 s before batch C...');
-      await new Promise(resolve => setTimeout(resolve, 65000));
+      // Classify each item by its indicator name prefix
+      function indicatorKey(item) {
+        const name = item.meta?.indicator?.name ?? '';
+        if (name.startsWith('RSI'))  return 'rsi';
+        if (name.startsWith('MACD')) return 'macd';
+        if (name.startsWith('ATR'))  return 'atr';
+        if (name.startsWith('ADX'))  return 'adx';
+        return null;
+      }
 
-      // === BATCH C (4 calls) — MACD H1+M30+M15+M5 ===
-      console.log('📞 Batch C/3: MACD H1+M30+M15+M5 = 4 calls...');
-      const [macdH1, macdM30, macdM15, macdM5] = await Promise.all([
-        this.fetchMACD(symbol, '1h'),
-        this.fetchMACD(symbol, '30min'),
-        this.fetchMACD(symbol, '15min'),
-        this.fetchMACD(symbol, '5min')
-      ]);
-      console.log(`✅ Batch C complete — 17/17 this cycle`);
+      // Group latest values: grouped[`${interval}:${key}`] = values[0]
+      const grouped = {};
 
-      const result = {
-        symbol,
-        timestamp: new Date().toISOString(),
-        h4: {
-          interval: '4h',
-          price: parseFloat(batchA[0].values?.[0]?.close || 0),
-          timestamp: batchA[0].values?.[0]?.datetime,
-          rsi: batchA[5],
-          macd: macdH4.macd, macd_signal: macdH4.signal, macd_hist: macdH4.histogram,
-          atr: localH4Atr           // local only
-        },
-        h1: {
-          interval: '1h',
-          price: parseFloat(batchA[1].values?.[0]?.close || 0),
-          timestamp: batchA[1].values?.[0]?.datetime,
-          rsi: batchA[6],
-          macd: macdH1.macd, macd_signal: macdH1.signal, macd_hist: macdH1.histogram,
-          atr: h1AtrApi ?? localH1Atr   // API primary, local fallback
-        },
-        m30: {
-          interval: '30min',
-          price: parseFloat(batchA[2].values?.[0]?.close || 0),
-          timestamp: batchA[2].values?.[0]?.datetime,
-          rsi: rsiM30,
-          macd: macdM30.macd, macd_signal: macdM30.signal, macd_hist: macdM30.histogram,
-          atr: m30AtrApi ?? localM30Atr // API primary, local fallback
-        },
-        m15: {
-          interval: '15min',
-          price: parseFloat(batchA[3].values?.[0]?.close || 0),
-          timestamp: batchA[3].values?.[0]?.datetime,
-          rsi: rsiM15,
-          macd: macdM15.macd, macd_signal: macdM15.signal, macd_hist: macdM15.histogram,
-          atr: localM15Atr           // local only
-        },
-        m5: {
-          interval: '5min',
-          price: parseFloat(batchA[4].values?.[0]?.close || 0),
-          timestamp: batchA[4].values?.[0]?.datetime,
-          rsi: rsiM5,
-          macd: macdM5.macd, macd_signal: macdM5.signal, macd_hist: macdM5.histogram,
-          atr: localM5Atr            // local only
-        },
-        apiCallCount: 17
+      for (const item of raw.data) {
+        const interval = item.meta?.interval;
+        const key      = indicatorKey(item);
+        if (!interval || key === null) continue;
+        grouped[`${interval}:${key}`] = item.values?.[0] ?? null;
+      }
+
+      const f = (v, fallback = null) => { const n = parseFloat(v); return isFinite(n) ? n : fallback; };
+
+      const buildTf = (interval) => {
+        const rsi  = grouped[`${interval}:rsi`]  ?? {};
+        const macd = grouped[`${interval}:macd`] ?? {};
+        const atr  = grouped[`${interval}:atr`]  ?? {};
+        const adx  = grouped[`${interval}:adx`]  ?? {};
+        return {
+          interval,
+          price:       currentPrice,
+          rsi:         f(rsi.rsi),
+          macd:        f(macd.macd),
+          macd_signal: f(macd.macd_signal),
+          macd_hist:   f(macd.macd_hist),
+          atr:         f(atr.atr),
+          adx:         f(adx.adx),
+        };
       };
 
-      console.log(`📞 Total API calls this cycle: 17 (daily running total: ${this.callCount})`);
-      return result;
+      const h4  = buildTf('4h');
+      const h1  = buildTf('1h');
+      const m30 = buildTf('30min');
+      const m15 = buildTf('15min');
+      const m5  = buildTf('5min');
+
+      // ATR normalization caveat: H1/H4 ratio < 0.25 means H1 lookback still
+      // contains dead candles from a market closure — stop sizing unreliable.
+      // Empirical threshold: active-session floor ~0.35, dead ceiling ~0.20.
+      const atrRatio  = (h1.atr != null && h4.atr != null && h4.atr > 0) ? h1.atr / h4.atr : null;
+      const atrCaveat = atrRatio !== null && atrRatio < 0.25;
+      if (atrCaveat) {
+        console.log(`⚠️  ATR caveat active: H1/H4 ratio=${atrRatio.toFixed(3)} < 0.25 — volatility lookback still normalizing`);
+      }
+
+      console.log(`💰 Price: $${currentPrice.toFixed(2)}`);
+      console.log(`📐 ADX — H4: ${h4.adx?.toFixed(1)}, H1: ${h1.adx?.toFixed(1)}, M30: ${m30.adx?.toFixed(1)}`);
+      console.log(`📞 Total API calls this cycle: ${this.callCount}`);
+
+      return { symbol, timestamp: new Date().toISOString(), h4, h1, m30, m15, m5, atrCaveat, apiCallCount: this.callCount };
     } catch (error) {
-      console.error('Error getting staggered market data:', error.message);
+      console.error('Error in getMarketDataBulk:', error.message);
       throw error;
     }
   }
