@@ -115,6 +115,9 @@ async function generateSignalIfTradingHours() {
     const currentPrice   = marketData.h1.price || marketData.m30.price;
     const currentSession = getSession(new Date());
     console.log(`📍 [CYCLE] Session: ${currentSession ?? 'none'} | Price: $${currentPrice?.toFixed(2)}`);
+    if (marketData.atrCaveat) {
+      console.log(`⚠️  [CYCLE] ATR caveat active (H1/H4 ratio understated) — prompts will include caveat`);
+    }
     // Load all three portfolios fresh from DB (balances may have changed)
     const mechPortfolio    = database.getPortfolioByName('mechanical');
     const overlayPortfolio = database.getPortfolioByName('claude_overlay');

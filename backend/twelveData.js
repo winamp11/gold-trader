@@ -289,11 +289,20 @@ class TwelveDataService {
       const m15 = buildTf('15min');
       const m5  = buildTf('5min');
 
+      // ATR normalization caveat: H1/H4 ratio < 0.25 means H1 lookback still
+      // contains dead candles from a market closure — stop sizing unreliable.
+      // Empirical threshold: active-session floor ~0.35, dead ceiling ~0.20.
+      const atrRatio  = (h1.atr != null && h4.atr != null && h4.atr > 0) ? h1.atr / h4.atr : null;
+      const atrCaveat = atrRatio !== null && atrRatio < 0.25;
+      if (atrCaveat) {
+        console.log(`⚠️  ATR caveat active: H1/H4 ratio=${atrRatio.toFixed(3)} < 0.25 — volatility lookback still normalizing`);
+      }
+
       console.log(`💰 Price: $${currentPrice.toFixed(2)}`);
       console.log(`📐 ADX — H4: ${h4.adx?.toFixed(1)}, H1: ${h1.adx?.toFixed(1)}, M30: ${m30.adx?.toFixed(1)}`);
       console.log(`📞 Total API calls this cycle: ${this.callCount}`);
 
-      return { symbol, timestamp: new Date().toISOString(), h4, h1, m30, m15, m5, apiCallCount: this.callCount };
+      return { symbol, timestamp: new Date().toISOString(), h4, h1, m30, m15, m5, atrCaveat, apiCallCount: this.callCount };
     } catch (error) {
       console.error('Error in getMarketDataBulk:', error.message);
       throw error;

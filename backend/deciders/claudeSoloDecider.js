@@ -130,6 +130,14 @@ function formatSnapshot(marketData, atr, portfolio, session = null) {
   }
 
   lines.push(``, `PRIMARY ATR: H1=${fmt(atr?.h1, 1)}  M30=${fmt(atr?.m30, 1)}`);
+
+  if (marketData.atrCaveat) {
+    lines.push(
+      ``,
+      `⚠️  Note: short-timeframe ATR (esp. H1) appears understated — the volatility lookback is still normalizing after a market closure. RSI/MACD are unaffected; only treat ATR-based stop sizing with caution and consider using H4 ATR as the volatility reference until H1 normalizes.`
+    );
+  }
+
   return lines.join('\n');
 }
 
