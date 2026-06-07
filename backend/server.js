@@ -23,10 +23,11 @@ let currentSignal      = null;
 let lastUpdate         = null;
 let lastKnownPrice     = null;
 let lastCycleDecisions = null;
+let wasInTradingHours  = false;
 
 // ── Helper: open a real position for one portfolio ─────────────────────────
-function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwner, session = null }) {
-  const tradeId = database.saveTrade({
+async function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwner, session = null }) {
+  const tradeId = await database.saveTrade({
     signal_id:    signalId,
     portfolio_id: portfolio.id,
     timestamp:    new Date().toISOString(),
@@ -68,8 +69,8 @@ function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwn
 }
 
 // ── Helper: open a veto shadow for one portfolio ───────────────────────────
-function openVetoShadow({ portfolio, decision, currentPrice, session = null }) {
-  const shadowId = database.saveVetoShadow({
+async function openVetoShadow({ portfolio, decision, currentPrice, session = null }) {
+  const shadowId = await database.saveVetoShadow({
     portfolioId: portfolio.id,
     direction:   decision.direction,
     entry:       decision.entry,
@@ -167,14 +168,14 @@ async function generateSignalIfTradingHours() {
     mechSignal.marketData.m5 = marketData.m5;
     mechSignal.session = currentSession;
     mechSignal.adx     = { h4: marketData.h4.adx, h1: marketData.h1.adx, m30: marketData.m30.adx };
-    const signalId = database.saveSignal(mechSignal);
+    const signalId = await database.saveSignal(mechSignal);
 
     // ── Mechanical execution — gated by its own risk budget ───────────────
     // Budget check is separate from the proposal so mechDecision still reaches
     // the overlay unchanged even when mechanical cannot open.
     const mechOpenPositions = outcomeTracker.getOpenPositionsForPortfolio(mechPortfolio.id);
     if (mechDecision.action === 'TRADE') {
-      openPosition({
+      await openPosition({
         portfolio:     mechPortfolio,
         decision:      mechDecision,
         signalId,
@@ -214,9 +215,9 @@ async function generateSignalIfTradingHours() {
       marketData, atr, overlayPortfolio, overlayLessons, mechDecision, null, currentSession
     );
     if (overlayDecision.action === 'TRADE') {
-      openPosition({ portfolio: overlayPortfolio, decision: overlayDecision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
+      await openPosition({ portfolio: overlayPortfolio, decision: overlayDecision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
     } else if (overlayDecision.action === 'VETO') {
-      openVetoShadow({ portfolio: overlayPortfolio, decision: overlayDecision, currentPrice, session: currentSession });
+      await openVetoShadow({ portfolio: overlayPortfolio, decision: overlayDecision, currentPrice, session: currentSession });
     }
 
     // ── Claude Solo decider ───────────────────────────────────────────────
@@ -224,9 +225,9 @@ async function generateSignalIfTradingHours() {
       marketData, atr, soloPortfolio, soloLessons, null, null, currentSession
     );
     if (soloDecision.action === 'TRADE') {
-      openPosition({ portfolio: soloPortfolio, decision: soloDecision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
+      await openPosition({ portfolio: soloPortfolio, decision: soloDecision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
     } else if (soloDecision.action === 'VETO') {
-      openVetoShadow({ portfolio: soloPortfolio, decision: soloDecision, currentPrice, session: currentSession });
+      await openVetoShadow({ portfolio: soloPortfolio, decision: soloDecision, currentPrice, session: currentSession });
     }
 
     // Record which decision each Claude account reached (distinguishes
@@ -476,14 +477,14 @@ app.get('/api/accounts', async (req, res) => {
 // ── Dashboard endpoints ────────────────────────────────────────────────────
 
 // Current market state: signal, 5-timeframe snapshot, last-cycle decisions, missed count.
-app.get('/api/market-snapshot', (req, res) => {
+app.get('/api/market-snapshot', async (req, res) => {
   try {
     res.json({
       tradingHours:            isTradingHours(),
       nextTradingTime:         isTradingHours() ? null : getNextTradingTime(),
       signal:                  currentSignal      || null,
       lastCycleDecisions:      lastCycleDecisions || null,
-      missedOpportunitiesToday: database.getMissedOpportunitiesToday(),
+      missedOpportunitiesToday: await database.getMissedOpportunitiesToday(),
       timestamp:               new Date().toISOString(),
     });
   } catch (error) {
@@ -494,12 +495,12 @@ app.get('/api/market-snapshot', (req, res) => {
 // Daily equity curve — one balance point per trading day per account.
 // Past days: closing balance derived from account_pnl_daily cumulative PnL.
 // Today: current_balance (in-progress / partial day).
-app.get('/api/equity', (req, res) => {
+app.get('/api/equity', async (req, res) => {
   try {
-    const portfolios = database.getAllPortfolios();
+    const portfolios = await database.getAllPortfolios();
     const equity = {};
     for (const p of portfolios) {
-      equity[p.name] = database.getDailyEquity(p.id);
+      equity[p.name] = await database.getDailyEquity(p.id);
     }
     res.json({ equity });
   } catch (error) {
@@ -542,46 +543,46 @@ app.get('/api/positions', (req, res) => {
 });
 
 // Recent closed trades — optionally filtered by account name.
-app.get('/api/trades/recent', (req, res) => {
+app.get('/api/trades/recent', async (req, res) => {
   try {
     const limit     = Math.min(Math.max(parseInt(req.query.limit)  || 20, 1), 100);
     const offset    = Math.max(parseInt(req.query.offset) || 0, 0);
     const account   = req.query.account;
     let portfolioId = null;
     if (account) {
-      const p = database.getPortfolioByName(account);
+      const p = await database.getPortfolioByName(account);
       if (!p) return res.json({ trades: [] });
       portfolioId = p.id;
     }
-    res.json({ trades: database.getRecentClosedTrades(limit, portfolioId, offset) });
+    res.json({ trades: await database.getRecentClosedTrades(limit, portfolioId, offset) });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
 // Journal entries — optionally filtered by account name.
-app.get('/api/journal', (req, res) => {
+app.get('/api/journal', async (req, res) => {
   try {
     const limit     = Math.min(Math.max(parseInt(req.query.limit)  || 20, 1), 100);
     const offset    = Math.max(parseInt(req.query.offset) || 0, 0);
     const account   = req.query.account;
     let portfolioId = null;
     if (account) {
-      const p = database.getPortfolioByName(account);
+      const p = await database.getPortfolioByName(account);
       if (!p) return res.json({ entries: [] });
       portfolioId = p.id;
     }
-    res.json({ entries: database.getJournalEntries(limit, portfolioId, offset) });
+    res.json({ entries: await database.getJournalEntries(limit, portfolioId, offset) });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
 // Missed-opportunity detail — RED signals that crossed the 15-pt threshold.
-app.get('/api/missed', (req, res) => {
+app.get('/api/missed', async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 20, 100);
-    const missed = database.getMissedOpportunitiesRecent(limit).map(r => {
+    const missed = (await database.getMissedOpportunitiesRecent(limit)).map(r => {
       let meta = {};
       try { meta = JSON.parse(r.outcome_metadata || '{}'); } catch {}
       return {
@@ -624,153 +625,6 @@ app.post('/api/autochartist/patterns', async (req, res) => {
   }
 });
 
-
-// ── Dashboard endpoints ───────────────────────────────────────────────────
-
-// Recent journal entries — optionally filtered by account name and/or offset.
-app.get('/api/journal', async (req, res) => {
-  try {
-    const limit  = Math.min(Math.max(parseInt(req.query.limit)  || 20, 1), 100);
-    const offset = Math.max(parseInt(req.query.offset) || 0, 0);
-    const account = req.query.account;
-    let portfolioId = null;
-    if (account) {
-      const p = await database.getPortfolioByName(account);
-      if (!p) return res.json({ entries: [] });
-      portfolioId = p.id;
-    }
-    const entries = await database.getJournalEntries(limit, portfolioId, offset);
-    res.json({ entries });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Current market state: signal, 5-timeframe snapshot, per-account last-cycle
-// decisions, today's missed-opportunity count.
-app.get('/api/market-snapshot', async (req, res) => {
-  try {
-    const tradingHours = isTradingHours();
-    const missedOpportunitiesToday = await database.getMissedOpportunitiesToday();
-    res.json({
-      tradingHours,
-      nextTradingTime:         tradingHours ? null : getNextTradingTime(),
-      signal:                  currentSignal      || null,
-      lastCycleDecisions:      lastCycleDecisions || null,
-      missedOpportunitiesToday,
-      timestamp:               new Date().toISOString(),
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Per-portfolio equity curve: [{ t, b }] points from closed trades.
-// Flat at starting_balance when no trades exist — chart still renders.
-app.get('/api/equity', async (req, res) => {
-  try {
-    const portfolios = await database.getAllPortfolios();
-    const equity = {};
-    const dayStart = new Date();
-    dayStart.setHours(0, 0, 0, 0);
-
-    for (const p of portfolios) {
-      const trades = await database.getEquityTrades(p.id);
-      const points = [{ t: dayStart.toISOString(), b: p.starting_balance }];
-      let running = p.starting_balance;
-      for (const tr of trades) {
-        running = Math.round((running + tr.pnl) * 100) / 100;
-        points.push({ t: tr.t, b: running });
-      }
-      if (points[points.length - 1].b !== p.current_balance) {
-        points.push({ t: new Date().toISOString(), b: p.current_balance });
-      }
-      equity[p.name] = points;
-    }
-
-    res.json({ equity, startingBalance: 100000 });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Open GREEN positions — for the dashboard positions drawer.
-// Unrealized P&L is approximated from lastKnownPrice (null if not yet seen).
-app.get('/api/positions', (req, res) => {
-  try {
-    const positions = [];
-    for (const t of outcomeTracker.activeTracking.values()) {
-      if (t.type !== 'GREEN') continue;
-      let unrealizedPnl = null;
-      if (t.entryTriggered && lastKnownPrice != null) {
-        const priceMove = t.direction === 'LONG'
-          ? lastKnownPrice - t.entryPrice
-          : t.entryPrice - lastKnownPrice;
-        unrealizedPnl = Math.round(priceMove * 100 * (t.lots || 0.01) * 100) / 100;
-      }
-      positions.push({
-        key:            t.key,
-        portfolioName:  t.portfolioName,
-        direction:      t.direction,
-        entryPrice:     t.entryPrice,
-        stopLoss:       t.stopLoss,
-        target:         t.target,
-        lots:           t.lots,
-        startTime:      t.startTime,
-        entryTriggered: t.entryTriggered,
-        currentPrice:   lastKnownPrice,
-        unrealizedPnl,
-        tag:            t.tag,
-      });
-    }
-    res.json({ positions });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Recent closed trades — optionally filtered by account name and/or offset.
-app.get('/api/trades/recent', async (req, res) => {
-  try {
-    const limit  = Math.min(Math.max(parseInt(req.query.limit)  || 20, 1), 100);
-    const offset = Math.max(parseInt(req.query.offset) || 0, 0);
-    const account = req.query.account;
-    let portfolioId = null;
-    if (account) {
-      const p = await database.getPortfolioByName(account);
-      if (!p) return res.json({ trades: [] });
-      portfolioId = p.id;
-    }
-    const trades = await database.getRecentClosedTrades(limit, portfolioId, offset);
-    res.json({ trades });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Missed-opportunity detail — direction and size of move for each RED signal
-// that crossed the 15-pt threshold. Metadata stored by checkRedPosition.
-app.get('/api/missed', async (req, res) => {
-  try {
-    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
-    const rows = await database.getMissedOpportunitiesRecent(limit);
-    const missed = rows.map(r => {
-      let meta = {};
-      try { meta = JSON.parse(r.outcome_metadata || '{}'); } catch {}
-      return {
-        id:               r.id,
-        timestamp:        r.timestamp,
-        outcomeTimestamp: r.outcome_timestamp,
-        outcomePrice:     r.outcome_price,
-        direction:        meta.direction ?? null,
-        movePts:          meta.move != null ? parseFloat(meta.move) : null,
-      };
-    });
-    res.json({ missed });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
 
 // ── Startup ────────────────────────────────────────────────────────────────
 
