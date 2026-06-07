@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { mkdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
@@ -9,6 +10,8 @@ class DatabaseService {
   constructor() {
     // Use persistent volume if available (Railway), otherwise local file
     const dbPath = process.env.DATABASE_PATH || join(__dirname, 'trading.db');
+    // Ensure parent directory exists (Railway mounts volumes at boot, dir may be absent)
+    mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath);
     this.initialize();
     console.log(`✅ Database initialized at ${dbPath}`);
