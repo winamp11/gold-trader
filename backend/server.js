@@ -4,7 +4,7 @@ import dotenv from 'dotenv';
 import twelveData from './twelveData.js';
 import database from './database.js';
 import outcomeTracker from './outcomeTracker.js';
-import { isTradingHours, getNextTradingTime } from './tradingHours.js';
+import { isTradingHours, getNextTradingTime, getSession } from './tradingHours.js';
 
 import { decide as mechanicalDecide }    from './deciders/mechanicalDecider.js';
 import { decide as claudeOverlayDecide } from './deciders/claudeOverlayDecider.js';
@@ -24,7 +24,7 @@ let currentSignal = null;
 let lastUpdate    = null;
 
 // ── Helper: open a real position for one portfolio ─────────────────────────
-function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwner }) {
+function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwner, session = null }) {
   const tradeId = database.saveTrade({
     signal_id:    signalId,
     portfolio_id: portfolio.id,
@@ -36,7 +36,8 @@ function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwn
     take_profit:  decision.target,
     decider:      portfolio.name,
     tag:          decision.tag,
-    reasoning:    decision.reasoning ?? null
+    reasoning:    decision.reasoning ?? null,
+    session
   });
 
   const key = `${portfolio.id}_${signalId}`;
@@ -55,6 +56,7 @@ function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwn
     target:         decision.target,
     tag:            decision.tag       ?? null,
     reasoning:      decision.reasoning ?? null,
+    session,
     startTime:      new Date(),
     entryTriggered: false,
     outcome:        null,
@@ -64,7 +66,7 @@ function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwn
 }
 
 // ── Helper: open a veto shadow for one portfolio ───────────────────────────
-function openVetoShadow({ portfolio, decision, currentPrice }) {
+function openVetoShadow({ portfolio, decision, currentPrice, session = null }) {
   const shadowId = database.saveVetoShadow({
     portfolioId: portfolio.id,
     direction:   decision.direction,
@@ -88,6 +90,7 @@ function openVetoShadow({ portfolio, decision, currentPrice }) {
     target:         decision.target,
     tag:            decision.tag       ?? null,
     reasoning:      decision.reasoning ?? null,
+    session,
     startTime:      new Date(),
     startPrice:     currentPrice,
     entryTriggered: false,
@@ -107,9 +110,11 @@ async function generateSignalIfTradingHours() {
     console.log('\n🔄 [CYCLE] Starting three-decider cycle...');
 
     // ONE shared fetch — all three accounts read the same snapshot
-    const marketData = await twelveData.getMarketDataStaggered();
-    const atr        = { h1: marketData.h1.atr, m30: marketData.m30.atr };
-    const currentPrice = marketData.h1.price || marketData.m30.price;
+    const marketData     = await twelveData.getMarketDataBulk();
+    const atr            = { h1: marketData.h1.atr, m30: marketData.m30.atr };
+    const currentPrice   = marketData.h1.price || marketData.m30.price;
+    const currentSession = getSession(new Date());
+    console.log(`📍 [CYCLE] Session: ${currentSession ?? 'none'} | Price: $${currentPrice?.toFixed(2)}`);
     // Load all three portfolios fresh from DB (balances may have changed)
     const mechPortfolio    = database.getPortfolioByName('mechanical');
     const overlayPortfolio = database.getPortfolioByName('claude_overlay');
@@ -125,6 +130,8 @@ async function generateSignalIfTradingHours() {
     // Persist the mechanical signal (backward compat with /api/signal, history)
     const mechSignal = mechDecision._signal;
     mechSignal.marketData.m5 = marketData.m5;
+    mechSignal.session = currentSession;
+    mechSignal.adx     = { h4: marketData.h4.adx, h1: marketData.h1.adx, m30: marketData.m30.adx };
     const signalId = database.saveSignal(mechSignal);
 
     if (mechDecision.action === 'TRADE') {
@@ -133,7 +140,8 @@ async function generateSignalIfTradingHours() {
         decision:      mechDecision,
         signalId,
         currentPrice,
-        isSignalOwner: true   // updates signals table on close
+        isSignalOwner: true,   // updates signals table on close
+        session:       currentSession
       });
     } else {
       // Track RED signal for missed-opportunity detection
@@ -158,20 +166,22 @@ async function generateSignalIfTradingHours() {
 
     // ── Claude Overlay decider ────────────────────────────────────────────
     const overlayDecision = await claudeOverlayDecide(
-      marketData, atr, overlayPortfolio, overlayLessons, mechDecision
+      marketData, atr, overlayPortfolio, overlayLessons, mechDecision, null, currentSession
     );
     if (overlayDecision.action === 'TRADE') {
-      openPosition({ portfolio: overlayPortfolio, decision: overlayDecision, signalId, currentPrice, isSignalOwner: false });
+      openPosition({ portfolio: overlayPortfolio, decision: overlayDecision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
     } else if (overlayDecision.action === 'VETO') {
-      openVetoShadow({ portfolio: overlayPortfolio, decision: overlayDecision, currentPrice });
+      openVetoShadow({ portfolio: overlayPortfolio, decision: overlayDecision, currentPrice, session: currentSession });
     }
 
     // ── Claude Solo decider ───────────────────────────────────────────────
-    const soloDecision = await claudeSoloDecide(marketData, atr, soloPortfolio, soloLessons);
+    const soloDecision = await claudeSoloDecide(
+      marketData, atr, soloPortfolio, soloLessons, null, null, currentSession
+    );
     if (soloDecision.action === 'TRADE') {
-      openPosition({ portfolio: soloPortfolio, decision: soloDecision, signalId, currentPrice, isSignalOwner: false });
+      openPosition({ portfolio: soloPortfolio, decision: soloDecision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
     } else if (soloDecision.action === 'VETO') {
-      openVetoShadow({ portfolio: soloPortfolio, decision: soloDecision, currentPrice });
+      openVetoShadow({ portfolio: soloPortfolio, decision: soloDecision, currentPrice, session: currentSession });
     }
 
     // Cache the mechanical signal for /api/signal
@@ -205,9 +215,9 @@ function startPricePoller() {
 
 // ── Signal cron ────────────────────────────────────────────────────────────
 function startBackgroundSignalGeneration() {
-  console.log('🤖 Starting background signal generation (every 8 min)...');
+  console.log('🤖 Starting background signal generation (every 5 min)...');
   generateSignalIfTradingHours();
-  setInterval(() => generateSignalIfTradingHours(), 8 * 60 * 1000);
+  setInterval(() => generateSignalIfTradingHours(), 5 * 60 * 1000);
 }
 
 // ── REST API ───────────────────────────────────────────────────────────────
@@ -225,7 +235,7 @@ app.get('/api/signal', (req, res) => {
     if (!isTradingHours()) {
       return res.json({
         signal: 'CLOSED',
-        message: 'Outside trading hours (16:30–20:30 UAE)',
+        message: 'Outside trading hours (06:00–21:00 UAE)',
         nextTradingTime: getNextTradingTime(),
         timestamp: new Date().toISOString()
       });
@@ -506,11 +516,11 @@ app.listen(PORT, () => {
   console.log(`📡 Server running on http://localhost:${PORT}`);
   console.log(`🔑 TwelveData key: ${process.env.TWELVE_DATA_API_KEY ? 'YES' : 'NO'}`);
   console.log(`🤖 Claude key:     ${process.env.CLAUDE_API_KEY    ? 'YES' : 'NO'}`);
-  console.log(`⏰ Trading window: 16:30–20:30 UAE (4 h, NY session, Mon–Fri)`);
-  console.log(`🔄 Signal cron:  every 8 min  → ~30 cycles × 17 calls = ~510 calls/day`);
-  console.log(`📡 Price poller: every 1 min  → ~240 checks × 1 call  = ~240 calls/day`);
-  console.log(`📊 Projected daily total: ~750 calls  (budget: 800, margin: ~50)`);
-  console.log(`⚡ Max calls/60s window: 7  (Batch B 6 + poller 1)`);
+  console.log(`⏰ Trading window: 06:00–21:00 UAE (15 h, Mon–Fri)`);
+  console.log(`🔄 Signal cron:  every 5 min  → ~180 cycles × 1 call = ~180 calls/day`);
+  console.log(`📡 Price poller: every 1 min  → ~900 checks × 1 call = ~900 calls/day`);
+  console.log(`📊 Projected daily total: ~1080 calls  (bulk plan budget: 800/min)`);
+  console.log(`📍 Sessions: JP(06-10) | JP-EUR(10-11) | EUR(11-16) | EUR-US(16-19) | US(19-21) UAE`);
   console.log(`🏦 Accounts: mechanical | claude_overlay | claude_solo`);
   console.log('='.repeat(55));
   if (process.env.VERIFY_TOKEN) {
