@@ -194,48 +194,59 @@ class TwelveDataService {
     }
   }
 
-  // Single bulk POST to /complex_data — 1 API call for all 5 methods × 5 intervals.
-  // Response is a flat array of 25 items ordered: method-group, then interval within each group.
-  // ATR: API value primary, local OHLC fallback if absent.
+  // Single bulk POST to /complex_data — 2 API calls per cycle (1 POST + 1 price).
+  // Bulk POST: 4 indicators × 5 intervals = 20 items.
+  // complex_data does NOT support time_series; price comes from /price endpoint.
   // ADX: returned for all intervals; callers use h4/h1/m30 only.
   async getMarketDataBulk(symbol = 'XAU/USD') {
-    console.log('\n🚀 Starting bulk complex_data fetch (1 POST, 25 items)...\n');
+    console.log('\n🚀 Starting bulk complex_data fetch (POST + price = 2 calls)...\n');
     this.resetCallCount();
 
     const payload = {
-      symbol,
+      symbols:  [symbol],
       methods: [
-        { name: 'time_series', params: { outputsize: 20 } },
-        { name: 'rsi',         params: { time_period: 14 } },
-        { name: 'macd',        params: { fast_period: 12, slow_period: 26, signal_period: 9 } },
-        { name: 'atr',         params: { time_period: 14 } },
-        { name: 'adx',         params: { time_period: 14 } },
+        { name: 'rsi',  params: { time_period: 14 } },
+        { name: 'macd', params: { fast_period: 12, slow_period: 26, signal_period: 9 } },
+        { name: 'atr',  params: { time_period: 14 } },
+        { name: 'adx',  params: { time_period: 14 } },
       ],
       intervals: ['4h', '1h', '30min', '15min', '5min'],
     };
 
     try {
-      const response = await fetch(
-        `${BASE_URL}/complex_data?apikey=${API_KEY}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        }
-      );
+      // Run bulk indicators and price fetch in parallel
+      const [response, currentPrice] = await Promise.all([
+        fetch(
+          `${BASE_URL}/complex_data?apikey=${API_KEY}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          }
+        ),
+        this.fetchPrice(symbol),
+      ]);
+      this.callCount++; // bulk POST counts as 1; fetchPrice() increments itself
 
       const raw = await response.json();
-      this.callCount++;
       console.log(`✅ complex_data POST returned ${raw.data?.length ?? 0} items`);
 
       if (raw.status === 'error') {
         throw new Error(raw.message || 'complex_data API error');
       }
 
+      // Per-item error guard — any bad item means dirty data; skip the cycle.
+      const errorItems = raw.data?.filter(item => item.status === 'error') ?? [];
+      if (errorItems.length > 0) {
+        for (const item of errorItems) {
+          console.error(`❌ complex_data item error [${item.meta?.interval ?? '?'} ${item.meta?.indicator?.name ?? '?'}]: ${item.message ?? item.code}`);
+        }
+        throw new Error(`complex_data returned ${errorItems.length} error item(s) — skipping cycle to avoid null snapshot`);
+      }
+
       // Classify each item by its indicator name prefix
       function indicatorKey(item) {
         const name = item.meta?.indicator?.name ?? '';
-        if (!name)                  return 'ts';
         if (name.startsWith('RSI'))  return 'rsi';
         if (name.startsWith('MACD')) return 'macd';
         if (name.startsWith('ATR'))  return 'atr';
@@ -244,36 +255,30 @@ class TwelveDataService {
       }
 
       // Group latest values: grouped[`${interval}:${key}`] = values[0]
-      // Keep full OHLC arrays for local ATR fallback
       const grouped = {};
-      const ohlc    = {};
 
       for (const item of raw.data) {
         const interval = item.meta?.interval;
         const key      = indicatorKey(item);
         if (!interval || key === null) continue;
-        if (key === 'ts') ohlc[interval] = item.values;
         grouped[`${interval}:${key}`] = item.values?.[0] ?? null;
       }
 
       const f = (v, fallback = null) => { const n = parseFloat(v); return isFinite(n) ? n : fallback; };
 
       const buildTf = (interval) => {
-        const ts   = grouped[`${interval}:ts`]   ?? {};
         const rsi  = grouped[`${interval}:rsi`]  ?? {};
         const macd = grouped[`${interval}:macd`] ?? {};
         const atr  = grouped[`${interval}:atr`]  ?? {};
         const adx  = grouped[`${interval}:adx`]  ?? {};
-        const atrVal = f(atr.atr) ?? this.computeATR(ohlc[interval]);
         return {
           interval,
-          price:       f(ts.close, 0),
-          timestamp:   ts.datetime  ?? null,
+          price:       currentPrice,
           rsi:         f(rsi.rsi),
           macd:        f(macd.macd),
           macd_signal: f(macd.macd_signal),
           macd_hist:   f(macd.macd_hist),
-          atr:         atrVal,
+          atr:         f(atr.atr),
           adx:         f(adx.adx),
         };
       };
@@ -284,6 +289,7 @@ class TwelveDataService {
       const m15 = buildTf('15min');
       const m5  = buildTf('5min');
 
+      console.log(`💰 Price: $${currentPrice.toFixed(2)}`);
       console.log(`📐 ADX — H4: ${h4.adx?.toFixed(1)}, H1: ${h1.adx?.toFixed(1)}, M30: ${m30.adx?.toFixed(1)}`);
       console.log(`📞 Total API calls this cycle: ${this.callCount}`);
 
