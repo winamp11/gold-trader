@@ -69,6 +69,17 @@ class DatabaseService {
         console.log(`🔧 Migrated: added signals.${col}`);
       }
     }
+    for (const [col, def] of [
+      ['session', 'TEXT'],
+      ['h4_adx',  'REAL'],
+      ['h1_adx',  'REAL'],
+      ['m30_adx', 'REAL'],
+    ]) {
+      if (!sigCols.includes(col)) {
+        this.db.exec(`ALTER TABLE signals ADD COLUMN ${col} ${def}`);
+        console.log(`🔧 Migrated: added signals.${col}`);
+      }
+    }
 
     // Autochartist patterns table - stores manually logged patterns from Autochartist
     this.db.exec(`
@@ -123,6 +134,7 @@ class DatabaseService {
       ['decider',      'TEXT'],
       ['tag',          'TEXT'],
       ['reasoning',    'TEXT'],
+      ['session',      'TEXT'],
     ]) {
       if (!tradeCols.includes(col)) {
         this.db.exec(`ALTER TABLE trades ADD COLUMN ${col} ${def}`);
@@ -203,6 +215,13 @@ class DatabaseService {
       )
     `);
 
+    // Migrate journal table — add session column
+    const journalCols = this.db.prepare('PRAGMA table_info(journal)').all().map(c => c.name);
+    if (!journalCols.includes('session')) {
+      this.db.exec('ALTER TABLE journal ADD COLUMN session TEXT');
+      console.log('🔧 Migrated: added journal.session');
+    }
+
     // Daily P&L roll-up per portfolio
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS account_pnl_daily (
@@ -231,13 +250,15 @@ class DatabaseService {
         h1_macd, h1_rsi, h1_atr,
         m30_macd, m30_rsi, m30_atr,
         m15_macd, m15_rsi, m15_atr,
-        m5_macd, m5_rsi, m5_atr
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        m5_macd, m5_rsi, m5_atr,
+        session, h4_adx, h1_adx, m30_adx
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const rec = signalData.recommendation || {};
     const tf = signalData.timeframes || {};
     const md = signalData.marketData || {};
+    const adx = signalData.adx || {};
 
     const info = stmt.run(
       signalData.timestamp,
@@ -265,7 +286,11 @@ class DatabaseService {
       md.m15?.atr ?? null,
       md.m5?.macd ?? null,
       md.m5?.rsi ?? null,
-      md.m5?.atr ?? null
+      md.m5?.atr ?? null,
+      signalData.session   ?? null,
+      adx.h4               ?? null,
+      adx.h1               ?? null,
+      adx.m30              ?? null
     );
 
     console.log(`💾 Signal saved to database (ID: ${info.lastInsertRowid})`);
@@ -366,8 +391,8 @@ class DatabaseService {
     const info = this.db.prepare(`
       INSERT INTO trades (
         signal_id, portfolio_id, timestamp, direction, entry_price, lot_size,
-        stop_loss, take_profit, notes, decider, tag, reasoning
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        stop_loss, take_profit, notes, decider, tag, reasoning, session
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       tradeData.signal_id   || null,
       tradeData.portfolio_id || 1,
@@ -380,7 +405,8 @@ class DatabaseService {
       tradeData.notes       || null,
       tradeData.decider     || null,
       tradeData.tag         || null,
-      tradeData.reasoning   || null
+      tradeData.reasoning   || null,
+      tradeData.session     || null
     );
 
     console.log(`💾 Trade saved (ID: ${info.lastInsertRowid}, portfolio: ${tradeData.portfolio_id || 1})`);
@@ -545,11 +571,11 @@ class DatabaseService {
 
   // ===== JOURNAL =====
 
-  saveJournalEntry({ portfolioId, signalOrTradeId = null, entryType, lessonText, tag = null }) {
+  saveJournalEntry({ portfolioId, signalOrTradeId = null, entryType, lessonText, tag = null, session = null }) {
     const id = this.db.prepare(`
-      INSERT INTO journal (portfolio_id, timestamp, signal_or_trade_id, entry_type, lesson_text, tag)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(portfolioId, new Date().toISOString(), signalOrTradeId, entryType, lessonText, tag).lastInsertRowid;
+      INSERT INTO journal (portfolio_id, timestamp, signal_or_trade_id, entry_type, lesson_text, tag, session)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(portfolioId, new Date().toISOString(), signalOrTradeId, entryType, lessonText, tag, session).lastInsertRowid;
     console.log(`📓 Journal entry saved (ID: ${id}, portfolio: ${portfolioId}, type: ${entryType})`);
     return id;
   }
