@@ -20,8 +20,10 @@ app.use(cors());
 app.use(express.json());
 
 // In-memory cache for the current mechanical signal
-let currentSignal = null;
-let lastUpdate    = null;
+let currentSignal      = null;
+let lastUpdate         = null;
+let lastKnownPrice     = null;
+let lastCycleDecisions = null;
 
 // ── Helper: open a real position for one portfolio ─────────────────────────
 function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwner, session = null }) {
@@ -114,6 +116,7 @@ async function generateSignalIfTradingHours() {
     const atr            = { h1: marketData.h1.atr, m30: marketData.m30.atr };
     const currentPrice   = marketData.h1.price || marketData.m30.price;
     const currentSession = getSession(new Date());
+    lastKnownPrice = currentPrice;
     console.log(`📍 [CYCLE] Session: ${currentSession ?? 'none'} | Price: $${currentPrice?.toFixed(2)}`);
     if (marketData.atrCaveat) {
       console.log(`⚠️  [CYCLE] ATR caveat active (H1/H4 ratio understated) — prompts will include caveat`);
@@ -191,6 +194,12 @@ async function generateSignalIfTradingHours() {
     currentSignal = mechSignal;
     lastUpdate    = Date.now();
 
+    lastCycleDecisions = {
+      mechanical: { action: mechDecision.action,    tag: mechDecision.tag    ?? null, reasoning: mechDecision.reasoning ?? null },
+      overlay:    { action: overlayDecision.action,  tag: overlayDecision.tag  ?? null, reasoning: overlayDecision.reasoning ?? null },
+      solo:       { action: soloDecision.action,     tag: soloDecision.tag     ?? null, reasoning: soloDecision.reasoning ?? null },
+    };
+
     console.log(`✅ [CYCLE] mech=${mechDecision.action}, overlay=${overlayDecision.action}, solo=${soloDecision.action}`);
   } catch (error) {
     console.error('❌ [CYCLE] Error:', error.message);
@@ -208,6 +217,7 @@ function startPricePoller() {
 
     try {
       const price = await twelveData.fetchPrice('XAU/USD');
+      lastKnownPrice = price;
       console.log(`📡 [POLLER] $${price.toFixed(2)} | positions=${outcomeTracker.activeTracking.size}, shadows=${outcomeTracker.shadowTracking.size}`);
       outcomeTracker.checkOutcomesWithPrice(price);
     } catch (error) {
@@ -375,6 +385,132 @@ app.get('/api/accounts', (req, res) => {
     res.json({ accounts: result });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch accounts', message: error.message });
+  }
+});
+
+// ── Dashboard endpoints ────────────────────────────────────────────────────
+
+// Current market state: signal, 5-timeframe snapshot, last-cycle decisions, missed count.
+app.get('/api/market-snapshot', (req, res) => {
+  try {
+    res.json({
+      tradingHours:            isTradingHours(),
+      nextTradingTime:         isTradingHours() ? null : getNextTradingTime(),
+      signal:                  currentSignal      || null,
+      lastCycleDecisions:      lastCycleDecisions || null,
+      missedOpportunitiesToday: database.getMissedOpportunitiesToday(),
+      timestamp:               new Date().toISOString(),
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Daily equity curve — one balance point per trading day per account.
+// Past days: closing balance derived from account_pnl_daily cumulative PnL.
+// Today: current_balance (in-progress / partial day).
+app.get('/api/equity', (req, res) => {
+  try {
+    const portfolios = database.getAllPortfolios();
+    const equity = {};
+    for (const p of portfolios) {
+      equity[p.name] = database.getDailyEquity(p.id);
+    }
+    res.json({ equity });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Open GREEN positions — live unrealized P&L from lastKnownPrice.
+app.get('/api/positions', (req, res) => {
+  try {
+    const positions = [];
+    for (const t of outcomeTracker.activeTracking.values()) {
+      if (t.type !== 'GREEN') continue;
+      let unrealizedPnl = null;
+      if (t.entryTriggered && lastKnownPrice != null) {
+        const move = t.direction === 'LONG'
+          ? lastKnownPrice - t.entryPrice
+          : t.entryPrice - lastKnownPrice;
+        unrealizedPnl = Math.round(move * 100 * (t.lots || 0.01) * 100) / 100;
+      }
+      positions.push({
+        key:            t.key,
+        portfolioName:  t.portfolioName,
+        direction:      t.direction,
+        entryPrice:     t.entryPrice,
+        stopLoss:       t.stopLoss,
+        target:         t.target,
+        lots:           t.lots,
+        startTime:      t.startTime,
+        entryTriggered: t.entryTriggered,
+        currentPrice:   lastKnownPrice,
+        unrealizedPnl,
+        tag:            t.tag,
+      });
+    }
+    res.json({ positions });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Recent closed trades — optionally filtered by account name.
+app.get('/api/trades/recent', (req, res) => {
+  try {
+    const limit     = Math.min(Math.max(parseInt(req.query.limit)  || 20, 1), 100);
+    const offset    = Math.max(parseInt(req.query.offset) || 0, 0);
+    const account   = req.query.account;
+    let portfolioId = null;
+    if (account) {
+      const p = database.getPortfolioByName(account);
+      if (!p) return res.json({ trades: [] });
+      portfolioId = p.id;
+    }
+    res.json({ trades: database.getRecentClosedTrades(limit, portfolioId, offset) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Journal entries — optionally filtered by account name.
+app.get('/api/journal', (req, res) => {
+  try {
+    const limit     = Math.min(Math.max(parseInt(req.query.limit)  || 20, 1), 100);
+    const offset    = Math.max(parseInt(req.query.offset) || 0, 0);
+    const account   = req.query.account;
+    let portfolioId = null;
+    if (account) {
+      const p = database.getPortfolioByName(account);
+      if (!p) return res.json({ entries: [] });
+      portfolioId = p.id;
+    }
+    res.json({ entries: database.getJournalEntries(limit, portfolioId, offset) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Missed-opportunity detail — RED signals that crossed the 15-pt threshold.
+app.get('/api/missed', (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+    const missed = database.getMissedOpportunitiesRecent(limit).map(r => {
+      let meta = {};
+      try { meta = JSON.parse(r.outcome_metadata || '{}'); } catch {}
+      return {
+        id:               r.id,
+        timestamp:        r.timestamp,
+        outcomeTimestamp: r.outcome_timestamp,
+        outcomePrice:     r.outcome_price,
+        direction:        meta.direction ?? null,
+        movePts:          meta.move != null ? parseFloat(meta.move) : null,
+      };
+    });
+    res.json({ missed });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 

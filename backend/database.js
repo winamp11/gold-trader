@@ -674,6 +674,76 @@ class DatabaseService {
     `).run(date, portfolioId, pnlDelta, isWin ? 1 : 0, isWin ? 0 : 1);
   }
 
+  // ── Equity / API endpoints ────────────────────────────────────────────────
+
+  // One balance point per completed trading day, derived from account_pnl_daily.
+  // Today always uses current_balance (in-progress / partial day).
+  getDailyEquity(portfolioId) {
+    const portfolio = this.getPortfolioById(portfolioId);
+    const rows = this.db.prepare(`
+      SELECT date, realized_pnl FROM account_pnl_daily
+      WHERE portfolio_id = ? ORDER BY date ASC
+    `).all(portfolioId);
+
+    const today = new Date().toISOString().split('T')[0];
+    const points = [];
+    let balance = portfolio.starting_balance;
+    for (const row of rows) {
+      balance = Math.round((balance + row.realized_pnl) * 100) / 100;
+      if (row.date !== today) points.push({ t: row.date, b: balance });
+    }
+    points.push({ t: today, b: portfolio.current_balance });
+    return points;
+  }
+
+  getRecentClosedTrades(limit = 20, portfolioId = null, offset = 0) {
+    let sql = `
+      SELECT t.id, t.timestamp, t.direction, t.entry_price, t.exit_price,
+             t.lot_size, t.stop_loss, t.take_profit, t.pnl,
+             t.exit_timestamp, t.exit_reason, t.tag,
+             p.name AS portfolio_name
+      FROM trades t
+      JOIN portfolios p ON p.id = t.portfolio_id
+      WHERE t.exit_reason IS NOT NULL
+    `;
+    const params = [];
+    if (portfolioId != null) { sql += ' AND t.portfolio_id = ?'; params.push(portfolioId); }
+    sql += ' ORDER BY t.exit_timestamp DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+    return this.db.prepare(sql).all(...params);
+  }
+
+  getJournalEntries(limit = 20, portfolioId = null, offset = 0) {
+    let sql = `
+      SELECT j.id, j.portfolio_id, p.name AS portfolio_name,
+             j.timestamp, j.entry_type, j.lesson_text, j.tag
+      FROM journal j
+      JOIN portfolios p ON p.id = j.portfolio_id
+      WHERE 1=1
+    `;
+    const params = [];
+    if (portfolioId != null) { sql += ' AND j.portfolio_id = ?'; params.push(portfolioId); }
+    sql += ' ORDER BY j.timestamp DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+    return this.db.prepare(sql).all(...params);
+  }
+
+  getMissedOpportunitiesToday() {
+    const today = new Date().toISOString().split('T')[0];
+    const row = this.db.prepare(
+      "SELECT COUNT(*) AS n FROM signals WHERE date(timestamp) = ? AND outcome = 'MISSED_OPPORTUNITY'"
+    ).get(today);
+    return row?.n ?? 0;
+  }
+
+  getMissedOpportunitiesRecent(limit = 20) {
+    return this.db.prepare(`
+      SELECT id, timestamp, outcome_timestamp, outcome_price, outcome_metadata
+      FROM signals WHERE outcome = 'MISSED_OPPORTUNITY'
+      ORDER BY outcome_timestamp DESC LIMIT ?
+    `).all(limit);
+  }
+
   close() {
     this.db.close();
   }
