@@ -454,7 +454,7 @@ function MarketPanel({ snapshot, missed }) {
       <div className="market-closed">
         <div className="market-closed__icon">◉</div>
         <div className="market-closed__title">Market Closed</div>
-        <div className="market-closed__sub">Trading window 16:30 – 20:30 UAE</div>
+        <div className="market-closed__sub">Trading window 06:00 – 21:00 UAE</div>
         {snapshot.nextTradingTime && (
           <div className="market-closed__next">Next session: {snapshot.nextTradingTime}</div>
         )}
