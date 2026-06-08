@@ -814,7 +814,7 @@ await database.init();
         tag:            t.tag      ?? null,
         reasoning:      t.reasoning ?? null,
         session:        t.session   ?? null,
-        startTime:      new Date(t.timestamp),
+        startTime:      new Date(),
         entryTriggered: true,
         outcome:        null,
         maxPrice:       t.entry_price,

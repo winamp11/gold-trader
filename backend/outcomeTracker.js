@@ -43,7 +43,7 @@ class OutcomeTracker {
     const now = new Date();
     for (const [, tracking] of this.activeTracking) {
       const ageHours = (now - tracking.startTime) / 3600000;
-      if (ageHours >= 4 && !tracking.outcome) {
+      if (ageHours >= 4 && !tracking.outcome && !tracking.entryTriggered) {
         await this.finalizePosition(tracking, 'EXPIRED');
       }
     }
@@ -87,7 +87,7 @@ class OutcomeTracker {
       } else if (tracking.type === 'RED') {
         await this.checkRedPosition(tracking, currentPrice, ageHours);
       }
-      if (ageHours >= 4 && !tracking.outcome) {
+      if (ageHours >= 4 && !tracking.outcome && !tracking.entryTriggered) {
         await this.finalizePosition(tracking, 'EXPIRED');
       }
     }
