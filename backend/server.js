@@ -710,33 +710,33 @@ app.get('/api/missed', async (req, res) => {
 });
 
 // ── Balance reconciliation diagnostic ────────────────────────────────────
-// For each account: expected = starting + sum(closed pnl) + unrealized.
-// Difference vs actual balance reveals unbooked P&L (e.g. old CIRCUIT_BREAKER
-// trades that missed updateTradeExit before the 2026-06-08 fix).
+// The balance only moves on realized closes; unrealized is NOT in the balance.
+// Accounting check: actual == starting + sum_closed_pnl  (within rounding).
+// Unrealized is shown separately — a non-zero value with open positions is normal.
 
 app.get('/api/reconcile', async (req, res) => {
   try {
     const rows = await database.getReconciliationData();
     const result = rows.map(row => {
-      const portfolioId    = row.id;
-      const unrealized     = lastKnownPrice != null ? computeUnrealizedPnl(portfolioId, lastKnownPrice) : 0;
-      const sumClosedPnl   = parseFloat(row.sum_closed_pnl);
-      const starting       = parseFloat(row.starting_balance);
-      const actual         = parseFloat(row.current_balance);
-      const expected       = starting + sumClosedPnl + unrealized;
-      const diff           = Math.round((expected - actual) * 100) / 100;
+      const portfolioId  = row.id;
+      const unrealized   = lastKnownPrice != null ? computeUnrealizedPnl(portfolioId, lastKnownPrice) : 0;
+      const sumClosedPnl = parseFloat(row.sum_closed_pnl);
+      const starting     = parseFloat(row.starting_balance);
+      const actual       = parseFloat(row.current_balance);
+      // Real accounting check: has the balance drifted from starting + realized?
+      const balanceCheck = starting + sumClosedPnl;
+      const balanceDiff  = Math.round((actual - balanceCheck) * 100) / 100;
       return {
         account:           row.name,
         starting_balance:  starting,
         sum_closed_pnl:    Math.round(sumClosedPnl * 100) / 100,
-        unrealized_pnl:    Math.round(unrealized * 100) / 100,
-        expected_balance:  Math.round(expected * 100) / 100,
         actual_balance:    actual,
-        difference:        diff,
-        reconciled:        Math.abs(diff) < 1.00,
+        balance_diff:      balanceDiff,   // should be ~0; non-zero = accounting error
+        reconciled:        Math.abs(balanceDiff) < 1.00,
+        unrealized_pnl:    Math.round(unrealized * 100) / 100,  // informational only
+        open_positions:    parseInt(row.orphan_trades),
         total_trades_db:   parseInt(row.total_trades),
         closed_trades_db:  parseInt(row.closed_trades),
-        orphan_trades_db:  parseInt(row.orphan_trades),
       };
     });
     res.json({ reconciliation: result, price_used: lastKnownPrice, timestamp: new Date().toISOString() });
