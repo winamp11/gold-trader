@@ -175,7 +175,7 @@ class OutcomeTracker {
 
     if (tracking.type === 'GREEN' &&
         (outcome === 'TARGET_HIT' || outcome === 'STOP_HIT' ||
-         (outcome === 'WINDOW_CLOSE' && tracking.entryTriggered))) {
+         ((outcome === 'WINDOW_CLOSE' || outcome === 'CIRCUIT_BREAKER') && tracking.entryTriggered))) {
       const lots = tracking.lots || 0.01;
       const priceMove = tracking.direction === 'LONG'
         ? fillPrice - tracking.entryPrice
@@ -216,6 +216,8 @@ class OutcomeTracker {
       const pnlStr  = pnl      != null ? ` · ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}` : '';
       if (outcome === 'WINDOW_CLOSE') {
         console.log(`🔔 [WINDOW CLOSE] ${tracking.portfolioName} | ${tracking.direction} closed${exitStr}${pnlStr} · WINDOW_CLOSE`);
+      } else if (outcome === 'CIRCUIT_BREAKER') {
+        console.log(`🛑 [CIRCUIT BREAKER] ${tracking.portfolioName} | ${tracking.direction} closed${exitStr}${pnlStr} · CIRCUIT_BREAKER`);
       } else {
         console.log(`🔴 [CLOSE] ${tracking.portfolioName} | ${outcome}${exitStr}${pnlStr}`);
       }
@@ -254,6 +256,23 @@ class OutcomeTracker {
 
     reflectVeto(shadow, wouldBeOutcome, pnl)
       .catch(err => console.error('reflectVeto fire-and-forget error:', err.message));
+  }
+
+  // ── Circuit-breaker sweep — one portfolio only ────────────────────────────
+
+  async forceClosePortfolio(portfolioId, price) {
+    const positions = Array.from(this.activeTracking.values())
+      .filter(t => t.portfolioId === portfolioId && t.type === 'GREEN');
+    const shadows = Array.from(this.shadowTracking.values())
+      .filter(s => s.portfolioId === portfolioId);
+
+    for (const t of positions) {
+      await this.finalizePosition(t, t.entryTriggered ? 'CIRCUIT_BREAKER' : 'NO_ENTRY', price);
+    }
+    for (const s of shadows) {
+      await this.finalizeShadow(s, 'CIRCUIT_BREAKER', price);
+    }
+    return positions.length + shadows.length;
   }
 
   // ── Window-close sweep ───────────────────────────────────────────────────

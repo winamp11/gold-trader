@@ -9,6 +9,7 @@ import { isTradingHours, getNextTradingTime, getSession } from './tradingHours.j
 import { decide as mechanicalDecide }    from './deciders/mechanicalDecider.js';
 import { decide as claudeOverlayDecide } from './deciders/claudeOverlayDecider.js';
 import { decide as claudeSoloDecide }    from './deciders/claudeSoloDecider.js';
+import { VALUE_PER_LOT } from './contractSpec.js';
 
 dotenv.config();
 
@@ -24,6 +25,11 @@ let lastUpdate         = null;
 let lastKnownPrice     = null;
 let lastCycleDecisions = null;
 let wasInTradingHours  = false;
+
+// ── Circuit-breaker state (per portfolio ID) ───────────────────────────────
+// { [portfolioId]: { halted, haltedOnDate, dayStartBalance } }
+const circuitBreakerState = {};
+let currentSessionDate    = null;  // UAE date of the last initSessionDay() call
 
 // ── Helper: open a real position for one portfolio ─────────────────────────
 async function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwner, session = null }) {
@@ -102,6 +108,90 @@ async function openVetoShadow({ portfolio, decision, currentPrice, session = nul
   });
 }
 
+// ── Circuit-breaker helpers ────────────────────────────────────────────────
+
+// Current date in UAE (UTC+4, no DST) as YYYY-MM-DD.
+function uaeDate() {
+  return new Date(Date.now() + 4 * 3600000).toISOString().split('T')[0];
+}
+
+// True if the circuit breaker fired for this portfolio today.
+function isHaltedToday(portfolioId) {
+  const s = circuitBreakerState[portfolioId];
+  return s?.halted === true && s?.haltedOnDate === uaeDate();
+}
+
+// Sum of unrealized P&L across all triggered GREEN positions for one portfolio.
+function computeUnrealizedPnl(portfolioId, price) {
+  if (price == null) return 0;
+  let total = 0;
+  for (const t of outcomeTracker.activeTracking.values()) {
+    if (t.portfolioId !== portfolioId || t.type !== 'GREEN' || !t.entryTriggered) continue;
+    const move = t.direction === 'LONG' ? price - t.entryPrice : t.entryPrice - price;
+    total += move * VALUE_PER_LOT * (t.lots || 0.01);
+  }
+  return total;
+}
+
+// Called once per session day (at trading open or server start).
+// Snapshots each account's current balance as the day-start baseline.
+async function initSessionDay() {
+  const today = uaeDate();
+  if (currentSessionDate === today) return; // already done for today
+  console.log(`🌅 [SESSION] Initializing session day ${today} — snapshotting day-start balances`);
+  const portfolios = await database.getAllPortfolios();
+  for (const p of portfolios) {
+    // Preserve halt state for today (handles server restart mid-session).
+    const haltedToday = p.circuit_breaker_date === today;
+    const dayStartBalance = haltedToday && p.day_start_balance != null
+      ? p.day_start_balance     // keep the balance captured before the breaker fired
+      : p.current_balance;      // new day or fresh start
+
+    if (!haltedToday) {
+      await database.setDayStartBalance(p.id, dayStartBalance);
+      await database.setCircuitBreakerDate(p.id, null);
+    }
+    circuitBreakerState[p.id] = { halted: haltedToday, haltedOnDate: haltedToday ? today : null, dayStartBalance };
+    if (haltedToday) console.log(`🛑 [CIRCUIT BREAKER] ${p.name} still halted (restored)`);
+  }
+  currentSessionDate = today;
+  console.log(`🌅 [SESSION] Day-start balances: ${portfolios.map(p => `${p.name}=$${(circuitBreakerState[p.id].dayStartBalance).toFixed(2)}`).join(', ')}`);
+}
+
+// Check and fire circuit breakers. Call on every poller tick and at cycle start.
+async function checkCircuitBreakers(currentPrice) {
+  if (!isTradingHours()) return;
+  const today = uaeDate();
+  if (currentSessionDate !== today) {
+    await initSessionDay();
+    return; // freshly initialized — nothing to close yet this tick
+  }
+
+  const portfolios = await database.getAllPortfolios();
+  for (const p of portfolios) {
+    const state = circuitBreakerState[p.id];
+    if (!state || state.halted) continue;
+
+    const realized   = p.current_balance - state.dayStartBalance;
+    const unrealized = computeUnrealizedPnl(p.id, currentPrice);
+    const dayPnl     = realized + unrealized;
+    const threshold  = -(state.dayStartBalance * 0.10);
+
+    if (dayPnl <= threshold) {
+      console.log(
+        `🛑 [CIRCUIT BREAKER] ${p.name} hit -10% day loss` +
+        ` (realized $${realized.toFixed(2)} + unrealized $${unrealized.toFixed(2)} = $${dayPnl.toFixed(2)},` +
+        ` threshold $${threshold.toFixed(2)}) — flattened and halted until next session`
+      );
+      const closed = await outcomeTracker.forceClosePortfolio(p.id, currentPrice);
+      state.halted      = true;
+      state.haltedOnDate = today;
+      await database.setCircuitBreakerDate(p.id, today);
+      console.log(`🛑 [CIRCUIT BREAKER] ${p.name} — ${closed} position(s)/shadow(s) closed, halted for session day ${today}`);
+    }
+  }
+}
+
 // ── Session label — UTC-hour based forex session identifier ───────────────
 function sessionLabel(ts) {
   if (!ts) return '';
@@ -170,21 +260,30 @@ async function generateSignalIfTradingHours() {
     mechSignal.adx     = { h4: marketData.h4.adx, h1: marketData.h1.adx, m30: marketData.m30.adx };
     const signalId = await database.saveSignal(mechSignal);
 
-    // ── Mechanical execution — gated by its own risk budget ───────────────
-    // Budget check is separate from the proposal so mechDecision still reaches
-    // the overlay unchanged even when mechanical cannot open.
+    // ── Circuit-breaker check — fires before any new positions are opened ────
+    // May close existing positions and mark accounts as halted for the day.
+    await checkCircuitBreakers(currentPrice);
+
+    // ── Mechanical execution — gated by position cap + circuit breaker ────
+    // mechDecision ALWAYS flows to overlay unchanged (decoupling invariant).
     const mechOpenPositions = outcomeTracker.getOpenPositionsForPortfolio(mechPortfolio.id);
     if (mechDecision.action === 'TRADE') {
-      await openPosition({
-        portfolio:     mechPortfolio,
-        decision:      mechDecision,
-        signalId,
-        currentPrice,
-        isSignalOwner: true,   // updates signals table on close
-        session:       currentSession
-      });
-    } else {
-      // No setup → track RED for missed-opportunity detection
+      if (isHaltedToday(mechPortfolio.id)) {
+        console.log(`🛑 [MECHANICAL] Circuit breaker active — no new position this cycle`);
+      } else if (mechOpenPositions.length >= 3) {
+        console.log(`⏸️  [MECHANICAL] Position cap: ${mechOpenPositions.length}/3 open — no new position this cycle`);
+      } else {
+        await openPosition({
+          portfolio:     mechPortfolio,
+          decision:      mechDecision,
+          signalId,
+          currentPrice,
+          isSignalOwner: true,
+          session:       currentSession
+        });
+      }
+    } else if (!isHaltedToday(mechPortfolio.id)) {
+      // Track RED for missed-opportunity detection only when not halted.
       const key = `${mechPortfolio.id}_${signalId}`;
       outcomeTracker.startTracking(key, {
         key,
@@ -202,32 +301,40 @@ async function generateSignalIfTradingHours() {
     }
 
     // ── Each Claude account queries its OWN open positions only ──────────
-    // Isolation is strict: overlay never sees solo's positions and vice versa,
-    // and neither sees mechanical's. Each account self-manages concentration
-    // and risk budget from this data. Positions are read after checkOutcomes
-    // so any that just closed are already gone.
     const overlayOpenPositions = outcomeTracker.getOpenPositionsForPortfolio(overlayPortfolio.id);
     const soloOpenPositions    = outcomeTracker.getOpenPositionsForPortfolio(soloPortfolio.id);
 
     // ── Claude Overlay decider ────────────────────────────────────────────
-    // Receives mechDecision regardless of whether mechanical opened above.
-    const overlayDecision = await claudeOverlayDecide(
-      marketData, atr, overlayPortfolio, overlayLessons, mechDecision, overlayOpenPositions, currentSession
-    );
-    if (overlayDecision.action === 'TRADE') {
-      await openPosition({ portfolio: overlayPortfolio, decision: overlayDecision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
-    } else if (overlayDecision.action === 'VETO') {
-      await openVetoShadow({ portfolio: overlayPortfolio, decision: overlayDecision, currentPrice, session: currentSession });
+    // Always receives mechDecision regardless of mechanical's execution status.
+    let overlayDecision;
+    if (isHaltedToday(overlayPortfolio.id)) {
+      console.log(`🛑 [OVERLAY] Circuit breaker active — skipping Claude call this cycle`);
+      overlayDecision = { action: 'NO_TRADE', direction: null, entry: null, stop: null, target: null, lots: null, reasoning: 'circuit breaker halt', tag: 'circuit_breaker_halt' };
+    } else {
+      overlayDecision = await claudeOverlayDecide(
+        marketData, atr, overlayPortfolio, overlayLessons, mechDecision, overlayOpenPositions, currentSession
+      );
+      if (overlayDecision.action === 'TRADE') {
+        await openPosition({ portfolio: overlayPortfolio, decision: overlayDecision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
+      } else if (overlayDecision.action === 'VETO') {
+        await openVetoShadow({ portfolio: overlayPortfolio, decision: overlayDecision, currentPrice, session: currentSession });
+      }
     }
 
     // ── Claude Solo decider ───────────────────────────────────────────────
-    const soloDecision = await claudeSoloDecide(
-      marketData, atr, soloPortfolio, soloLessons, soloOpenPositions, null, currentSession
-    );
-    if (soloDecision.action === 'TRADE') {
-      await openPosition({ portfolio: soloPortfolio, decision: soloDecision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
-    } else if (soloDecision.action === 'VETO') {
-      await openVetoShadow({ portfolio: soloPortfolio, decision: soloDecision, currentPrice, session: currentSession });
+    let soloDecision;
+    if (isHaltedToday(soloPortfolio.id)) {
+      console.log(`🛑 [SOLO] Circuit breaker active — skipping Claude call this cycle`);
+      soloDecision = { action: 'NO_TRADE', direction: null, entry: null, stop: null, target: null, lots: null, reasoning: 'circuit breaker halt', tag: 'circuit_breaker_halt' };
+    } else {
+      soloDecision = await claudeSoloDecide(
+        marketData, atr, soloPortfolio, soloLessons, soloOpenPositions, null, currentSession
+      );
+      if (soloDecision.action === 'TRADE') {
+        await openPosition({ portfolio: soloPortfolio, decision: soloDecision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
+      } else if (soloDecision.action === 'VETO') {
+        await openVetoShadow({ portfolio: soloPortfolio, decision: soloDecision, currentPrice, session: currentSession });
+      }
     }
 
     // Record which decision each Claude account reached (distinguishes
@@ -296,14 +403,16 @@ function startPricePoller() {
 
     if (!nowInHours) return;
 
-    const total = outcomeTracker.activeTracking.size + outcomeTracker.shadowTracking.size;
-    if (total === 0) return;
-
     try {
       const price = await twelveData.fetchPrice('XAU/USD');
       lastKnownPrice = price;
-      console.log(`📡 [POLLER] $${price.toFixed(2)} | positions=${outcomeTracker.activeTracking.size}, shadows=${outcomeTracker.shadowTracking.size}`);
-      await outcomeTracker.checkOutcomesWithPrice(price);
+      const total = outcomeTracker.activeTracking.size + outcomeTracker.shadowTracking.size;
+      if (total > 0) {
+        console.log(`📡 [POLLER] $${price.toFixed(2)} | positions=${outcomeTracker.activeTracking.size}, shadows=${outcomeTracker.shadowTracking.size}`);
+        await outcomeTracker.checkOutcomesWithPrice(price);
+      }
+      // Circuit-breaker check runs every tick (unrealized P&L moves with price).
+      await checkCircuitBreakers(price);
     } catch (error) {
       console.error('❌ [POLLER] Price check failed:', error.message);
     }
@@ -630,6 +739,21 @@ app.post('/api/autochartist/patterns', async (req, res) => {
 
 // Top-level await: must connect to PostgreSQL before accepting requests.
 await database.init();
+
+// Restore circuit-breaker state from DB (handles server restarts mid-session).
+{
+  const portfolios = await database.getAllPortfolios();
+  const today      = uaeDate();
+  for (const p of portfolios) {
+    const haltedToday    = p.circuit_breaker_date === today;
+    const dayStartBalance = (haltedToday && p.day_start_balance != null)
+      ? p.day_start_balance
+      : (p.day_start_balance ?? p.current_balance);
+    circuitBreakerState[p.id] = { halted: haltedToday, haltedOnDate: haltedToday ? today : null, dayStartBalance };
+    if (haltedToday) console.log(`🛑 [CIRCUIT BREAKER] ${p.name} halted today — restored from DB`);
+  }
+  // currentSessionDate stays null → initSessionDay() fires on first trading cycle.
+}
 
 app.listen(PORT, () => {
   console.log('\n' + '='.repeat(55));
