@@ -400,6 +400,10 @@ body {
 
 .history-row__dir    { font-weight: 700; flex-shrink: 0; width: 62px; }
 .history-row__prices { color: var(--text2); flex-shrink: 0; }
+
+.price-label   { color: var(--text3); }
+.price--target { color: var(--pos); }
+.price--stop   { color: var(--neg); }
 .history-row__field  { flex-shrink: 0; }
 .history-row__field--muted { color: var(--text3); }
 

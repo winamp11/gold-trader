@@ -163,8 +163,11 @@ function OpenSection({ positions }) {
             </span>
             <span className="open-row__field">
               {price(p.entryPrice)}
+              {p.target != null && (
+                <> → <span className="price--target">{price(p.target)}</span></>
+              )}
               {p.entryTriggered && p.currentPrice != null
-                ? <> → {price(p.currentPrice)}</>
+                ? <> · {price(p.currentPrice)}</>
                 : null}
             </span>
             {p.entryTriggered && p.unrealizedPnl != null
@@ -202,7 +205,14 @@ function HistorySection({ trades, hasMore, onLoadMore }) {
               {outcomeLabel(t.exit_reason)}
             </span>
             <span className="history-row__prices">
-              {price(t.entry_price)} → {price(t.exit_price)}
+              {price(t.entry_price)}
+              {t.take_profit != null && (
+                <> · <span className="price-label">tgt </span><span className="price--target">{price(t.take_profit)}</span></>
+              )}
+              {t.stop_loss != null && (
+                <> · <span className="price-label">stp </span><span className="price--stop">{price(t.stop_loss)}</span></>
+              )}
+              {t.exit_price != null && <> · {price(t.exit_price)}</>}
             </span>
             <span className="history-row__field">
               {t.lot_size != null ? `${t.lot_size.toFixed(2)}L` : '—'}
