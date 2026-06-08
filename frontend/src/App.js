@@ -107,17 +107,19 @@ function dollarRisk(entry, stop, lots) {
 }
 
 function outcomeLabel(r) {
-  if (r === 'TARGET_HIT')   return 'TARGET';
-  if (r === 'STOP_HIT')     return 'STOP';
-  if (r === 'NO_ENTRY')     return 'NO ENTRY';
-  if (r === 'WINDOW_CLOSE') return 'CLOSED';
-  if (r === 'EXPIRED')      return 'EXPIRED';
+  if (r === 'TARGET_HIT')      return 'TARGET';
+  if (r === 'STOP_HIT')        return 'STOP';
+  if (r === 'NO_ENTRY')        return 'NO ENTRY';
+  if (r === 'WINDOW_CLOSE')    return 'CLOSED';
+  if (r === 'CIRCUIT_BREAKER') return 'CB CLOSE';
+  if (r === 'EXPIRED')         return 'EXPIRED';
   return r ?? '—';
 }
 
 function outcomeClass(r) {
-  if (r === 'TARGET_HIT') return 'outcome--win';
-  if (r === 'STOP_HIT')   return 'outcome--loss';
+  if (r === 'TARGET_HIT')      return 'outcome--win';
+  if (r === 'STOP_HIT')        return 'outcome--loss';
+  if (r === 'CIRCUIT_BREAKER') return 'outcome--loss';
   return 'outcome--neutral';
 }
 

@@ -755,6 +755,40 @@ await database.init();
   // currentSessionDate stays null → initSessionDay() fires on first trading cycle.
 }
 
+// Restore open positions from DB (handles server restarts while trades are live).
+{
+  const openTrades = await database.getOpenTrades();
+  if (openTrades.length > 0) {
+    console.log(`🔄 [RESTORE] Restoring ${openTrades.length} open position(s) from DB after restart...`);
+    for (const t of openTrades) {
+      const key = `${t.portfolio_id}_${t.signal_id ?? t.id}`;
+      outcomeTracker.startTracking(key, {
+        key,
+        portfolioId:    t.portfolio_id,
+        portfolioName:  t.portfolio_name,
+        signalId:       t.signal_id,
+        tradeId:        t.id,
+        type:           'GREEN',
+        direction:      t.direction,
+        lots:           t.lot_size,
+        startPrice:     t.entry_price,
+        entryPrice:     t.entry_price,
+        stopLoss:       t.stop_loss,
+        target:         t.take_profit,
+        tag:            t.tag      ?? null,
+        reasoning:      t.reasoning ?? null,
+        session:        t.session   ?? null,
+        startTime:      new Date(t.timestamp),
+        entryTriggered: true,
+        outcome:        null,
+        maxPrice:       t.entry_price,
+        minPrice:       t.entry_price,
+      });
+      console.log(`🔄 [RESTORE] ${t.portfolio_name} | ${t.direction} entry=${t.entry_price?.toFixed(2)} stop=${t.stop_loss?.toFixed(2)} target=${t.take_profit?.toFixed(2)}`);
+    }
+  }
+}
+
 app.listen(PORT, () => {
   console.log('\n' + '='.repeat(55));
   console.log('🚀 GOLD TRADER BACKEND STARTED');

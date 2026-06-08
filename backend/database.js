@@ -588,7 +588,8 @@ class DatabaseService {
         COALESCE(d.losses, 0)         AS daily_losses,
         COALESCE(wr.closed_trades, 0) AS closed_trades,
         COALESCE(wr.wins, 0)          AS wins,
-        COALESCE(wr.losses, 0)        AS losses
+        COALESCE(wr.losses, 0)        AS losses,
+        COALESCE(jc.journal_count, 0) AS journal_count
       FROM portfolios p
       LEFT JOIN account_pnl_daily d
         ON d.portfolio_id = p.id AND d.date = $1
@@ -716,6 +717,20 @@ class DatabaseService {
     }
     points.push({ t: today, b: parseFloat(portfolio.current_balance) });
     return points;
+  }
+
+  async getOpenTrades() {
+    const r = await this.pool.query(`
+      SELECT t.id, t.signal_id, t.portfolio_id, t.timestamp,
+             t.direction, t.entry_price, t.lot_size,
+             t.stop_loss, t.take_profit, t.tag, t.reasoning, t.session,
+             p.name AS portfolio_name
+      FROM trades t
+      JOIN portfolios p ON p.id = t.portfolio_id
+      WHERE t.exit_reason IS NULL
+      ORDER BY t.id ASC
+    `);
+    return r.rows;
   }
 
   async getRecentClosedTrades(limit, portfolioId = null, offset = 0) {
