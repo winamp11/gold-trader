@@ -218,6 +218,10 @@ class DatabaseService {
     await this.pool.query(`ALTER TABLE trades ADD COLUMN IF NOT EXISTS session TEXT`);
     await this.pool.query(`ALTER TABLE journal ADD COLUMN IF NOT EXISTS session TEXT`);
 
+    // Circuit-breaker state: session-start balance + per-day halt flag.
+    await this.pool.query(`ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS day_start_balance DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS circuit_breaker_date TEXT`);
+
     // Confirm row count unchanged after all DDL
     try {
       const r = await this.pool.query('SELECT COUNT(*) AS n FROM trades');
@@ -504,6 +508,20 @@ class DatabaseService {
       'SELECT * FROM portfolios WHERE id = $1', [id]
     );
     return r.rows[0] ?? null;
+  }
+
+  async setDayStartBalance(portfolioId, balance) {
+    await this.pool.query(
+      'UPDATE portfolios SET day_start_balance = $1 WHERE id = $2',
+      [balance, portfolioId]
+    );
+  }
+
+  async setCircuitBreakerDate(portfolioId, dateStr) {
+    await this.pool.query(
+      'UPDATE portfolios SET circuit_breaker_date = $1 WHERE id = $2',
+      [dateStr, portfolioId]
+    );
   }
 
   async saveVetoShadow({ portfolioId, direction, entry, stop, target, tag = null, reasoning = null }) {
