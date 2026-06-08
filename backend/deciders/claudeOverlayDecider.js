@@ -186,7 +186,7 @@ function formatLessons(lessons) {
 
 // ── Decider ──────────────────────────────────────────────────────────────
 
-export async function decide(marketData, atr, portfolio, recentLessons, mechanicalProposal = null, _reserved = null, session = null) {
+export async function decide(marketData, atr, portfolio, recentLessons, mechanicalProposal = null, openPositions = null, session = null) {
   // Nothing to overlay when mechanical did not produce a trade.
   if (!mechanicalProposal || mechanicalProposal.action !== 'TRADE') {
     return {

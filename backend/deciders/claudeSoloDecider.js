@@ -178,7 +178,7 @@ function formatLessons(lessons) {
 
 // ── Decider ──────────────────────────────────────────────────────────────
 
-export async function decide(marketData, atr, portfolio, recentLessons, _p5 = null, _p6 = null, session = null) {
+export async function decide(marketData, atr, portfolio, recentLessons, openPositions = null, _p6 = null, session = null) {
   const userContent = [
     formatSnapshot(marketData, atr, portfolio, session),
     '',

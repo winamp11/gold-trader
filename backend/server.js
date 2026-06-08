@@ -212,7 +212,7 @@ async function generateSignalIfTradingHours() {
     // ── Claude Overlay decider ────────────────────────────────────────────
     // Receives mechDecision regardless of whether mechanical opened above.
     const overlayDecision = await claudeOverlayDecide(
-      marketData, atr, overlayPortfolio, overlayLessons, mechDecision, null, currentSession
+      marketData, atr, overlayPortfolio, overlayLessons, mechDecision, overlayOpenPositions, currentSession
     );
     if (overlayDecision.action === 'TRADE') {
       await openPosition({ portfolio: overlayPortfolio, decision: overlayDecision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
@@ -222,7 +222,7 @@ async function generateSignalIfTradingHours() {
 
     // ── Claude Solo decider ───────────────────────────────────────────────
     const soloDecision = await claudeSoloDecide(
-      marketData, atr, soloPortfolio, soloLessons, null, null, currentSession
+      marketData, atr, soloPortfolio, soloLessons, soloOpenPositions, null, currentSession
     );
     if (soloDecision.action === 'TRADE') {
       await openPosition({ portfolio: soloPortfolio, decision: soloDecision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
