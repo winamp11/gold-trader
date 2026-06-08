@@ -227,7 +227,7 @@ function HistorySection({ trades, hasMore, onLoadMore }) {
             </span>
             <span className="history-row__time">
               {t.exit_timestamp
-                ? <>{fmtDateTime(t.timestamp)} → {fmtTime(t.exit_timestamp)}</>
+                ? <>{fmtDateTime(t.timestamp)} → {fmtDateTime(t.exit_timestamp)}</>
                 : fmtDateTime(t.timestamp)
               }
               {sl && <span className="session-tag">{sl}</span>}

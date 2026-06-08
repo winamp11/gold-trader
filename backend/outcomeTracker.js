@@ -202,11 +202,11 @@ class OutcomeTracker {
       });
     }
 
-    if (tracking.tradeId && (outcome === 'TARGET_HIT' || outcome === 'STOP_HIT' || outcome === 'WINDOW_CLOSE')) {
+    if (tracking.tradeId) {
       await database.updateTradeExit(tracking.tradeId, {
-        exit_price: fillPrice,
+        exit_price:     fillPrice,
         exit_timestamp: tracking.endTime.toISOString(),
-        exit_reason: outcome,
+        exit_reason:    outcome,
         pnl,
       });
     }

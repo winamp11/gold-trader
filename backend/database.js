@@ -758,6 +758,25 @@ class DatabaseService {
     return r.rows;
   }
 
+  async getReconciliationData() {
+    const r = await this.pool.query(`
+      SELECT
+        p.id,
+        p.name,
+        p.starting_balance,
+        p.current_balance,
+        COUNT(t.id)                                        AS total_trades,
+        COUNT(t.id) FILTER (WHERE t.exit_reason IS NOT NULL) AS closed_trades,
+        COUNT(t.id) FILTER (WHERE t.exit_reason IS NULL)     AS orphan_trades,
+        COALESCE(SUM(t.pnl) FILTER (WHERE t.exit_reason IS NOT NULL), 0) AS sum_closed_pnl
+      FROM portfolios p
+      LEFT JOIN trades t ON t.portfolio_id = p.id
+      GROUP BY p.id
+      ORDER BY p.id
+    `);
+    return r.rows;
+  }
+
   async getMissedOpportunitiesRecent(limit) {
     const r = await this.pool.query(`
       SELECT id, timestamp, outcome_timestamp, outcome_price, outcome_metadata

@@ -709,6 +709,42 @@ app.get('/api/missed', async (req, res) => {
   }
 });
 
+// ── Balance reconciliation diagnostic ────────────────────────────────────
+// For each account: expected = starting + sum(closed pnl) + unrealized.
+// Difference vs actual balance reveals unbooked P&L (e.g. old CIRCUIT_BREAKER
+// trades that missed updateTradeExit before the 2026-06-08 fix).
+
+app.get('/api/reconcile', async (req, res) => {
+  try {
+    const rows = await database.getReconciliationData();
+    const result = rows.map(row => {
+      const portfolioId    = row.id;
+      const unrealized     = lastKnownPrice != null ? computeUnrealizedPnl(portfolioId, lastKnownPrice) : 0;
+      const sumClosedPnl   = parseFloat(row.sum_closed_pnl);
+      const starting       = parseFloat(row.starting_balance);
+      const actual         = parseFloat(row.current_balance);
+      const expected       = starting + sumClosedPnl + unrealized;
+      const diff           = Math.round((expected - actual) * 100) / 100;
+      return {
+        account:           row.name,
+        starting_balance:  starting,
+        sum_closed_pnl:    Math.round(sumClosedPnl * 100) / 100,
+        unrealized_pnl:    Math.round(unrealized * 100) / 100,
+        expected_balance:  Math.round(expected * 100) / 100,
+        actual_balance:    actual,
+        difference:        diff,
+        reconciled:        Math.abs(diff) < 1.00,
+        total_trades_db:   parseInt(row.total_trades),
+        closed_trades_db:  parseInt(row.closed_trades),
+        orphan_trades_db:  parseInt(row.orphan_trades),
+      };
+    });
+    res.json({ reconciliation: result, price_used: lastKnownPrice, timestamp: new Date().toISOString() });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ── Autochartist endpoints (unchanged) ────────────────────────────────────
 
 app.get('/api/autochartist/patterns', async (req, res) => {
