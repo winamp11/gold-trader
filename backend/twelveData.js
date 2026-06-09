@@ -194,12 +194,11 @@ class TwelveDataService {
     }
   }
 
-  // Single bulk POST to /complex_data — 2 API calls per cycle (1 POST + 1 price).
-  // Bulk POST: 4 indicators × 5 intervals = 20 items.
-  // complex_data does NOT support time_series; price comes from /price endpoint.
-  // ADX: returned for all intervals; callers use h4/h1/m30 only.
+  // Single bulk POST to /complex_data — 3 API calls per cycle (1 POST + 1 price + 1 H1 candles).
+  // include_ohlc in complex_data is ignored (verified 2026-06-10); H1 OHLC comes from a
+  // separate time_series call run in parallel — no extra latency.
   async getMarketDataBulk(symbol = 'XAU/USD') {
-    console.log('\n🚀 Starting bulk complex_data fetch (POST + price = 2 calls)...\n');
+    console.log('\n🚀 Starting bulk complex_data fetch (POST + price + H1 candles = 3 calls)...\n');
     this.resetCallCount();
 
     const payload = {
@@ -214,8 +213,8 @@ class TwelveDataService {
     };
 
     try {
-      // Run bulk indicators and price fetch in parallel
-      const [response, currentPrice] = await Promise.all([
+      // All three fetches in parallel — H1 candles run alongside the bulk POST
+      const [response, currentPrice, h1CandlesRes] = await Promise.all([
         fetch(
           `${BASE_URL}/complex_data?apikey=${API_KEY}`,
           {
@@ -225,8 +224,9 @@ class TwelveDataService {
           }
         ),
         this.fetchPrice(symbol),
+        fetch(`${BASE_URL}/time_series?apikey=${API_KEY}&symbol=${encodeURIComponent(symbol)}&interval=1h&outputsize=10`),
       ]);
-      this.callCount++; // bulk POST counts as 1; fetchPrice() increments itself
+      this.callCount += 2; // bulk POST + H1 time_series count as 2; fetchPrice() increments itself
 
       const raw = await response.json();
       console.log(`✅ complex_data POST returned ${raw.data?.length ?? 0} items`);
@@ -298,11 +298,31 @@ class TwelveDataService {
         console.log(`⚠️  ATR caveat active: H1/H4 ratio=${atrRatio.toFixed(3)} < 0.25 — volatility lookback still normalizing`);
       }
 
+      // Parse H1 candles (newest first, as returned by API)
+      let h1Candles = [];
+      try {
+        const tsData = await h1CandlesRes.json();
+        if (tsData.status !== 'error' && Array.isArray(tsData.values)) {
+          h1Candles = tsData.values.map(v => ({
+            datetime: v.datetime,
+            open:     parseFloat(v.open),
+            high:     parseFloat(v.high),
+            low:      parseFloat(v.low),
+            close:    parseFloat(v.close),
+          }));
+          console.log(`📊 H1 candles: ${h1Candles.length} returned (newest: ${h1Candles[0]?.datetime})`);
+        } else {
+          console.warn(`⚠️  H1 time_series fetch failed: ${tsData.message ?? 'unknown error'}`);
+        }
+      } catch (err) {
+        console.warn(`⚠️  H1 candles parse error: ${err.message}`);
+      }
+
       console.log(`💰 Price: $${currentPrice.toFixed(2)}`);
       console.log(`📐 ADX — H4: ${h4.adx?.toFixed(1)}, H1: ${h1.adx?.toFixed(1)}, M30: ${m30.adx?.toFixed(1)}`);
       console.log(`📞 Total API calls this cycle: ${this.callCount}`);
 
-      return { symbol, timestamp: new Date().toISOString(), h4, h1, m30, m15, m5, atrCaveat, apiCallCount: this.callCount };
+      return { symbol, timestamp: new Date().toISOString(), h4, h1, m30, m15, m5, atrCaveat, h1Candles, apiCallCount: this.callCount };
     } catch (error) {
       console.error('Error in getMarketDataBulk:', error.message);
       throw error;

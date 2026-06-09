@@ -31,6 +31,32 @@ let wasInTradingHours  = false;
 const circuitBreakerState = {};
 let currentSessionDate    = null;  // UAE date of the last initSessionDay() call
 
+// ── Session range (tracked from 06:00 UAE open, reset daily) ──────────────
+let sessionHigh      = null;
+let sessionLow       = null;
+let sessionRangeDate = null;  // UAE date of last range reset
+
+function updateSessionRange(price) {
+  const today = uaeDate();
+  if (sessionRangeDate !== today) {
+    sessionHigh      = price;
+    sessionLow       = price;
+    sessionRangeDate = today;
+    console.log(`📏 [SESSION RANGE] Reset for ${today} @ $${price.toFixed(2)}`);
+  } else {
+    if (price > sessionHigh) sessionHigh = price;
+    if (price < sessionLow)  sessionLow  = price;
+  }
+}
+
+function getSessionRangeStr(currentPrice) {
+  if (sessionHigh == null || sessionLow == null) return null;
+  const spread = sessionHigh - sessionLow;
+  if (spread < 0.01) return `Session range: establishing (< $0.01 spread so far)`;
+  const pct = ((currentPrice - sessionLow) / spread * 100).toFixed(1);
+  return `Session range: ${sessionLow.toFixed(2)}–${sessionHigh.toFixed(2)} | current ${currentPrice.toFixed(2)} (${pct}%)`;
+}
+
 // ── Helper: open a real position for one portfolio ─────────────────────────
 async function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwner, session = null }) {
   const tradeId = await database.saveTrade({
@@ -233,6 +259,8 @@ async function generateSignalIfTradingHours() {
     const currentPrice   = marketData.h1.price || marketData.m30.price;
     const currentSession = getSession(new Date());
     lastKnownPrice = currentPrice;
+    updateSessionRange(currentPrice);
+    marketData.sessionRange = getSessionRangeStr(currentPrice);
     console.log(`📍 [CYCLE] Session: ${currentSession ?? 'none'} | Price: $${currentPrice?.toFixed(2)}`);
     if (marketData.atrCaveat) {
       console.log(`⚠️  [CYCLE] ATR caveat active (H1/H4 ratio understated) — prompts will include caveat`);
@@ -406,6 +434,7 @@ function startPricePoller() {
     try {
       const price = await twelveData.fetchPrice('XAU/USD');
       lastKnownPrice = price;
+      updateSessionRange(price);
       const total = outcomeTracker.activeTracking.size + outcomeTracker.shadowTracking.size;
       if (total > 0) {
         console.log(`📡 [POLLER] $${price.toFixed(2)} | positions=${outcomeTracker.activeTracking.size}, shadows=${outcomeTracker.shadowTracking.size}`);
