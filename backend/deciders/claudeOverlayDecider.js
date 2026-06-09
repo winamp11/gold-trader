@@ -97,6 +97,37 @@ reasoning and tag are both mandatory.`;
 
 function fmt(n, dp = 2) { return n != null ? Number(n).toFixed(dp) : 'n/a'; }
 
+// Derives a one-line structural summary from the last 5 H1 candles.
+// Input: array of candles newest-first (as returned by time_series).
+function h1StructureSummary(candles) {
+  if (!candles || candles.length < 3) return null;
+  const c = [...candles].reverse();           // chronological, oldest first
+  const n = Math.min(c.length, 5);
+  const r = c.slice(-n);                      // last n candles chronological
+
+  const closes = r.map(x => x.close);
+  const highs  = r.map(x => x.high);
+  const lows   = r.map(x => x.low);
+  const ranges = r.map(x => x.high - x.low);
+
+  const closeDir = closes[n-1] > closes[0] ? 'closes rising'
+                 : closes[n-1] < closes[0] ? 'closes falling'
+                 : 'closes flat';
+
+  const hhLh = highs[n-1] > highs[n-2] ? 'HH' : highs[n-1] < highs[n-2] ? 'LH' : '=H';
+  const hlLl = lows[n-1]  > lows[n-2]  ? 'HL' : lows[n-1]  < lows[n-2]  ? 'LL' : '=L';
+
+  const half    = Math.max(1, Math.floor(n / 2));
+  const avgOld  = ranges.slice(0, half).reduce((s, v) => s + v, 0) / half;
+  const avgNew  = ranges.slice(-half).reduce((s, v) => s + v, 0) / half;
+  const rangeDir = avgNew > avgOld * 1.15 ? 'ranges expanding'
+                 : avgNew < avgOld * 0.85 ? 'ranges contracting'
+                 : 'ranges stable';
+
+  const closesStr = closes.map(v => v.toFixed(1)).join(' ');
+  return `last ${n} closes: ${closesStr} · ${closeDir} · ${hhLh}/${hlLl} · ${rangeDir}`;
+}
+
 function formatSnapshot(marketData, atr, portfolio, session = null) {
   const price = marketData.h1?.price ?? marketData.m30?.price ?? '?';
   const lines = [
@@ -125,6 +156,23 @@ function formatSnapshot(marketData, atr, portfolio, session = null) {
   }
 
   lines.push(``, `PRIMARY ATR: H1=${fmt(atr?.h1, 1)}  M30=${fmt(atr?.m30, 1)}`);
+
+  // H1 candle structure
+  const candles = marketData.h1Candles;
+  if (Array.isArray(candles) && candles.length > 0) {
+    lines.push(``, `H1 CANDLES (last ${candles.length}, newest first):`);
+    for (const cv of candles) {
+      const rng = (cv.high - cv.low).toFixed(2);
+      lines.push(`  ${cv.datetime}  O:${cv.open.toFixed(2)}  H:${cv.high.toFixed(2)}  L:${cv.low.toFixed(2)}  C:${cv.close.toFixed(2)}  rng:${rng}`);
+    }
+    const summary = h1StructureSummary(candles);
+    if (summary) lines.push(`H1 structure: ${summary}`);
+  }
+
+  // Session range
+  if (marketData.sessionRange) {
+    lines.push(``, marketData.sessionRange);
+  }
 
   if (marketData.atrCaveat) {
     lines.push(
