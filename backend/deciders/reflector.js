@@ -7,6 +7,7 @@
 
 import { callReflector } from './claudeClient.js';
 import database from '../database.js';
+import { TAXONOMY_PROMPT_BLOCK } from '../tagTaxonomy.js';
 
 // ── System prompt (static → prompt-cached) ────────────────────────────────
 
@@ -21,15 +22,13 @@ Rules:
 - If this is a recurring mistake, acknowledge it explicitly
 - Return ONLY valid JSON — no markdown, no text outside the object
 
+${TAXONOMY_PROMPT_BLOCK}
+
 Output format:
 {
   "lesson_text": "<first-person lesson, 2-3 sentences>",
-  "tag": "<snake_case label describing the lesson type>"
-}
-
-Tag examples: h1_momentum_conflict_loss, atr_stop_correct_win,
-  rsi_overbought_ignored_loss, veto_correct_stop_avoided,
-  veto_wrong_target_missed, no_entry_volatile_market, expired_no_follow_through`;
+  "tag": "<one tag key from the list above — exact string, no modifications>"
+}`;
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 

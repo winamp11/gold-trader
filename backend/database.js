@@ -248,6 +248,28 @@ class DatabaseService {
 
     console.log('✅ Schema up to date');
 
+    // One-time tag normalization: remap fragmented stop-hunt tags → 'stop_hunt'.
+    // These four tags are the same lesson; fragmentation prevented pin firing.
+    try {
+      const remapResult = await this.pool.query(`
+        UPDATE journal
+        SET tag = 'stop_hunt'
+        WHERE portfolio_id = (SELECT id FROM portfolios WHERE name = 'claude_solo')
+          AND tag IN (
+            'stop_hunt_tight_stop_loss',
+            'stop_hunt_despite_prior_warning_loss',
+            'stop_hunt_acknowledged_then_ignored_loss',
+            'sell_bounce_stop_hunt_loss'
+          )
+      `);
+      const remapped = remapResult.rowCount ?? 0;
+      if (remapped > 0) {
+        console.log(`🔧 Tag remap: ${remapped} solo journal rows → 'stop_hunt'`);
+      }
+    } catch (err) {
+      console.error('⚠️  Tag remap error (non-fatal):', err.message);
+    }
+
     // Backfill pinned lessons from existing journal data (no-ops if already pinned).
     try {
       const { rows: nonMech } = await this.pool.query(

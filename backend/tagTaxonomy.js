@@ -1,0 +1,52 @@
+// Controlled tag taxonomy for journal entries.
+// Every journal entry MUST use one of these keys as its tag.
+// Consistent tags are required for pin firing, Analyst aggregation, and pattern tracking.
+
+export const TAG_TAXONOMY = {
+  // Stop management
+  stop_hunt:                    'Stop placed at predictable level, wicked before move played out',
+  stop_too_tight:               'Stop too narrow for ATR, normal volatility triggered it',
+  stop_widened_survived:        'Wider stop kept trade alive, target hit',
+
+  // Entry timing
+  entry_at_exhaustion:          'Entered at end of move, no room left to run',
+  entry_premature:              'Entered before confirmation candle closed',
+  entry_confirmed_rejection:    'Waited for rejection candle, clean entry',
+
+  // Trend/regime
+  counter_trend_failed:         'Traded against H4 trend, structure overwhelmed setup',
+  low_adx_trap:                 'Low ADX meant no real trend, momentum signal false',
+  adx_high_trend_confirmed:     'ADX>50 confirmed strong trend, trade worked',
+
+  // Momentum/RSI
+  rsi_exhaustion_fade_win:      'Faded overbought/oversold RSI in strong trend, worked',
+  rsi_exhaustion_fade_loss:     'Faded RSI but trend had more fuel left',
+  m5_divergence_ignored:        'M5 divergence warned against entry, ignored it',
+
+  // R:R / sizing
+  rr_too_low_vetoed:            'R:R below threshold, correctly vetoed',
+  rr_too_low_missed_winner:     'R:R below threshold, veto missed a winner',
+  sized_down_survived:          'Smaller size absorbed wider stop, trade recovered',
+
+  // Session/volatility
+  session_open_volatility:      'Whipsaw during session open invalidated setup',
+  session_settled_clean_entry:  'Waited for post-open settle, cleaner result',
+
+  // Multi-timeframe
+  mtf_alignment_win:            'All timeframes aligned, high conviction trade worked',
+  mtf_divergence_ignored_loss:  'Timeframe conflict noted but ignored, trade failed',
+
+  // Pattern reinforcement
+  sell_bounce_downtrend_win:    'Shorted exhausted bounce in downtrend, target hit',
+  sell_bounce_downtrend_loss:   'Shorted bounce in downtrend, stopped out',
+  buy_bounce_uptrend_win:       'Bought pullback in uptrend, target hit',
+  buy_bounce_uptrend_loss:      'Bought pullback in uptrend, stopped out',
+};
+
+// Formatted block for injection into the reflector system prompt.
+export const TAXONOMY_PROMPT_BLOCK = `\
+REQUIRED: You must select the tag from the list below that best fits this lesson. \
+Do not invent new tag strings. If two tags could apply, pick the one most central to the lesson.
+
+AVAILABLE TAGS:
+${Object.entries(TAG_TAXONOMY).map(([k, v]) => `${k} — ${v}`).join('\n')}`;
