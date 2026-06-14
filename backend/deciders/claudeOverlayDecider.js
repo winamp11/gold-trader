@@ -227,9 +227,14 @@ function formatLessons(lessons) {
   if (!Array.isArray(lessons) || lessons.length === 0) {
     return 'No lessons recorded yet.';
   }
-  return lessons.map((l, i) =>
-    `${i + 1}. [${l.entry_type}${l.recurring ? ' — RECURRING' : ''}] ${l.lesson_text} (tag: ${l.tag})`
-  ).join('\n');
+  return lessons.map((l, i) => {
+    const flags = [
+      l.pinned    ? 'PINNED'    : null,
+      l.recurring ? 'RECURRING' : null,
+    ].filter(Boolean);
+    const flagStr = flags.length ? ` — ${flags.join(' & ')}` : '';
+    return `${i + 1}. [${l.entry_type}${flagStr}] ${l.lesson_text} (tag: ${l.tag})`;
+  }).join('\n');
 }
 
 // ── Decider ──────────────────────────────────────────────────────────────

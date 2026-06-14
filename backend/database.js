@@ -222,6 +222,23 @@ class DatabaseService {
     await this.pool.query(`ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS day_start_balance DOUBLE PRECISION`);
     await this.pool.query(`ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS circuit_breaker_date TEXT`);
 
+    // Pinned lessons — high-recurrence loss tags that persist beyond the 8-entry window.
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS pinned_lessons (
+        id              SERIAL PRIMARY KEY,
+        portfolio_id    INTEGER NOT NULL,
+        journal_id      INTEGER NOT NULL,
+        tag             TEXT NOT NULL,
+        tag_total_count INTEGER NOT NULL,
+        tag_loss_count  INTEGER NOT NULL,
+        pin_reason      TEXT,
+        pinned_at       TEXT NOT NULL,
+        active          BOOLEAN DEFAULT TRUE,
+        FOREIGN KEY (portfolio_id) REFERENCES portfolios(id),
+        FOREIGN KEY (journal_id)   REFERENCES journal(id)
+      )
+    `);
+
     // Confirm row count unchanged after all DDL
     try {
       const r = await this.pool.query('SELECT COUNT(*) AS n FROM trades');
@@ -230,6 +247,17 @@ class DatabaseService {
     } catch { /* ignore */ }
 
     console.log('✅ Schema up to date');
+
+    // Backfill pinned lessons from existing journal data (no-ops if already pinned).
+    try {
+      const { rows: nonMech } = await this.pool.query(
+        `SELECT id FROM portfolios WHERE name != 'mechanical'`
+      );
+      for (const p of nonMech) await this.updatePinnedLessons(p.id);
+      console.log(`📌 Pinned lessons backfilled for ${nonMech.length} account(s)`);
+    } catch (err) {
+      console.error('⚠️  Pinned lessons backfill error (non-fatal):', err.message);
+    }
   }
 
   async updateSignalDecisions(signalId, overlayDecision, soloDecision) {
@@ -557,20 +585,129 @@ class DatabaseService {
     return id;
   }
 
-  async getRecentLessons(portfolioId, limit = 8) {
+  // Returns full tag×entry_type frequency across all journal entries for a portfolio.
+  async getTagFullHistory(portfolioId) {
     const r = await this.pool.query(`
-      SELECT lesson_text, tag, entry_type, timestamp
+      SELECT tag, entry_type, COUNT(*) AS count
+      FROM journal
+      WHERE portfolio_id = $1 AND tag IS NOT NULL
+      GROUP BY tag, entry_type
+      ORDER BY count DESC
+    `, [portfolioId]);
+    return r.rows;
+  }
+
+  // Maintains the pinned_lessons table: finds tags with loss_count >= 2 and ensures
+  // the most recent loss entry for each such tag is pinned (max 3 active pins per portfolio).
+  async updatePinnedLessons(portfolioId) {
+    const history = await this.getTagFullHistory(portfolioId);
+
+    // Aggregate loss count and total count per tag
+    const lossCounts  = {};
+    const totalCounts = {};
+    for (const row of history) {
+      const cnt = parseInt(row.count);
+      totalCounts[row.tag] = (totalCounts[row.tag] ?? 0) + cnt;
+      if (row.entry_type === 'loss') lossCounts[row.tag] = cnt;
+    }
+
+    // Tags with >= 2 loss entries, sorted by loss count descending
+    const qualifying = Object.entries(lossCounts)
+      .filter(([, cnt]) => cnt >= 2)
+      .sort((a, b) => b[1] - a[1]);
+
+    for (const [tag, lossCount] of qualifying) {
+      const totalCount = totalCounts[tag] ?? lossCount;
+
+      // Most recent loss entry for this tag
+      const { rows: recent } = await this.pool.query(`
+        SELECT id FROM journal
+        WHERE portfolio_id = $1 AND tag = $2 AND entry_type = 'loss'
+        ORDER BY timestamp DESC
+        LIMIT 1
+      `, [portfolioId, tag]);
+      if (!recent.length) continue;
+      const journalId = recent[0].id;
+
+      // Skip if this exact journal entry is already an active pin
+      const { rows: existing } = await this.pool.query(`
+        SELECT id FROM pinned_lessons
+        WHERE portfolio_id = $1 AND journal_id = $2 AND active = TRUE
+      `, [portfolioId, journalId]);
+      if (existing.length > 0) continue;
+
+      // Enforce hard cap of 3 active pins — deactivate lowest-priority one first
+      const { rows: activeRows } = await this.pool.query(`
+        SELECT COUNT(*) AS n FROM pinned_lessons
+        WHERE portfolio_id = $1 AND active = TRUE
+      `, [portfolioId]);
+      if (parseInt(activeRows[0].n) >= 3) {
+        await this.pool.query(`
+          UPDATE pinned_lessons SET active = FALSE
+          WHERE id = (
+            SELECT id FROM pinned_lessons
+            WHERE portfolio_id = $1 AND active = TRUE
+            ORDER BY tag_loss_count ASC, pinned_at ASC
+            LIMIT 1
+          )
+        `, [portfolioId]);
+      }
+
+      await this.pool.query(`
+        INSERT INTO pinned_lessons
+          (portfolio_id, journal_id, tag, tag_total_count, tag_loss_count, pin_reason, pinned_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `, [
+        portfolioId,
+        journalId,
+        tag,
+        totalCount,
+        lossCount,
+        `loss_tag_recurring_${lossCount}_times`,
+        new Date().toISOString(),
+      ]);
+      console.log(`📌 [PIN] portfolio=${portfolioId} tag=${tag} loss_count=${lossCount} journal_id=${journalId}`);
+    }
+  }
+
+  async getRecentLessons(portfolioId, limit = 8) {
+    // 1. Active pinned lessons — shown first regardless of age
+    const { rows: pinnedRows } = await this.pool.query(`
+      SELECT j.id, j.lesson_text, j.tag, j.entry_type, j.timestamp
+      FROM pinned_lessons pl
+      JOIN journal j ON j.id = pl.journal_id
+      WHERE pl.portfolio_id = $1 AND pl.active = TRUE
+      ORDER BY pl.tag_loss_count DESC, pl.pinned_at DESC
+    `, [portfolioId]);
+    const pinnedIds = new Set(pinnedRows.map(r => r.id));
+
+    // 2. Standard recency window — fetch extra to compensate for deduplication
+    const { rows: windowRows } = await this.pool.query(`
+      SELECT id, lesson_text, tag, entry_type, timestamp
       FROM journal
       WHERE portfolio_id = $1
       ORDER BY
         CASE entry_type WHEN 'loss' THEN 0 WHEN 'veto' THEN 1 ELSE 2 END ASC,
         timestamp DESC
       LIMIT $2
-    `, [portfolioId, limit]);
-    const rows = r.rows;
+    `, [portfolioId, limit + pinnedRows.length]);
+
+    // 3. Remove any window entries already in the pinned set
+    const dedupedWindow = windowRows
+      .filter(r => !pinnedIds.has(r.id))
+      .slice(0, limit);
+
+    // 4. Combine: pinned first, then window
+    const pinned  = pinnedRows.map(r => ({ ...r, pinned: true,  pinned_flag: true }));
+    const window_ = dedupedWindow.map(r => ({ ...r, pinned: false }));
+    const combined = [...pinned, ...window_];
+
+    // 5. Recurring flag across the full combined set (same-tag count > 1)
     const tagCount = {};
-    for (const row of rows) { if (row.tag) tagCount[row.tag] = (tagCount[row.tag] || 0) + 1; }
-    return rows.map(row => ({ ...row, recurring: (tagCount[row.tag] ?? 0) > 1 }));
+    for (const row of combined) {
+      if (row.tag) tagCount[row.tag] = (tagCount[row.tag] ?? 0) + 1;
+    }
+    return combined.map(row => ({ ...row, recurring: (tagCount[row.tag] ?? 0) > 1 }));
   }
 
   async getAccountsSummary() {

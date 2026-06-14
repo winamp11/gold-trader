@@ -84,6 +84,7 @@ export async function reflect(tracking, outcome, pnl) {
         tag:              lesson.tag,
         session:          tracking.session ?? null,
       });
+      await database.updatePinnedLessons(tracking.portfolioId);
     }
   } catch (err) {
     console.error(`❌ [reflector] position reflection error: ${err.message}`);
@@ -139,6 +140,7 @@ export async function reflectVeto(shadow, wouldBeOutcome, wouldBePnl) {
         tag:              lesson.tag,
         session:          shadow.session ?? null,
       });
+      await database.updatePinnedLessons(shadow.portfolioId);
     }
   } catch (err) {
     console.error(`❌ [reflector] veto reflection error: ${err.message}`);
