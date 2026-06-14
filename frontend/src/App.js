@@ -5,6 +5,7 @@ import {
 } from 'recharts';
 import './App.css';
 import AutochartistCalculator from './AutochartistCalculator';
+import AnalystDashboard from './AnalystDashboard';
 
 const API = process.env.REACT_APP_API_URL || '';
 
@@ -563,7 +564,8 @@ function MarketPanel({ snapshot, missed }) {
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [showCalc,    setShowCalc]    = useState(false);
+  const [showCalc,     setShowCalc]    = useState(false);
+  const [showAnalyst,  setShowAnalyst] = useState(false);
   const [accounts,    setAccounts]    = useState(null);
   const [equity,      setEquity]      = useState(null);
   const [positions,   setPositions]   = useState([]);
@@ -662,6 +664,10 @@ export default function App() {
     return () => clearInterval(id);
   }, [fetchAll]);
 
+  if (showAnalyst) {
+    return <AnalystDashboard onBack={() => setShowAnalyst(false)} />;
+  }
+
   if (showCalc) {
     return <AutochartistCalculator onBack={() => setShowCalc(false)} />;
   }
@@ -689,6 +695,9 @@ export default function App() {
             <span className="topbar__updated">updated {fmtTime(lastUpdated)}</span>
           )}
           {error && <span className="topbar__error">{error}</span>}
+          <button className="topbar__btn" onClick={() => setShowAnalyst(true)}>
+            Analyst ↗
+          </button>
           <button className="topbar__btn" onClick={() => setShowCalc(true)}>
             Autochartist ↗
           </button>
