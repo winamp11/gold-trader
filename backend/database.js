@@ -270,6 +270,28 @@ class DatabaseService {
       console.error('⚠️  Tag remap error (non-fatal):', err.message);
     }
 
+    // One-time tag normalization: remap fragmented overlay veto tags → outcome-based taxonomy keys.
+    try {
+      const r1 = await this.pool.query(`
+        UPDATE journal
+        SET tag = 'veto_missed_winner'
+        WHERE portfolio_id = (SELECT id FROM portfolios WHERE name = 'claude_overlay')
+          AND tag = 'veto_wrong_target_missed'
+      `);
+      const r2 = await this.pool.query(`
+        UPDATE journal
+        SET tag = 'veto_correct_outcome_avoided'
+        WHERE portfolio_id = (SELECT id FROM portfolios WHERE name = 'claude_overlay')
+          AND tag = 'veto_correct_stop_avoided'
+      `);
+      const remapped = (r1.rowCount ?? 0) + (r2.rowCount ?? 0);
+      if (remapped > 0) {
+        console.log(`🔧 Tag remap: ${r1.rowCount ?? 0} overlay rows → 'veto_missed_winner', ${r2.rowCount ?? 0} → 'veto_correct_outcome_avoided'`);
+      }
+    } catch (err) {
+      console.error('⚠️  Overlay tag remap error (non-fatal):', err.message);
+    }
+
     // Backfill pinned lessons from existing journal data (no-ops if already pinned).
     try {
       const { rows: nonMech } = await this.pool.query(
