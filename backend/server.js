@@ -800,33 +800,6 @@ app.post('/api/autochartist/patterns', async (req, res) => {
   }
 });
 
-// ── Temporary: solo orphan remap audit (remove after one use) ──────────────
-app.get('/api/admin/solo-audit', async (req, res) => {
-  try {
-    const pool = database.pool;
-    const { rows: tags } = await pool.query(`
-      SELECT tag, COUNT(*)::int AS total,
-             COUNT(*) FILTER (WHERE entry_type = 'loss')::int AS losses
-      FROM journal WHERE portfolio_id = 3
-      GROUP BY tag ORDER BY losses DESC, total DESC
-    `);
-    const { rows: pins } = await pool.query(`
-      SELECT p.tag, p.tag_total_count, p.tag_loss_count, p.pin_reason, p.active,
-             j.lesson_text
-      FROM pinned_lessons p
-      JOIN journal j ON j.id = p.journal_id
-      WHERE p.portfolio_id = 3
-      ORDER BY p.tag_loss_count DESC
-    `);
-    const knownTags = new Set(Object.keys(TAG_TAXONOMY));
-    const orphans = tags.filter(r => !knownTags.has(r.tag));
-    const soloLessons = await database.getRecentLessons(3, 8);
-    res.json({ tags, pins, orphans, soloLessons });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // ── Startup ────────────────────────────────────────────────────────────────
 
 // Top-level await: must connect to PostgreSQL before accepting requests.
