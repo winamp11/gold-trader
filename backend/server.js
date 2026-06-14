@@ -11,6 +11,7 @@ import { decide as claudeOverlayDecide } from './deciders/claudeOverlayDecider.j
 import { decide as claudeSoloDecide }    from './deciders/claudeSoloDecider.js';
 import { VALUE_PER_LOT } from './contractSpec.js';
 import { TAG_TAXONOMY } from './tagTaxonomy.js';
+import { runAnalysis, formatRulebookPrompt } from './analyst.js';
 
 dotenv.config();
 
@@ -287,6 +288,14 @@ async function generateSignalIfTradingHours() {
     mechSignal.marketData.m5 = marketData.m5;
     mechSignal.session = currentSession;
     mechSignal.adx     = { h4: marketData.h4.adx, h1: marketData.h1.adx, m30: marketData.m30.adx };
+    mechSignal.sessionHigh      = sessionHigh;
+    mechSignal.sessionLow       = sessionLow;
+    mechSignal.rangePositionPct = (sessionHigh && sessionLow && sessionHigh !== sessionLow)
+      ? ((currentPrice - sessionLow) / (sessionHigh - sessionLow) * 100)
+      : null;
+    mechSignal.rangeWidthVsH1Atr = (sessionHigh && sessionLow && marketData.h1?.atr)
+      ? ((sessionHigh - sessionLow) / marketData.h1.atr)
+      : null;
     const signalId = await database.saveSignal(mechSignal);
 
     // ── Circuit-breaker check — fires before any new positions are opened ────
@@ -412,6 +421,15 @@ async function runWindowClose() {
   }
 
   outcomeTracker.forceCloseAll(price);
+
+  // Nightly analyst run — after all positions are closed and P&L booked
+  try {
+    const analystResult = await runAnalysis(database.pool);
+    console.log(`📊 Analyst: nightly run complete — ${analystResult.rulebook_rows_written} rulebook rows, ${analystResult.combination_rows_written} combination rows`);
+  } catch (err) {
+    console.error('❌ Analyst: nightly run failed —', err.message);
+  }
+
   console.log('🔔 [WINDOW CLOSE] ─────────────────────────────────────────\n');
 }
 
@@ -797,6 +815,104 @@ app.post('/api/autochartist/patterns', async (req, res) => {
     res.json({ success: true, patternId, message: 'Pattern logged successfully' });
   } catch (error) {
     res.status(500).json({ error: 'Failed to log pattern', message: error.message });
+  }
+});
+
+// ── Analyst endpoints ─────────────────────────────────────────────────────
+
+app.post('/api/analyst/run', async (req, res) => {
+  try {
+    const result = await runAnalysis(database.pool);
+    console.log(`📊 Analyst: run complete — ${result.rulebook_rows_written} rulebook rows, ${result.combination_rows_written} combination rows`);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/analyst/rulebook', async (req, res) => {
+  try {
+    const pool = database.pool;
+    const account = req.query.account;  // 'solo' | 'overlay' | undefined
+
+    let portfolioFilter = '';
+    const params = [];
+    if (account === 'solo') {
+      params.push(3); portfolioFilter = ` AND r.portfolio_id = $${params.length}`;
+    } else if (account === 'overlay') {
+      params.push(2); portfolioFilter = ` AND r.portfolio_id = $${params.length}`;
+    }
+
+    const { rows: rulebook } = await pool.query(
+      `SELECT * FROM analyst_rulebook r WHERE 1=1${portfolioFilter}
+       ORDER BY r.portfolio_id, r.win_rate DESC, r.n_total DESC`,
+      params
+    );
+
+    const comboParams = [...params];
+    const comboFilter = portfolioFilter.replace(/r\./g, 'c.');
+    const { rows: combinations } = await pool.query(
+      `SELECT * FROM analyst_combinations c WHERE 1=1${comboFilter}
+       ORDER BY c.portfolio_id, c.win_rate DESC, c.n_total DESC`,
+      comboParams
+    );
+
+    const sufficient = rulebook.filter(r => r.sample_confidence === 'sufficient');
+    const topWr = rulebook.slice().sort((a, b) => b.win_rate - a.win_rate)[0];
+    const topExp = rulebook.filter(r => r.expectancy != null).sort((a, b) => b.expectancy - a.expectancy)[0];
+
+    res.json({
+      summary: {
+        total_patterns:     rulebook.length,
+        sufficient_patterns: sufficient.length,
+        top_win_rate:       topWr  ? { tag: topWr.tag,  account: topWr.account_name,  win_rate: topWr.win_rate,   n_total: topWr.n_total }  : null,
+        highest_expectancy: topExp ? { tag: topExp.tag, account: topExp.account_name, expectancy: topExp.expectancy, n_total: topExp.n_total } : null,
+      },
+      rulebook,
+      combinations,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/analyst/rulebook/prompt', async (req, res) => {
+  try {
+    const pool = database.pool;
+    const account = req.query.account;
+    const includeInsufficient = req.query.include_insufficient === 'true';
+
+    let portfolioFilter = '';
+    const params = [];
+    if (account === 'solo') {
+      params.push(3); portfolioFilter = ` AND r.portfolio_id = $${params.length}`;
+    } else if (account === 'overlay') {
+      params.push(2); portfolioFilter = ` AND r.portfolio_id = $${params.length}`;
+    }
+
+    let confidenceFilter = '';
+    if (!includeInsufficient) {
+      confidenceFilter = ` AND r.sample_confidence != 'insufficient'`;
+    }
+
+    const { rows: rulebook } = await pool.query(
+      `SELECT * FROM analyst_rulebook r WHERE 1=1${portfolioFilter}${confidenceFilter}
+       ORDER BY r.portfolio_id, r.win_rate DESC, r.n_total DESC`,
+      params
+    );
+
+    const comboParams = [...params];
+    const comboFilter = portfolioFilter.replace(/r\./g, 'c.');
+    const { rows: combinations } = await pool.query(
+      `SELECT * FROM analyst_combinations c WHERE 1=1${comboFilter}
+       ORDER BY c.win_rate DESC, c.n_total DESC LIMIT 5`,
+      comboParams
+    );
+
+    const text = formatRulebookPrompt(rulebook, combinations);
+    res.type('text/plain').send(text);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

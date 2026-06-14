@@ -218,6 +218,12 @@ class DatabaseService {
     await this.pool.query(`ALTER TABLE trades ADD COLUMN IF NOT EXISTS session TEXT`);
     await this.pool.query(`ALTER TABLE journal ADD COLUMN IF NOT EXISTS session TEXT`);
 
+    // Additive range columns: session high/low snapshot and derived position metrics.
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS session_high          DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS session_low           DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS range_position_pct    DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS range_width_vs_h1_atr DOUBLE PRECISION`);
+
     // Circuit-breaker state: session-start balance + per-day halt flag.
     await this.pool.query(`ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS day_start_balance DOUBLE PRECISION`);
     await this.pool.query(`ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS circuit_breaker_date TEXT`);
@@ -236,6 +242,67 @@ class DatabaseService {
         active          BOOLEAN DEFAULT TRUE,
         FOREIGN KEY (portfolio_id) REFERENCES portfolios(id),
         FOREIGN KEY (journal_id)   REFERENCES journal(id)
+      )
+    `);
+
+    // Analyst tables — populated nightly after WINDOW_CLOSE.
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS analyst_rulebook (
+        id                      SERIAL PRIMARY KEY,
+        portfolio_id            INTEGER NOT NULL,
+        account_name            TEXT NOT NULL,
+        tag                     TEXT NOT NULL,
+        n_total                 INTEGER NOT NULL,
+        n_wins                  INTEGER NOT NULL,
+        n_losses                INTEGER NOT NULL,
+        win_rate                DOUBLE PRECISION NOT NULL,
+        avg_win_pnl             DOUBLE PRECISION,
+        avg_loss_pnl            DOUBLE PRECISION,
+        expectancy              DOUBLE PRECISION,
+        long_n                  INTEGER,
+        long_win_rate           DOUBLE PRECISION,
+        short_n                 INTEGER,
+        short_win_rate          DOUBLE PRECISION,
+        avg_h4_adx              DOUBLE PRECISION,
+        dominant_adx_bucket     TEXT,
+        adx_breakdown           TEXT,
+        avg_h4_rsi              DOUBLE PRECISION,
+        rsi_breakdown           TEXT,
+        avg_macd_alignment      DOUBLE PRECISION,
+        session_breakdown       TEXT,
+        dominant_session        TEXT,
+        avg_stop_atr_multiple   DOUBLE PRECISION,
+        stop_atr_breakdown      TEXT,
+        avg_rr_planned          DOUBLE PRECISION,
+        avg_range_position_pct  DOUBLE PRECISION,
+        avg_range_width_atr     DOUBLE PRECISION,
+        squeeze_trade_pct       DOUBLE PRECISION,
+        recency_flag            TEXT,
+        last_trade_date         TEXT,
+        sample_confidence       TEXT,
+        window_close_excluded   INTEGER DEFAULT 0,
+        last_updated            TEXT NOT NULL,
+        FOREIGN KEY (portfolio_id) REFERENCES portfolios(id)
+      )
+    `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS analyst_combinations (
+        id                SERIAL PRIMARY KEY,
+        portfolio_id      INTEGER NOT NULL,
+        account_name      TEXT NOT NULL,
+        direction         TEXT NOT NULL,
+        adx_bucket        TEXT NOT NULL,
+        h4_rsi_bucket     TEXT NOT NULL,
+        session           TEXT,
+        n_total           INTEGER NOT NULL,
+        n_wins            INTEGER NOT NULL,
+        win_rate          DOUBLE PRECISION NOT NULL,
+        avg_pnl           DOUBLE PRECISION,
+        expectancy        DOUBLE PRECISION,
+        sample_confidence TEXT,
+        last_updated      TEXT NOT NULL,
+        FOREIGN KEY (portfolio_id) REFERENCES portfolios(id)
       )
     `);
 
@@ -363,12 +430,14 @@ class DatabaseService {
         m30_macd, m30_rsi, m30_atr,
         m15_macd, m15_rsi, m15_atr,
         m5_macd, m5_rsi, m5_atr,
-        session, h4_adx, h1_adx, m30_adx
+        session, h4_adx, h1_adx, m30_adx,
+        session_high, session_low, range_position_pct, range_width_vs_h1_atr
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
         $12,$13,$14,$15,$16,$17,$18,$19,$20,
         $21,$22,$23,$24,$25,$26,
-        $27,$28,$29,$30
+        $27,$28,$29,$30,
+        $31,$32,$33,$34
       ) RETURNING id
     `, [
       signalData.timestamp,
@@ -397,10 +466,14 @@ class DatabaseService {
       md.m5?.macd   ?? null,
       md.m5?.rsi    ?? null,
       md.m5?.atr    ?? null,
-      signalData.session ?? null,
-      adx.h4         ?? null,
-      adx.h1         ?? null,
-      adx.m30        ?? null,
+      signalData.session          ?? null,
+      adx.h4                      ?? null,
+      adx.h1                      ?? null,
+      adx.m30                     ?? null,
+      signalData.sessionHigh      ?? null,
+      signalData.sessionLow       ?? null,
+      signalData.rangePositionPct ?? null,
+      signalData.rangeWidthVsH1Atr ?? null,
     ]);
 
     const id = result.rows[0].id;
