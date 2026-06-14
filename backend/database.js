@@ -437,6 +437,26 @@ class DatabaseService {
       console.error('⚠️  Overlay orphan remap error (non-fatal):', err.message);
     }
 
+    // One-time tag normalization: remap fragmented overlay loss tags → controlled taxonomy keys.
+    try {
+      const overlayLossRemaps = [
+        [`UPDATE journal SET tag = 'stop_hunt'               WHERE portfolio_id = 2 AND tag = 'atr_resize_stop_hunt_loss'`,               'stop_hunt'],
+        [`UPDATE journal SET tag = 'm5_divergence_ignored'   WHERE portfolio_id = 2 AND tag = 'atr_resize_stop_hit_counter_momentum_ignored'`, 'm5_divergence_ignored'],
+        [`UPDATE journal SET tag = 'entry_premature'         WHERE portfolio_id = 2 AND tag = 'atr_stop_correct_entry_timing_loss'`,        'entry_premature'],
+        [`UPDATE journal SET tag = 'rsi_exhaustion_fade_loss' WHERE portfolio_id = 2 AND tag = 'atr_stop_clipped_near_oversold_loss'`,      'rsi_exhaustion_fade_loss'],
+      ];
+      const counts = [];
+      for (const [sql, label] of overlayLossRemaps) {
+        const r = await this.pool.query(sql);
+        if ((r.rowCount ?? 0) > 0) counts.push(`${r.rowCount} → '${label}'`);
+      }
+      if (counts.length > 0) {
+        console.log(`🔧 Overlay loss remap: ${counts.join(', ')}`);
+      }
+    } catch (err) {
+      console.error('⚠️  Overlay loss remap error (non-fatal):', err.message);
+    }
+
     // Backfill pinned lessons from existing journal data (no-ops if already pinned).
     try {
       const { rows: nonMech } = await this.pool.query(
