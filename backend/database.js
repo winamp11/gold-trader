@@ -396,6 +396,47 @@ class DatabaseService {
       console.error('⚠️  Solo orphan remap error (non-fatal):', err.message);
     }
 
+    // One-time tag normalization: remap fragmented overlay win/observation tags → controlled taxonomy keys.
+    try {
+      const overlayRemaps = [
+        // 10 atr_resize_* win variants → single consolidated tag
+        [`UPDATE journal SET tag = 'atr_resize_win' WHERE portfolio_id = 2 AND tag IN (
+            'atr_resize_bear_continuation_oversold_win',
+            'atr_resize_short_bear_structure_win',
+            'atr_resize_bear_continuation_target_hit',
+            'atr_resize_bear_trend_target_extension_win',
+            'atr_resize_short_bearish_alignment_win',
+            'atr_resize_bearish_structure_win',
+            'atr_resize_multi_tf_short_win',
+            'atr_resize_short_window_close_partial_win',
+            'atr_resize_correct_win',
+            'atr_resize_short_h4h1_bear_aligned_win'
+          )`, 'atr_resize_win'],
+        // No-entry observations
+        [`UPDATE journal SET tag = 'no_entry_observation' WHERE portfolio_id = 2 AND tag IN (
+            'no_entry_missed_directional_move',
+            'no_entry_execution_ambiguity'
+          )`, 'no_entry_observation'],
+        // Window-close artifacts
+        [`UPDATE journal SET tag = 'window_close_exit' WHERE portfolio_id = 2 AND tag IN (
+            'window_close_partial_profit_short',
+            'atr_resize_short_window_close_partial_win'
+          )`, 'window_close_exit'],
+        // Expired artifact
+        [`UPDATE journal SET tag = 'expired_no_fill' WHERE portfolio_id = 2 AND tag = 'expired_no_follow_through'`, 'expired_no_fill'],
+      ];
+      const counts = [];
+      for (const [sql, label] of overlayRemaps) {
+        const r = await this.pool.query(sql);
+        if ((r.rowCount ?? 0) > 0) counts.push(`${r.rowCount} → '${label}'`);
+      }
+      if (counts.length > 0) {
+        console.log(`🔧 Overlay orphan remap: ${counts.join(', ')}`);
+      }
+    } catch (err) {
+      console.error('⚠️  Overlay orphan remap error (non-fatal):', err.message);
+    }
+
     // Backfill pinned lessons from existing journal data (no-ops if already pinned).
     try {
       const { rows: nonMech } = await this.pool.query(

@@ -53,6 +53,10 @@ export const TAG_TAXONOMY = {
   window_close_exit:            'Trade closed by session window end, not by TP or SL — artifact, exclude from expectancy',
   momentum_continuation:        'Entered continuation of existing move, not a bounce fade',
   pyramid_trend_add:            'Added to a winning position in trend direction — scaling in',
+
+  // Overlay-specific
+  atr_resize_win:               'Overlay approved mechanical proposal with ATR-based resize — won',
+  no_entry_observation:         'Overlay or solo chose not to enter — observation only, no trade taken',
 };
 
 // Formatted block for injection into the reflector system prompt.
