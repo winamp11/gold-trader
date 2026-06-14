@@ -1001,7 +1001,7 @@ await database.init();
 app.get('/api/diag/queries', async (req, res) => {
   try {
     const pool = database.pool;
-    const [q1, q2, q3, q4] = await Promise.all([
+    const [q1, q2, q3, q4, q5, q6] = await Promise.all([
       pool.query(`
         SELECT p.name AS account, COUNT(*) AS total_closed,
           SUM(CASE WHEN t.exit_reason = 'WINDOW_CLOSE'    THEN 1 ELSE 0 END) AS window_close_count,
@@ -1035,11 +1035,31 @@ app.get('/api/diag/queries', async (req, res) => {
         FROM trades t JOIN portfolios p ON p.id = t.portfolio_id
         WHERE t.exit_reason IS NOT NULL GROUP BY p.name, p.id ORDER BY p.id`),
     ]);
+      pool.query(`
+        SELECT t.tag, t.direction, t.reasoning, t.session, t.timestamp,
+               t.exit_reason, t.pnl
+        FROM trades t JOIN portfolios p ON p.id = t.portfolio_id
+        WHERE p.name = 'claude_solo' AND t.exit_reason IS NOT NULL
+        ORDER BY t.timestamp DESC LIMIT 20`),
+      pool.query(`
+        SELECT t.tag, t.direction, t.session, t.timestamp,
+               t.exit_reason, t.pnl,
+               s.h4_adx, s.h1_adx, s.h4_rsi, s.h1_rsi,
+               s.h4_macd, s.h1_macd,
+               s.session_high, s.session_low, s.range_position_pct
+        FROM trades t
+        JOIN portfolios p ON p.id = t.portfolio_id
+        JOIN signals s ON s.id = t.signal_id
+        WHERE p.name = 'claude_solo' AND t.exit_reason IS NOT NULL
+        ORDER BY t.timestamp DESC LIMIT 20`),
+    ]);
     res.json({
       q1_window_close_by_account: q1.rows,
       q2_circuit_breaker_history: q2.rows,
       q3_risk_budget_utilization: q3.rows,
       q4_no_entry_rate:           q4.rows,
+      q5_solo_recent_trades:      q5.rows,
+      q6_solo_recent_with_signals: q6.rows,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
