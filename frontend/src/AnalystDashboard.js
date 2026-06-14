@@ -3,169 +3,244 @@ import './AnalystDashboard.css';
 
 const API = process.env.REACT_APP_API_URL || '';
 
-function fmtDateTime(ts) {
+const C = {
+  mech:    '#4d9de0',
+  overlay: '#f0a030',
+  solo:    '#48bb78',
+};
+
+function accountColor(name) {
+  if (name === 'mechanical')     return C.mech;
+  if (name === 'claude_overlay') return C.overlay;
+  if (name === 'claude_solo')    return C.solo;
+  return '#888';
+}
+
+function accountShort(name) {
+  if (name === 'claude_overlay') return 'OVERLAY';
+  if (name === 'claude_solo')    return 'SOLO';
+  if (name === 'mechanical')     return 'MECH';
+  return name.toUpperCase();
+}
+
+function fmtTime(ts) {
   if (!ts) return '—';
-  const d = new Date(ts);
-  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
-    + ' ' + d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  return new Date(ts).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 }
 
-function WinRateBar({ winRate, nTotal }) {
-  if (!nTotal) return <span className="analyst__muted">—</span>;
-  const pct = Math.round((winRate || 0) * 100);
-  const cls = pct >= 60 ? '' : pct >= 40 ? 'analyst__wr-fill--mid' : 'analyst__wr-fill--low';
+function usd(n) {
+  if (n == null) return '—';
+  const abs = Math.abs(n).toFixed(0);
+  return (n < 0 ? '-' : '+') + '$' + abs;
+}
+
+function pct(n) {
+  if (n == null) return '—';
+  return (n * 100).toFixed(0) + '%';
+}
+
+function winRateColor(wr) {
+  if (wr == null) return '#4b6070';
+  if (wr >= 0.7)  return '#22c55e';
+  if (wr >= 0.5)  return '#fb923c';
+  return '#ef4444';
+}
+
+function confClass(c) {
+  if (c === 'sufficient')   return 'conf--sufficient';
+  if (c === 'early')        return 'conf--early';
+  return 'conf--insufficient';
+}
+
+function adxClass(bucket) {
+  if (bucket === 'strong')  return 'adx--strong';
+  if (bucket === 'trend')   return 'adx--trend';
+  if (bucket === 'mild')    return 'adx--mild';
+  return 'adx--chop';
+}
+
+// ── WinRateBar ────────────────────────────────────────────────────────────────
+
+function WinRateBar({ wr, n }) {
+  const color = winRateColor(wr);
   return (
-    <div className="analyst__wr-bar">
-      <div className="analyst__wr-track">
-        <div className={`analyst__wr-fill ${cls}`} style={{ width: `${pct}%` }} />
+    <div className="wr-wrap">
+      <div className="wr-bar">
+        <div
+          className="wr-bar__fill"
+          style={{ width: `${Math.round((wr ?? 0) * 100)}%`, background: color }}
+        />
       </div>
-      <span className="analyst__wr-pct">{pct}%</span>
+      <span className="wr-label" style={{ color }}>{pct(wr)}</span>
+      <span style={{ color: '#4b6070', fontSize: 10 }}>/{n}</span>
     </div>
   );
 }
 
-function ExpCell({ exp }) {
-  if (exp == null) return <span className="analyst__muted">—</span>;
-  const cls = exp > 0 ? 'analyst__pos' : exp < 0 ? 'analyst__neg' : '';
-  return <span className={cls}>{exp > 0 ? '+' : ''}{exp.toFixed(2)}R</span>;
+// ── ExpectancyCell ────────────────────────────────────────────────────────────
+
+function ExpCell({ val }) {
+  if (val == null) return <span className="exp--null">n/a</span>;
+  const cls = val >= 0 ? 'exp--pos' : 'exp--neg';
+  return <span className={cls}>{usd(val)}</span>;
 }
 
-function ConfBadge({ conf }) {
-  if (!conf) return null;
-  const cls = conf === 'sufficient' ? 'analyst__conf-badge--sufficient'
-    : conf === 'early' ? 'analyst__conf-badge--early'
-    : 'analyst__conf-badge--insufficient';
-  return <span className={`analyst__conf-badge ${cls}`}>{conf}</span>;
-}
-
-function AccountBadge({ name }) {
-  const label = name === 'claude_overlay' ? 'overlay' : name === 'claude_solo' ? 'solo' : name;
-  const cls   = name === 'claude_overlay' ? 'analyst__account-badge--overlay' : 'analyst__account-badge--solo';
-  return <span className={`analyst__account-badge ${cls}`}>{label}</span>;
-}
-
-function PinnedCol({ account, label, pins }) {
-  const filtered = pins.filter(p => p.account_name === account && p.active);
-  return (
-    <div className="analyst__pin-col">
-      <div className="analyst__pin-account">{label}</div>
-      {filtered.length === 0 && (
-        <div className="analyst__pin-empty">no active pins</div>
-      )}
-      {filtered.map(pin => (
-        <div key={pin.id} className="analyst__pin-item">
-          <div className="analyst__pin-tag">{pin.tag}</div>
-          <div className="analyst__pin-text">{pin.lesson_text}</div>
-          <div className="analyst__pin-meta">
-            {pin.tag_loss_count} losses · pinned {fmtDateTime(pin.pinned_at)}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
+// ── Rulebook row ──────────────────────────────────────────────────────────────
 
 function RulebookRow({ row }) {
+  const color = accountColor(row.account_name);
   return (
     <tr>
       <td>
-        <div className="analyst__tag-cell" title={row.tag}>{row.tag}</div>
+        <div className="rt__account">
+          <span className="rt__dot" style={{ background: color }} />
+          <span style={{ color, fontSize: 9, letterSpacing: '0.08em' }}>{accountShort(row.account_name)}</span>
+        </div>
       </td>
-      <td><AccountBadge name={row.account_name} /></td>
-      <td><WinRateBar winRate={row.win_rate} nTotal={row.n_total} /></td>
-      <td><span className="analyst__muted">{row.n_total ?? '—'}</span></td>
-      <td><ExpCell exp={row.expectancy} /></td>
-      <td><ConfBadge conf={row.sample_confidence} /></td>
-      <td className="analyst__muted">
-        {row.last_trade_date ? fmtDateTime(row.last_trade_date) : '—'}
+      <td><span className="rt__tag">{row.tag}</span></td>
+      <td><span className={`conf-badge ${confClass(row.sample_confidence)}`}>{row.sample_confidence}</span></td>
+      <td><WinRateBar wr={row.win_rate} n={row.n_total} /></td>
+      <td><ExpCell val={row.expectancy} /></td>
+      <td>
+        <span className={`adx-chip ${adxClass(row.dominant_adx_bucket)}`}>
+          {row.dominant_adx_bucket ?? '—'}
+          {row.avg_h4_adx != null ? ` ${Math.round(row.avg_h4_adx)}` : ''}
+        </span>
+      </td>
+      <td>
+        {row.dominant_session
+          ? <span className="sess-chip">{row.dominant_session}</span>
+          : <span style={{ color: '#4b6070' }}>—</span>}
+      </td>
+      <td>
+        {row.short_n > 0 && (
+          <span style={{ color: '#ef4444', fontSize: 10 }}>
+            S {pct(row.short_win_rate)}({row.short_n})
+          </span>
+        )}
+        {row.short_n > 0 && row.long_n > 0 && <span style={{ color: '#4b6070' }}> · </span>}
+        {row.long_n > 0 && (
+          <span style={{ color: '#22c55e', fontSize: 10 }}>
+            L {pct(row.long_win_rate)}({row.long_n})
+          </span>
+        )}
+      </td>
+      <td>
+        <span className={row.recency_flag === 'active' ? 'recency--active' : 'recency--stale'}>
+          {row.recency_flag === 'active' ? '● active' : '○ stale'}
+        </span>
       </td>
     </tr>
   );
 }
 
-function CrossAccountSection({ rulebook }) {
-  const tagsByAccount = {};
-  for (const row of rulebook) {
-    if (!tagsByAccount[row.tag]) tagsByAccount[row.tag] = [];
-    tagsByAccount[row.tag].push(row);
-  }
-  const crossTags = Object.entries(tagsByAccount)
-    .filter(([, rows]) => rows.length > 1)
-    .map(([tag, rows]) => ({ tag, rows }));
+// ── Pinned lessons ────────────────────────────────────────────────────────────
 
-  if (crossTags.length === 0) {
-    return (
-      <div className="analyst__section">
-        <div className="analyst__section-header">Cross-account patterns</div>
-        <div className="analyst__empty">No tags appear in both accounts yet.</div>
-      </div>
-    );
-  }
-
+function PinnedCol({ label, color, pins }) {
   return (
-    <div className="analyst__section">
-      <div className="analyst__section-header">Cross-account patterns</div>
-      <div className="analyst__cross-list">
-        {crossTags.map(({ tag, rows }) => (
-          <div key={tag} className="analyst__cross-item">
-            <div className="analyst__cross-tag">{tag}</div>
-            <div className="analyst__cross-stats">
-              {rows.map(r => {
-                const pct = Math.round((r.win_rate || 0) * 100);
-                const label = r.account_name === 'claude_overlay' ? 'overlay' : 'solo';
-                return (
-                  <span key={r.account_name}>
-                    {label}: {pct}% WR ({r.n_total} trades)
-                  </span>
-                );
-              })}
+    <div className="pin-col">
+      <div className="pin-col__label" style={{ color }}>{label}</div>
+      {pins.length === 0
+        ? <div className="pin-empty">No pins yet — fires after a tag accumulates 2+ losses</div>
+        : pins.map(p => (
+            <div className="pin-item" key={p.id}>
+              <div className="pin-item__tag">
+                <span>{p.tag}</span>
+                <span className="pin-item__losses">{p.tag_loss_count} losses</span>
+              </div>
+              <div className="pin-item__text">{p.lesson_text}</div>
+            </div>
+          ))
+      }
+    </div>
+  );
+}
+
+// ── Combinations ──────────────────────────────────────────────────────────────
+
+function CombinationRow({ row }) {
+  const color = accountColor(row.account_name);
+  const wrColor = winRateColor(row.win_rate);
+  return (
+    <div className="combo-row">
+      <span className="combo-row__account" style={{ color, fontSize: 9, letterSpacing: '0.08em' }}>
+        {accountShort(row.account_name)}
+      </span>
+      <span className={`combo-row__dir ${row.direction === 'SHORT' ? 'dir--short' : 'dir--long'}`}>
+        {row.direction === 'SHORT' ? '↓' : '↑'} {row.direction}
+      </span>
+      <div className="combo-row__tags">
+        <span className={`adx-chip ${adxClass(row.adx_bucket)}`}>{row.adx_bucket}</span>
+        <span className="adx-chip">RSI {row.h4_rsi_bucket}</span>
+        {row.session && row.session !== 'unknown' && (
+          <span className="sess-chip">{row.session}</span>
+        )}
+      </div>
+      <span className="combo-row__wr" style={{ color: wrColor }}>{pct(row.win_rate)}</span>
+      <span className="combo-row__n">/{row.n_total}</span>
+      <span className="combo-row__exp"><ExpCell val={row.expectancy} /></span>
+    </div>
+  );
+}
+
+// ── Cross-account patterns ────────────────────────────────────────────────────
+
+function CrossAccountSection({ rulebook }) {
+  const byTag = {};
+  for (const r of rulebook) {
+    if (!byTag[r.tag]) byTag[r.tag] = {};
+    byTag[r.tag][r.account_name] = r;
+  }
+  const crossTags = Object.entries(byTag).filter(([, accts]) =>
+    accts['claude_overlay'] && accts['claude_solo']
+  );
+  if (crossTags.length === 0) {
+    return <div className="analyst-empty">No cross-account patterns yet — both accounts need trades with the same tag</div>;
+  }
+  return (
+    <>
+      {crossTags.map(([tag, accts]) => {
+        const s = accts['claude_solo'];
+        const o = accts['claude_overlay'];
+        const agree = (s.win_rate >= 0.5) === (o.win_rate >= 0.5);
+        return (
+          <div className="cross-row" key={tag}>
+            <div className="cross-row__tag">{tag}</div>
+            <div className="cross-row__accounts">
+              <div className="cross-row__account-item">
+                <span style={{ color: C.solo, fontSize: 9 }}>SOLO</span>
+                <span style={{ color: winRateColor(s.win_rate), fontSize: 11, fontFamily: 'Space Mono, monospace', fontWeight: 700 }}>
+                  {pct(s.win_rate)}
+                </span>
+                <span style={{ color: '#4b6070', fontSize: 10 }}>/{s.n_total}</span>
+              </div>
+              <div className="cross-row__account-item">
+                <span style={{ color: C.overlay, fontSize: 9 }}>OVERLAY</span>
+                <span style={{ color: winRateColor(o.win_rate), fontSize: 11, fontFamily: 'Space Mono, monospace', fontWeight: 700 }}>
+                  {pct(o.win_rate)}
+                </span>
+                <span style={{ color: '#4b6070', fontSize: 10 }}>/{o.n_total}</span>
+              </div>
+              <span className={agree ? 'cross-agree' : 'cross-disagree'}>
+                {agree ? '● AGREE' : '◐ DISAGREE'}
+              </span>
             </div>
           </div>
-        ))}
-      </div>
-    </div>
+        );
+      })}
+    </>
   );
 }
 
-function CombinationRow({ comb }) {
-  const label = comb.account_name === 'claude_overlay' ? 'overlay' : 'solo';
-  const pct   = Math.round((comb.win_rate || 0) * 100);
-  const parts = [
-    comb.direction    && `dir: ${comb.direction}`,
-    comb.adx_bucket   && `ADX: ${comb.adx_bucket}`,
-    comb.h4_rsi_bucket && `RSI: ${comb.h4_rsi_bucket}`,
-    comb.session && comb.session !== 'unknown' && `session: ${comb.session}`,
-  ].filter(Boolean);
-
-  return (
-    <div className="analyst__comb-item">
-      <div className="analyst__comb-account">{label}</div>
-      <div className="analyst__comb-body">
-        <div className="analyst__comb-conditions">{parts.join(' · ')}</div>
-        <div className="analyst__comb-stats">
-          <span>{pct}% WR</span>
-          <span>{comb.n_total} trades</span>
-          {comb.expectancy != null && (
-            <span className={comb.expectancy >= 0 ? 'analyst__pos' : 'analyst__neg'}>
-              {comb.expectancy >= 0 ? '+' : ''}{comb.expectancy.toFixed(2)}R
-            </span>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-const FILTERS = ['all', 'solo', 'overlay', 'sufficient', 'early'];
+// ── Main component ────────────────────────────────────────────────────────────
 
 export default function AnalystDashboard({ onBack }) {
-  const [rulebook,     setRulebook]     = useState([]);
-  const [combinations, setCombinations] = useState([]);
-  const [pins,         setPins]         = useState([]);
-  const [lastRun,      setLastRun]      = useState(null);
-  const [filter,       setFilter]       = useState('all');
-  const [running,      setRunning]      = useState(false);
-  const [loading,      setLoading]      = useState(true);
+  const [rulebook,    setRulebook]    = useState(null);
+  const [pins,        setPins]        = useState([]);
+  const [filter,      setFilter]      = useState('all');
+  const [running,     setRunning]     = useState(false);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [error,       setError]       = useState(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -173,19 +248,14 @@ export default function AnalystDashboard({ onBack }) {
         fetch(`${API}/api/analyst/rulebook`),
         fetch(`${API}/api/pinned-lessons`),
       ]);
-      const [rbData, pinData] = await Promise.all([
-        rbRes.json(), pinRes.json(),
-      ]);
-      const rb   = rbData.rulebook      || [];
-      const comb = rbData.combinations  || [];
-      setRulebook(rb);
-      setCombinations(comb);
+      const [rbData, pinData] = await Promise.all([rbRes.json(), pinRes.json()]);
+      setRulebook(rbData);
       setPins(pinData.pinned || []);
-      if (rb.length > 0 && rb[0].last_updated) {
-        setLastRun(rb[0].last_updated);
-      }
-    } catch {}
-    setLoading(false);
+      setLastUpdated(new Date());
+      setError(null);
+    } catch {
+      setError('Could not reach backend');
+    }
   }, []);
 
   useEffect(() => {
@@ -197,172 +267,174 @@ export default function AnalystDashboard({ onBack }) {
   const runAnalysis = async () => {
     setRunning(true);
     try {
-      const res  = await fetch(`${API}/api/analyst/run`, { method: 'POST' });
-      const data = await res.json();
-      if (data.timestamp) setLastRun(data.timestamp);
+      await fetch(`${API}/api/analyst/run`, { method: 'POST' });
       await fetchData();
-    } catch {}
-    setRunning(false);
+    } catch {
+      setError('Run failed');
+    } finally {
+      setRunning(false);
+    }
   };
 
-  const filteredRulebook = rulebook.filter(row => {
-    if (filter === 'solo')       return row.account_name === 'claude_solo';
-    if (filter === 'overlay')    return row.account_name === 'claude_overlay';
-    if (filter === 'sufficient') return row.sample_confidence === 'sufficient';
-    if (filter === 'early')      return row.sample_confidence === 'early';
+  const summary = rulebook?.summary;
+  const allRows = rulebook?.rulebook || [];
+  const combos  = rulebook?.combinations || [];
+
+  const filteredRows = allRows.filter(r => {
+    if (filter === 'solo')       return r.account_name === 'claude_solo';
+    if (filter === 'overlay')    return r.account_name === 'claude_overlay';
+    if (filter === 'sufficient') return r.sample_confidence === 'sufficient';
+    if (filter === 'early')      return r.sample_confidence === 'early';
     return true;
   });
 
-  // Summary cards — use pre-computed summary if present, else derive
-  const totalPatterns = rulebook.length;
-
-  let topWRTag = '—';
-  let topWRPct = null;
-  let bestExpVal   = null;
-  let bestExpTag   = '—';
-  for (const row of rulebook) {
-    if (!row.n_total) continue;
-    const pct = (row.win_rate || 0) * 100;
-    if (topWRPct === null || pct > topWRPct) { topWRPct = pct; topWRTag = row.tag; }
-    if (row.expectancy != null && (bestExpVal === null || row.expectancy > bestExpVal)) {
-      bestExpVal = row.expectancy; bestExpTag = row.tag;
-    }
-  }
-
-  const activePins    = pins.filter(p => p.active);
-  const soloPins      = activePins.filter(p => p.account_name === 'claude_solo').length;
-  const overlayPins   = activePins.filter(p => p.account_name === 'claude_overlay').length;
+  const soloPins    = pins.filter(p => p.portfolio_id === 3 && p.active);
+  const overlayPins = pins.filter(p => p.portfolio_id === 2 && p.active);
 
   return (
-    <div className="analyst">
-      <header className="analyst__header">
-        <span className="analyst__title">ANALYST</span>
-        <div className="analyst__header-right">
-          {lastRun && (
-            <span className="analyst__ts">last run {fmtDateTime(lastRun)}</span>
+    <div className="analyst-page">
+      <header className="analyst-header">
+        <div className="analyst-header__left">
+          <button className="analyst-btn" onClick={onBack}>← Back</button>
+          <span className="analyst-header__title">ANALYST</span>
+          <span className="analyst-header__sub">Pattern intelligence · {allRows.length} patterns</span>
+        </div>
+        <div className="analyst-header__right">
+          {lastUpdated && (
+            <span className="analyst-header__updated">
+              updated {fmtTime(lastUpdated)}
+            </span>
           )}
-          <button className="analyst__btn" onClick={onBack}>← Back</button>
+          {error && <span style={{ color: '#ef4444', fontSize: 11, fontFamily: 'Space Mono' }}>{error}</span>}
           <button
-            className="analyst__btn analyst__btn--run"
+            className="analyst-btn analyst-btn--run"
             onClick={runAnalysis}
             disabled={running}
           >
-            {running ? 'running…' : '▶ Run now'}
+            {running ? 'Running…' : '▶ Run now'}
           </button>
         </div>
       </header>
 
-      <main className="analyst__main">
-        {loading ? (
-          <div className="analyst__loading">loading…</div>
-        ) : (
-          <>
-            {/* Summary cards */}
-            <div className="analyst__cards">
-              <div className="analyst__card">
-                <div className="analyst__card-label">Total patterns</div>
-                <div className="analyst__card-value">{totalPatterns}</div>
-              </div>
-              <div className="analyst__card">
-                <div className="analyst__card-label">Top win rate</div>
-                <div className="analyst__card-value">
-                  {topWRPct != null ? `${Math.round(topWRPct)}%` : '—'}
-                </div>
-                {topWRPct != null && (
-                  <div className="analyst__card-sub" title={topWRTag}>
-                    {topWRTag.length > 22 ? topWRTag.slice(0, 22) + '…' : topWRTag}
-                  </div>
-                )}
-              </div>
-              <div className="analyst__card">
-                <div className="analyst__card-label">Best expectancy</div>
-                <div className="analyst__card-value">
-                  {bestExpVal != null
-                    ? (bestExpVal >= 0 ? '+' : '') + bestExpVal.toFixed(2) + 'R'
-                    : '—'}
-                </div>
-                {bestExpVal != null && (
-                  <div className="analyst__card-sub" title={bestExpTag}>
-                    {bestExpTag.length > 22 ? bestExpTag.slice(0, 22) + '…' : bestExpTag}
-                  </div>
-                )}
-              </div>
-              <div className="analyst__card">
-                <div className="analyst__card-label">Pins active</div>
-                <div className="analyst__card-value">{activePins.length}</div>
-                <div className="analyst__card-sub">
-                  {soloPins} solo · {overlayPins} overlay
-                </div>
-              </div>
-            </div>
+      <main className="analyst-main">
 
-            {/* Pinned lessons */}
-            <div className="analyst__section">
-              <div className="analyst__section-header">Pinned lessons</div>
-              <div className="analyst__pins">
-                <PinnedCol account="claude_solo"    label="Solo"    pins={pins} />
-                <PinnedCol account="claude_overlay" label="Overlay" pins={pins} />
+        {/* Summary bar */}
+        <div className="analyst-summary">
+          <div className="summary-card">
+            <div className="summary-card__label">Total patterns</div>
+            <div className="summary-card__val">{summary?.total_patterns ?? '—'}</div>
+            <div className="summary-card__sub">{summary?.sufficient_patterns ?? 0} sufficient</div>
+          </div>
+          <div className="summary-card">
+            <div className="summary-card__label">Top win rate</div>
+            <div className="summary-card__val" style={{ color: '#22c55e' }}>
+              {summary?.top_win_rate ? pct(summary.top_win_rate.win_rate) : '—'}
+            </div>
+            <div className="summary-card__sub">
+              {summary?.top_win_rate
+                ? `${summary.top_win_rate.tag} · ${summary.top_win_rate.n_total} trades`
+                : 'no data'}
+            </div>
+          </div>
+          <div className="summary-card">
+            <div className="summary-card__label">Best expectancy</div>
+            <div className="summary-card__val" style={{ color: summary?.highest_expectancy?.expectancy >= 0 ? '#22c55e' : '#ef4444' }}>
+              {summary?.highest_expectancy ? usd(summary.highest_expectancy.expectancy) : '—'}
+            </div>
+            <div className="summary-card__sub">
+              {summary?.highest_expectancy
+                ? `${summary.highest_expectancy.tag}`
+                : 'needs wins + losses'}
+            </div>
+          </div>
+          <div className="summary-card">
+            <div className="summary-card__label">Pins active</div>
+            <div className="summary-card__val">{pins.filter(p => p.active).length}</div>
+            <div className="summary-card__sub">
+              solo {soloPins.length} · overlay {overlayPins.length}
+            </div>
+          </div>
+        </div>
+
+        {/* Pinned lessons */}
+        <div className="analyst-card">
+          <div className="analyst-card__header">
+            <span className="analyst-card__title">Pinned lessons</span>
+            <span className="analyst-card__count">{pins.filter(p => p.active).length} active</span>
+          </div>
+          <div className="pins-grid">
+            <PinnedCol label="Solo" color={C.solo} pins={soloPins} />
+            <PinnedCol label="Overlay" color={C.overlay} pins={overlayPins} />
+          </div>
+        </div>
+
+        {/* Rulebook */}
+        <div className="analyst-card">
+          <div className="analyst-card__header">
+            <span className="analyst-card__title">Rulebook</span>
+            <span className="analyst-card__count">{filteredRows.length} patterns</span>
+          </div>
+          <div className="analyst-filters">
+            {['all', 'solo', 'overlay', 'sufficient', 'early'].map(f => (
+              <button
+                key={f}
+                className={`filter-tab ${filter === f ? 'filter-tab--active' : ''}`}
+                onClick={() => setFilter(f)}
+              >
+                {f}
+              </button>
+            ))}
+          </div>
+          {filteredRows.length === 0
+            ? <div className="analyst-empty">No patterns match this filter</div>
+            : (
+              <div style={{ overflowX: 'auto' }}>
+                <table className="rulebook-table">
+                  <thead>
+                    <tr>
+                      <th>Acct</th>
+                      <th>Pattern tag</th>
+                      <th>Confidence</th>
+                      <th>Win rate</th>
+                      <th>Expectancy</th>
+                      <th>ADX</th>
+                      <th>Session</th>
+                      <th>Direction split</th>
+                      <th>Recency</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredRows.map(row => (
+                      <RulebookRow key={`${row.portfolio_id}-${row.tag}`} row={row} />
+                    ))}
+                  </tbody>
+                </table>
               </div>
-            </div>
+            )
+          }
+        </div>
 
-            {/* Rulebook */}
-            <div className="analyst__section">
-              <div className="analyst__section-header">Rulebook</div>
-              <div className="analyst__filter-tabs">
-                {FILTERS.map(f => (
-                  <button
-                    key={f}
-                    className={`analyst__tab${filter === f ? ' analyst__tab--active' : ''}`}
-                    onClick={() => setFilter(f)}
-                  >
-                    {f}
-                  </button>
-                ))}
-              </div>
-              {filteredRulebook.length === 0 ? (
-                <div className="analyst__table-empty">no patterns match this filter</div>
-              ) : (
-                <div className="analyst__table-wrap">
-                  <table className="analyst__table">
-                    <thead>
-                      <tr>
-                        <th>Tag</th>
-                        <th>Account</th>
-                        <th>Win rate</th>
-                        <th>n</th>
-                        <th>Expectancy</th>
-                        <th>Confidence</th>
-                        <th>Last seen</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredRulebook.map((row, i) => (
-                        <RulebookRow key={`${row.account_name}-${row.tag}-${i}`} row={row} />
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
+        {/* Cross-account patterns */}
+        <div className="analyst-card">
+          <div className="analyst-card__header">
+            <span className="analyst-card__title">Cross-account patterns</span>
+            <span className="analyst-card__count">same tag, both accounts</span>
+          </div>
+          <CrossAccountSection rulebook={allRows} />
+        </div>
 
-            {/* Cross-account patterns */}
-            <CrossAccountSection rulebook={rulebook} />
+        {/* Combinations */}
+        <div className="analyst-card">
+          <div className="analyst-card__header">
+            <span className="analyst-card__title">Condition combinations</span>
+            <span className="analyst-card__count">n≥3</span>
+          </div>
+          {combos.length === 0
+            ? <div className="analyst-empty">Combinations appear when a direction+ADX+RSI+session combo has 3+ trades</div>
+            : combos.map((c, i) => <CombinationRow key={i} row={c} />)
+          }
+        </div>
 
-            {/* Condition combinations */}
-            <div className="analyst__section">
-              <div className="analyst__section-header">Condition combinations</div>
-              {combinations.length === 0 ? (
-                <div className="analyst__empty">No combinations with ≥3 trades yet.</div>
-              ) : (
-                <div className="analyst__comb-list">
-                  {combinations.map((comb, i) => (
-                    <CombinationRow key={i} comb={comb} />
-                  ))}
-                </div>
-              )}
-            </div>
-          </>
-        )}
       </main>
     </div>
   );

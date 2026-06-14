@@ -564,8 +564,8 @@ function MarketPanel({ snapshot, missed }) {
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [showCalc,     setShowCalc]    = useState(false);
-  const [showAnalyst,  setShowAnalyst] = useState(false);
+  const [showCalc,    setShowCalc]    = useState(false);
+  const [showAnalyst, setShowAnalyst] = useState(false);
   const [accounts,    setAccounts]    = useState(null);
   const [equity,      setEquity]      = useState(null);
   const [positions,   setPositions]   = useState([]);
@@ -664,12 +664,12 @@ export default function App() {
     return () => clearInterval(id);
   }, [fetchAll]);
 
-  if (showAnalyst) {
-    return <AnalystDashboard onBack={() => setShowAnalyst(false)} />;
-  }
-
   if (showCalc) {
     return <AutochartistCalculator onBack={() => setShowCalc(false)} />;
+  }
+
+  if (showAnalyst) {
+    return <AnalystDashboard onBack={() => setShowAnalyst(false)} />;
   }
 
   const mech    = accounts?.find(a => a.name === 'mechanical');
