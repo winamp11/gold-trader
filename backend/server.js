@@ -916,6 +916,34 @@ app.get('/api/analyst/rulebook/prompt', async (req, res) => {
   }
 });
 
+app.get('/api/pinned-lessons', async (req, res) => {
+  try {
+    const account = req.query.account;
+    let portfolioId = null;
+    if (account === 'overlay') portfolioId = 2;
+    else if (account === 'solo') portfolioId = 3;
+
+    const params = [];
+    let filter = '';
+    if (portfolioId) { params.push(portfolioId); filter = ` AND pl.portfolio_id = $1`; }
+
+    const { rows } = await database.pool.query(`
+      SELECT pl.id, pl.portfolio_id, p.name AS account_name,
+             pl.tag, pl.tag_loss_count, pl.tag_total_count,
+             pl.pin_reason, pl.pinned_at, pl.active,
+             j.lesson_text
+      FROM pinned_lessons pl
+      JOIN portfolios p ON p.id = pl.portfolio_id
+      JOIN journal j ON j.id = pl.journal_id
+      WHERE 1=1${filter}
+      ORDER BY pl.portfolio_id, pl.active DESC, pl.tag_loss_count DESC
+    `, params);
+    res.json({ pinned: rows, count: rows.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Startup ────────────────────────────────────────────────────────────────
 
 // Top-level await: must connect to PostgreSQL before accepting requests.
