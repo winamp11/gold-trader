@@ -298,6 +298,37 @@ class DatabaseService {
       console.error('⚠️  Overlay tag remap error (non-fatal):', err.message);
     }
 
+    // One-time tag normalization: remap solo orphan tags → controlled taxonomy keys.
+    try {
+      const soloId = `(SELECT id FROM portfolios WHERE name = 'claude_solo')`;
+      const soloRemaps = [
+        // Wins
+        [`UPDATE journal SET tag = 'sell_bounce_downtrend_win'   WHERE portfolio_id = ${soloId} AND tag IN ('sell_bounce_downtrend_confluence_win', 'sell_bounce_downtrend_confluence_target_hit')`, 'sell_bounce_downtrend_win'],
+        [`UPDATE journal SET tag = 'mtf_alignment_win'           WHERE portfolio_id = ${soloId} AND tag = 'multi_tf_momentum_cascade_win'`,                  'mtf_alignment_win'],
+        [`UPDATE journal SET tag = 'pyramid_trend_add'           WHERE portfolio_id = ${soloId} AND tag = 'pyramid_short_downtrend_win'`,                    'pyramid_trend_add'],
+        // Losses
+        [`UPDATE journal SET tag = 'low_adx_trap'               WHERE portfolio_id = ${soloId} AND tag = 'low_adx_momentum_trap_loss'`,                     'low_adx_trap'],
+        [`UPDATE journal SET tag = 'stop_hunt'                   WHERE portfolio_id = ${soloId} AND tag = 'late_add_bounce_stop_hunt_loss'`,                 'stop_hunt'],
+        [`UPDATE journal SET tag = 'entry_at_exhaustion'         WHERE portfolio_id = ${soloId} AND tag = 'entry_at_exhaustion_stop_hit'`,                  'entry_at_exhaustion'],
+        [`UPDATE journal SET tag = 'rsi_exhaustion_fade_loss'    WHERE portfolio_id = ${soloId} AND tag = 'rsi_elevated_bounce_stop_hit'`,                  'rsi_exhaustion_fade_loss'],
+        [`UPDATE journal SET tag = 'counter_trend_failed'        WHERE portfolio_id = ${soloId} AND tag = 'counter_trend_h4_structure_stop_hit'`,            'counter_trend_failed'],
+        [`UPDATE journal SET tag = 'm5_divergence_ignored'       WHERE portfolio_id = ${soloId} AND tag = 'm5_divergence_ignored_loss'`,                    'm5_divergence_ignored'],
+        // Window/expiry artifacts
+        [`UPDATE journal SET tag = 'window_close_exit'           WHERE portfolio_id = ${soloId} AND tag IN ('window_close_partial_target_win', 'momentum_continuation_partial_window_close')`, 'window_close_exit'],
+        [`UPDATE journal SET tag = 'expired_no_fill'             WHERE portfolio_id = ${soloId} AND tag = 'expired_no_follow_through'`,                     'expired_no_fill'],
+      ];
+      const counts = [];
+      for (const [sql, label] of soloRemaps) {
+        const r = await this.pool.query(sql);
+        if ((r.rowCount ?? 0) > 0) counts.push(`${r.rowCount} → '${label}'`);
+      }
+      if (counts.length > 0) {
+        console.log(`🔧 Solo orphan remap: ${counts.join(', ')}`);
+      }
+    } catch (err) {
+      console.error('⚠️  Solo orphan remap error (non-fatal):', err.message);
+    }
+
     // Backfill pinned lessons from existing journal data (no-ops if already pinned).
     try {
       const { rows: nonMech } = await this.pool.query(

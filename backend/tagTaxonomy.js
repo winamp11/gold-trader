@@ -47,6 +47,12 @@ export const TAG_TAXONOMY = {
   sell_bounce_downtrend_loss:   'Shorted bounce in downtrend, stopped out',
   buy_bounce_uptrend_win:       'Bought pullback in uptrend, target hit',
   buy_bounce_uptrend_loss:      'Bought pullback in uptrend, stopped out',
+
+  // Trade lifecycle / artifacts
+  expired_no_fill:              'Trade expired or timed out without hitting target or stop — no follow-through',
+  window_close_exit:            'Trade closed by session window end, not by TP or SL — artifact, exclude from expectancy',
+  momentum_continuation:        'Entered continuation of existing move, not a bounce fade',
+  pyramid_trend_add:            'Added to a winning position in trend direction — scaling in',
 };
 
 // Formatted block for injection into the reflector system prompt.
