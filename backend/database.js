@@ -284,9 +284,15 @@ class DatabaseService {
         WHERE portfolio_id = (SELECT id FROM portfolios WHERE name = 'claude_overlay')
           AND tag = 'veto_correct_stop_avoided'
       `);
-      const remapped = (r1.rowCount ?? 0) + (r2.rowCount ?? 0);
+      const r3 = await this.pool.query(`
+        UPDATE journal
+        SET tag = 'rsi_exhaustion_fade_loss'
+        WHERE portfolio_id = (SELECT id FROM portfolios WHERE name = 'claude_overlay')
+          AND tag = 'extreme_oversold_carveout_stop_loss'
+      `);
+      const remapped = (r1.rowCount ?? 0) + (r2.rowCount ?? 0) + (r3.rowCount ?? 0);
       if (remapped > 0) {
-        console.log(`🔧 Tag remap: ${r1.rowCount ?? 0} overlay rows → 'veto_missed_winner', ${r2.rowCount ?? 0} → 'veto_correct_outcome_avoided'`);
+        console.log(`🔧 Tag remap: ${r1.rowCount ?? 0} overlay rows → 'veto_missed_winner', ${r2.rowCount ?? 0} → 'veto_correct_outcome_avoided', ${r3.rowCount ?? 0} → 'rsi_exhaustion_fade_loss'`);
       }
     } catch (err) {
       console.error('⚠️  Overlay tag remap error (non-fatal):', err.message);
