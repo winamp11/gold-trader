@@ -800,52 +800,6 @@ app.post('/api/autochartist/patterns', async (req, res) => {
   }
 });
 
-
-// ── Temporary: tag remap audit (remove after one use) ─────────────────────
-app.get('/api/admin/remap-audit', async (req, res) => {
-  try {
-    const pool = database.pool;
-
-    // Pinned lessons for overlay (2) and solo (3)
-    const { rows: pins } = await pool.query(`
-      SELECT p.portfolio_id, pr.name AS portfolio_name, p.tag,
-             p.tag_total_count, p.tag_loss_count, p.pin_reason,
-             p.pinned_at, p.active, j.lesson_text, j.entry_type
-      FROM pinned_lessons p
-      JOIN portfolios pr ON pr.id = p.portfolio_id
-      JOIN journal j ON j.id = p.journal_id
-      WHERE p.portfolio_id IN (2, 3)
-      ORDER BY p.portfolio_id, p.tag_loss_count DESC
-    `);
-
-    // Tag distribution after remap for solo and overlay
-    const { rows: soloTags } = await pool.query(`
-      SELECT tag, COUNT(*)::int AS total,
-             COUNT(*) FILTER (WHERE entry_type = 'loss')::int AS losses
-      FROM journal WHERE portfolio_id = 3
-      GROUP BY tag ORDER BY losses DESC, total DESC
-    `);
-    const { rows: overlayTags } = await pool.query(`
-      SELECT tag, COUNT(*)::int AS total,
-             COUNT(*) FILTER (WHERE entry_type = 'loss')::int AS losses
-      FROM journal WHERE portfolio_id = 2
-      GROUP BY tag ORDER BY losses DESC, total DESC
-    `);
-
-    // Orphans: tags present in journal but not in TAG_TAXONOMY
-    const knownTags = new Set(Object.keys(TAG_TAXONOMY));
-    const soloOrphans   = soloTags.filter(r => !knownTags.has(r.tag));
-    const overlayOrphans = overlayTags.filter(r => !knownTags.has(r.tag));
-
-    // Recent lessons for solo as they'd appear in the prompt
-    const soloLessons = await database.getRecentLessons(3, 8);
-
-    res.json({ pins, soloTags, overlayTags, soloOrphans, overlayOrphans, soloLessons });
-  } catch (err) {
-    res.status(500).json({ error: err.message, stack: err.stack });
-  }
-});
-
 // ── Startup ────────────────────────────────────────────────────────────────
 
 // Top-level await: must connect to PostgreSQL before accepting requests.
