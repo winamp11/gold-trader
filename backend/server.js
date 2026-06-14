@@ -998,6 +998,54 @@ await database.init();
   }
 }
 
+app.get('/api/diag/queries', async (req, res) => {
+  try {
+    const pool = database.pool;
+    const [q1, q2, q3, q4] = await Promise.all([
+      pool.query(`
+        SELECT p.name AS account, COUNT(*) AS total_closed,
+          SUM(CASE WHEN t.exit_reason = 'WINDOW_CLOSE'    THEN 1 ELSE 0 END) AS window_close_count,
+          ROUND(SUM(CASE WHEN t.exit_reason = 'WINDOW_CLOSE' THEN 1 ELSE 0 END)*100.0/COUNT(*),1) AS window_close_pct,
+          SUM(CASE WHEN t.exit_reason = 'TARGET_HIT'      THEN 1 ELSE 0 END) AS target_hit,
+          SUM(CASE WHEN t.exit_reason = 'STOP_HIT'        THEN 1 ELSE 0 END) AS stop_hit,
+          SUM(CASE WHEN t.exit_reason = 'CIRCUIT_BREAKER' THEN 1 ELSE 0 END) AS circuit_breaker,
+          SUM(CASE WHEN t.exit_reason = 'NO_ENTRY'        THEN 1 ELSE 0 END) AS no_entry,
+          SUM(CASE WHEN t.exit_reason = 'EXPIRED'         THEN 1 ELSE 0 END) AS expired
+        FROM trades t JOIN portfolios p ON p.id = t.portfolio_id
+        WHERE t.exit_reason IS NOT NULL GROUP BY p.name, p.id ORDER BY p.id`),
+      pool.query(`
+        SELECT p.name AS account, p.circuit_breaker_date, p.day_start_balance, p.current_balance,
+          ROUND(p.current_balance - p.day_start_balance, 2) AS day_pnl
+        FROM portfolios p WHERE p.circuit_breaker_date IS NOT NULL ORDER BY p.id`),
+      pool.query(`
+        SELECT p.name AS account, COUNT(*) AS total_cycles_with_open_positions,
+          MAX(open_count) AS max_concurrent_open
+        FROM (
+          SELECT t.portfolio_id, DATE(t.timestamp) AS trade_date, COUNT(*) AS open_count
+          FROM trades t
+          WHERE t.exit_reason IS NULL OR t.timestamp > t.exit_timestamp
+          GROUP BY t.portfolio_id, DATE(t.timestamp)
+        ) sub JOIN portfolios p ON p.id = sub.portfolio_id
+        GROUP BY p.name, p.id ORDER BY p.id`),
+      pool.query(`
+        SELECT p.name AS account, COUNT(*) AS total_trades,
+          SUM(CASE WHEN t.exit_reason = 'NO_ENTRY' THEN 1 ELSE 0 END) AS no_entry_count,
+          ROUND(SUM(CASE WHEN t.exit_reason = 'NO_ENTRY' THEN 1 ELSE 0 END)*100.0/COUNT(*),1) AS no_entry_pct,
+          SUM(CASE WHEN t.exit_reason = 'EXPIRED' THEN 1 ELSE 0 END) AS expired_count
+        FROM trades t JOIN portfolios p ON p.id = t.portfolio_id
+        WHERE t.exit_reason IS NOT NULL GROUP BY p.name, p.id ORDER BY p.id`),
+    ]);
+    res.json({
+      q1_window_close_by_account: q1.rows,
+      q2_circuit_breaker_history: q2.rows,
+      q3_risk_budget_utilization: q3.rows,
+      q4_no_entry_rate:           q4.rows,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log('\n' + '='.repeat(55));
   console.log('🚀 GOLD TRADER BACKEND STARTED');
