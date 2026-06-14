@@ -1034,7 +1034,6 @@ app.get('/api/diag/queries', async (req, res) => {
           SUM(CASE WHEN t.exit_reason = 'EXPIRED' THEN 1 ELSE 0 END) AS expired_count
         FROM trades t JOIN portfolios p ON p.id = t.portfolio_id
         WHERE t.exit_reason IS NOT NULL GROUP BY p.name, p.id ORDER BY p.id`),
-    ]);
       pool.query(`
         SELECT t.tag, t.direction, t.reasoning, t.session, t.timestamp,
                t.exit_reason, t.pnl
