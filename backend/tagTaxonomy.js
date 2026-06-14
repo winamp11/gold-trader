@@ -36,6 +36,12 @@ export const TAG_TAXONOMY = {
   mtf_alignment_win:            'All timeframes aligned, high conviction trade worked',
   mtf_divergence_ignored_loss:  'Timeframe conflict noted but ignored, trade failed',
 
+  // Veto outcomes
+  rsi_extreme_veto_correct:     'Vetoed on RSI extreme reading, trade would have hit stop — correct',
+  rsi_extreme_veto_missed:      'Vetoed on RSI extreme reading, trade would have hit target — missed winner',
+  veto_correct_outcome_avoided: 'Vetoed on structural/process grounds, stop would have hit — correct',
+  veto_missed_winner:           'Vetoed on structural/process grounds, target would have hit — missed winner',
+
   // Pattern reinforcement
   sell_bounce_downtrend_win:    'Shorted exhausted bounce in downtrend, target hit',
   sell_bounce_downtrend_loss:   'Shorted bounce in downtrend, stopped out',
