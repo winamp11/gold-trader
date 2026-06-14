@@ -179,6 +179,10 @@ export async function runAnalysis(pool) {
     groups[key].rows.push(row);
   }
 
+  // Wipe all existing rulebook rows for these portfolios before reinserting.
+  // This is required so renamed/consolidated tags don't leave stale rows behind.
+  await pool.query(`DELETE FROM analyst_rulebook WHERE portfolio_id IN (2, 3)`);
+
   let rulebookRowsWritten = 0;
 
   for (const { portfolio_id, tag, rows: grp } of Object.values(groups)) {
@@ -233,11 +237,6 @@ export async function runAnalysis(pool) {
     const recencyFlag   = lastTradeDate && lastTradeDate >= twoWeeksAgo ? 'active' : 'stale';
     const confidence    = sampleConfidence(nTotal);
     const windowCloseExcluded = excludedMap[`${portfolio_id}:${tag}`] || 0;
-
-    await pool.query(
-      `DELETE FROM analyst_rulebook WHERE portfolio_id = $1 AND tag = $2`,
-      [portfolio_id, tag]
-    );
 
     await pool.query(`
       INSERT INTO analyst_rulebook (
