@@ -122,6 +122,7 @@ export async function runAnalysis(pool) {
       j.portfolio_id,
       j.tag,
       j.entry_type,
+      j.exit_type,
       j.timestamp       AS journal_timestamp,
       t.id              AS trade_id,
       t.pnl,
@@ -149,19 +150,20 @@ export async function runAnalysis(pool) {
     ORDER BY j.portfolio_id, j.tag, j.timestamp
   `);
 
-  // Count excluded (window-close / circuit-breaker / expired) per portfolio+tag
-  const { rows: excludedRows } = await pool.query(`
-    SELECT j.portfolio_id, j.tag, COUNT(*) AS excluded_count
-    FROM journal j
-    LEFT JOIN trades t ON t.id = j.signal_or_trade_id
-    WHERE j.portfolio_id IN (2, 3)
-      AND j.entry_type IN ('win', 'loss')
-      AND t.exit_reason IN ('WINDOW_CLOSE', 'CIRCUIT_BREAKER', 'EXPIRED')
-    GROUP BY j.portfolio_id, j.tag
+  // Count forced exits (WINDOW_CLOSE/CIRCUIT_BREAKER) per portfolio+tag.
+  // These are now classified as win/loss by P&L sign and included in the analysis;
+  // forced_close_pct on the rulebook row tells you what fraction were forced exits.
+  const { rows: forcedRows } = await pool.query(`
+    SELECT portfolio_id, tag, COUNT(*) AS forced_count
+    FROM journal
+    WHERE portfolio_id IN (2, 3)
+      AND entry_type IN ('win', 'loss')
+      AND exit_type = 'forced'
+    GROUP BY portfolio_id, tag
   `);
-  const excludedMap = {};
-  for (const r of excludedRows) {
-    excludedMap[`${r.portfolio_id}:${r.tag}`] = parseInt(r.excluded_count) || 0;
+  const forcedMap = {};
+  for (const r of forcedRows) {
+    forcedMap[`${r.portfolio_id}:${r.tag}`] = parseInt(r.forced_count) || 0;
   }
 
   // Step B — Account names
@@ -236,7 +238,8 @@ export async function runAnalysis(pool) {
     const lastTradeDate = grp.map(r => r.journal_timestamp).sort().reverse()[0]?.slice(0, 10) ?? null;
     const recencyFlag   = lastTradeDate && lastTradeDate >= twoWeeksAgo ? 'active' : 'stale';
     const confidence    = sampleConfidence(nTotal);
-    const windowCloseExcluded = excludedMap[`${portfolio_id}:${tag}`] || 0;
+    const forcedCount   = forcedMap[`${portfolio_id}:${tag}`] || 0;
+    const forcedClosePct = nTotal > 0 ? (forcedCount / nTotal) * 100 : null;
 
     await pool.query(`
       INSERT INTO analyst_rulebook (
@@ -252,11 +255,11 @@ export async function runAnalysis(pool) {
         avg_rr_planned,
         avg_range_position_pct, avg_range_width_atr, squeeze_trade_pct,
         recency_flag, last_trade_date, sample_confidence,
-        window_close_excluded, last_updated
+        window_close_excluded, forced_close_pct, last_updated
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
         $15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,
-        $29,$30,$31,$32,$33
+        $29,$30,$31,$32,$33,$34
       )
     `, [
       portfolio_id, accountName, tag,
@@ -271,7 +274,7 @@ export async function runAnalysis(pool) {
       avgRrPlanned,
       avgRangePositionPct, avgRangeWidthAtr, squeezeTradePct,
       recencyFlag, lastTradeDate, confidence,
-      windowCloseExcluded, now,
+      forcedCount, forcedClosePct, now,
     ]);
 
     rulebookRowsWritten++;
