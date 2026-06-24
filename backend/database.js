@@ -218,6 +218,14 @@ class DatabaseService {
     await this.pool.query(`ALTER TABLE trades ADD COLUMN IF NOT EXISTS session TEXT`);
     await this.pool.query(`ALTER TABLE journal ADD COLUMN IF NOT EXISTS session TEXT`);
 
+    // exit_type: 'strategy' (TARGET_HIT/STOP_HIT reached own level) or
+    //            'forced'   (WINDOW_CLOSE/CIRCUIT_BREAKER exited by rule)
+    // NULL on older rows and veto/observation entries.
+    await this.pool.query(`ALTER TABLE journal ADD COLUMN IF NOT EXISTS exit_type TEXT`);
+
+    // forced_close_pct: what % of a tag's analyst-visible trades were forced exits.
+    await this.pool.query(`ALTER TABLE analyst_rulebook ADD COLUMN IF NOT EXISTS forced_close_pct DOUBLE PRECISION`);
+
     // Additive range columns: session high/low snapshot and derived position metrics.
     await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS session_high          DOUBLE PRECISION`);
     await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS session_low           DOUBLE PRECISION`);
@@ -840,13 +848,13 @@ class DatabaseService {
     console.log(`👻 Shadow ${shadowId} resolved: ${wouldBeOutcome}`);
   }
 
-  async saveJournalEntry({ portfolioId, signalOrTradeId = null, entryType, lessonText, tag = null, session = null }) {
+  async saveJournalEntry({ portfolioId, signalOrTradeId = null, entryType, exitType = null, lessonText, tag = null, session = null }) {
     const r = await this.pool.query(`
       INSERT INTO journal
-        (portfolio_id, timestamp, signal_or_trade_id, entry_type, lesson_text, tag, session)
-      VALUES ($1,$2,$3,$4,$5,$6,$7)
+        (portfolio_id, timestamp, signal_or_trade_id, entry_type, exit_type, lesson_text, tag, session)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
       RETURNING id
-    `, [portfolioId, new Date().toISOString(), signalOrTradeId, entryType, lessonText, tag, session]);
+    `, [portfolioId, new Date().toISOString(), signalOrTradeId, entryType, exitType, lessonText, tag, session]);
     const id = r.rows[0].id;
     console.log(`📓 Journal entry saved (ID: ${id}, portfolio: ${portfolioId}, type: ${entryType})`);
     return id;
