@@ -66,7 +66,8 @@ async function getOrFetchAdr() {
   const today = uaeDate();
   if (adrCache.date === today && adrCache.value != null) return adrCache.value;
   try {
-    const candles = await twelveData.fetchTimeSeries('XAU/USD', '1day', 14);
+    const res = await twelveData.fetchTimeSeries('XAU/USD', '1day', 14);
+    const candles = res?.values;
     if (!candles || candles.length === 0) return null;
     // Filter out weekends/holidays (range < 1 pt) before averaging
     const ranges = candles
