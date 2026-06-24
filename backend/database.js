@@ -224,6 +224,27 @@ class DatabaseService {
     await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS range_position_pct    DOUBLE PRECISION`);
     await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS range_width_vs_h1_atr DOUBLE PRECISION`);
 
+    // At-signal indicator snapshot: raw bulk-fetch values at cycle time.
+    // Existing rows stay NULL (expected). No data is altered.
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS h4_rsi_at_signal          DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS h1_rsi_at_signal          DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS m30_rsi_at_signal         DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS h4_macd_hist_at_signal    DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS h1_macd_hist_at_signal    DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS m30_macd_hist_at_signal   DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS h4_macd_signal_at_signal  DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS h1_macd_signal_at_signal  DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS m30_macd_signal_at_signal DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS h1_atr_at_signal          DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS m30_atr_at_signal         DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS h4_adx_at_signal          DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS h1_adx_at_signal          DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS m30_adx_at_signal         DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS day_high_at_signal        DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS day_low_at_signal         DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS adr_at_signal             DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS adr_consumed_pct          DOUBLE PRECISION`);
+
     // Circuit-breaker state: session-start balance + per-day halt flag.
     await this.pool.query(`ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS day_start_balance DOUBLE PRECISION`);
     await this.pool.query(`ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS circuit_breaker_date TEXT`);
@@ -492,13 +513,25 @@ class DatabaseService {
         m15_macd, m15_rsi, m15_atr,
         m5_macd, m5_rsi, m5_atr,
         session, h4_adx, h1_adx, m30_adx,
-        session_high, session_low, range_position_pct, range_width_vs_h1_atr
+        session_high, session_low, range_position_pct, range_width_vs_h1_atr,
+        h4_rsi_at_signal, h1_rsi_at_signal, m30_rsi_at_signal,
+        h4_macd_hist_at_signal, h1_macd_hist_at_signal, m30_macd_hist_at_signal,
+        h4_macd_signal_at_signal, h1_macd_signal_at_signal, m30_macd_signal_at_signal,
+        h1_atr_at_signal, m30_atr_at_signal,
+        h4_adx_at_signal, h1_adx_at_signal, m30_adx_at_signal,
+        day_high_at_signal, day_low_at_signal, adr_at_signal, adr_consumed_pct
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
         $12,$13,$14,$15,$16,$17,$18,$19,$20,
         $21,$22,$23,$24,$25,$26,
         $27,$28,$29,$30,
-        $31,$32,$33,$34
+        $31,$32,$33,$34,
+        $35,$36,$37,
+        $38,$39,$40,
+        $41,$42,$43,
+        $44,$45,
+        $46,$47,$48,
+        $49,$50,$51,$52
       ) RETURNING id
     `, [
       signalData.timestamp,
@@ -527,14 +560,33 @@ class DatabaseService {
       md.m5?.macd   ?? null,
       md.m5?.rsi    ?? null,
       md.m5?.atr    ?? null,
-      signalData.session          ?? null,
-      adx.h4                      ?? null,
-      adx.h1                      ?? null,
-      adx.m30                     ?? null,
-      signalData.sessionHigh      ?? null,
-      signalData.sessionLow       ?? null,
-      signalData.rangePositionPct ?? null,
+      signalData.session           ?? null,
+      adx.h4                       ?? null,
+      adx.h1                       ?? null,
+      adx.m30                      ?? null,
+      signalData.sessionHigh       ?? null,
+      signalData.sessionLow        ?? null,
+      signalData.rangePositionPct  ?? null,
       signalData.rangeWidthVsH1Atr ?? null,
+      // at-signal indicator snapshot ($35–$52)
+      md.h4?.rsi          ?? null,
+      md.h1?.rsi          ?? null,
+      md.m30?.rsi         ?? null,
+      md.h4?.macd_hist    ?? null,
+      md.h1?.macd_hist    ?? null,
+      md.m30?.macd_hist   ?? null,
+      md.h4?.macd_signal  ?? null,
+      md.h1?.macd_signal  ?? null,
+      md.m30?.macd_signal ?? null,
+      md.h1?.atr          ?? null,
+      md.m30?.atr         ?? null,
+      md.h4?.adx          ?? null,
+      md.h1?.adx          ?? null,
+      md.m30?.adx         ?? null,
+      signalData.dayHighAtSignal  ?? null,
+      signalData.dayLowAtSignal   ?? null,
+      signalData.adrAtSignal      ?? null,
+      signalData.adrConsumedPct   ?? null,
     ]);
 
     const id = result.rows[0].id;
