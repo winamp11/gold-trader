@@ -50,9 +50,21 @@ export async function reflect(tracking, outcome, pnl) {
     const CLAUDE_ACCOUNTS = ['claude_overlay', 'claude_solo'];
     if (!CLAUDE_ACCOUNTS.includes(tracking.portfolioName)) return;
 
-    const isWin  = outcome === 'TARGET_HIT';
-    const isLoss = outcome === 'STOP_HIT';
-    const entryType = isWin ? 'win' : (isLoss ? 'loss' : 'observation');
+    let entryType, exitType;
+    if (outcome === 'TARGET_HIT') {
+      entryType = 'win';
+      exitType  = 'strategy';
+    } else if (outcome === 'STOP_HIT') {
+      entryType = 'loss';
+      exitType  = 'strategy';
+    } else if (outcome === 'WINDOW_CLOSE' || outcome === 'CIRCUIT_BREAKER' || outcome === 'MANAGED_CLOSE') {
+      // Forced exits: count as win/loss by P&L sign so the Analyst sees them.
+      entryType = pnl > 0 ? 'win' : pnl < 0 ? 'loss' : 'observation';
+      exitType  = 'forced';
+    } else {
+      entryType = 'observation';
+      exitType  = null;
+    }
 
     const userContent = [
       `COMPLETED TRADE — ${tracking.portfolioName}`,
@@ -79,6 +91,7 @@ export async function reflect(tracking, outcome, pnl) {
         portfolioId:      tracking.portfolioId,
         signalOrTradeId:  tracking.tradeId ?? null,
         entryType,
+        exitType,
         lessonText:       lesson.lesson_text,
         tag:              lesson.tag,
         session:          tracking.session ?? null,
