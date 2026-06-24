@@ -38,6 +38,9 @@ let sessionHigh      = null;
 let sessionLow       = null;
 let sessionRangeDate = null;  // UAE date of last range reset
 
+// ── ADR cache: average daily range over 14 days, recomputed once per day ──
+let adrCache = { date: null, value: null };
+
 function updateSessionRange(price) {
   const today = uaeDate();
   if (sessionRangeDate !== today) {
@@ -57,6 +60,27 @@ function getSessionRangeStr(currentPrice) {
   if (spread < 0.01) return `Session range: establishing (< $0.01 spread so far)`;
   const pct = ((currentPrice - sessionLow) / spread * 100).toFixed(1);
   return `Session range: ${sessionLow.toFixed(2)}–${sessionHigh.toFixed(2)} | current ${currentPrice.toFixed(2)} (${pct}%)`;
+}
+
+async function getOrFetchAdr() {
+  const today = uaeDate();
+  if (adrCache.date === today && adrCache.value != null) return adrCache.value;
+  try {
+    const candles = await twelveData.fetchTimeSeries('XAU/USD', '1day', 14);
+    if (!candles || candles.length === 0) return null;
+    // Filter out weekends/holidays (range < 1 pt) before averaging
+    const ranges = candles
+      .map(c => parseFloat(c.high) - parseFloat(c.low))
+      .filter(r => r > 1.0);
+    if (ranges.length === 0) return null;
+    const adr = ranges.reduce((a, b) => a + b, 0) / ranges.length;
+    adrCache = { date: today, value: adr };
+    console.log(`📏 [ADR] ${adr.toFixed(2)} from ${ranges.length} trading days`);
+    return adr;
+  } catch (e) {
+    console.error('[ADR] fetch failed:', e.message);
+    return null;
+  }
 }
 
 // ── Helper: open a real position for one portfolio ─────────────────────────
@@ -295,6 +319,14 @@ async function generateSignalIfTradingHours() {
       : null;
     mechSignal.rangeWidthVsH1Atr = (sessionHigh && sessionLow && marketData.h1?.atr)
       ? ((sessionHigh - sessionLow) / marketData.h1.atr)
+      : null;
+    // At-signal enrichment: day range + ADR snapshot (pure logging, no logic impact)
+    mechSignal.dayHighAtSignal = sessionHigh;
+    mechSignal.dayLowAtSignal  = sessionLow;
+    const adrValue = await getOrFetchAdr();
+    mechSignal.adrAtSignal    = adrValue;
+    mechSignal.adrConsumedPct = (adrValue && sessionHigh != null && sessionLow != null && adrValue > 0)
+      ? ((sessionHigh - sessionLow) / adrValue * 100)
       : null;
     const signalId = await database.saveSignal(mechSignal);
 
@@ -574,6 +606,26 @@ app.get('/api/stats/performance', async (req, res) => {
 app.get('/api/export-all', async (req, res) => {
   try {
     const signals = await database.getAllSignals();
+    if (req.query.format === 'csv') {
+      if (signals.length === 0) {
+        res.setHeader('Content-Type', 'text/csv');
+        return res.send('');
+      }
+      const headers = Object.keys(signals[0]);
+      const escape = v => {
+        if (v == null) return '';
+        const s = String(v);
+        return s.includes(',') || s.includes('"') || s.includes('\n')
+          ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      const csv = [
+        headers.join(','),
+        ...signals.map(row => headers.map(h => escape(row[h])).join(',')),
+      ].join('\n');
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename="signals.csv"');
+      return res.send(csv);
+    }
     res.json({ count: signals.length, data: signals });
   } catch (error) {
     res.status(500).json({ error: 'Failed to export signals', message: error.message });
