@@ -883,6 +883,96 @@ app.post('/api/analyst/run', async (req, res) => {
   }
 });
 
+// Backfill endpoint — reclassifies historical observation entries as win/loss
+// by P&L sign and tags them exit_type='forced'. Safe to re-run (idempotent).
+// GET  → dry run: shows what would change, no writes.
+// POST → executes the backfill then re-runs analysis.
+app.get('/api/analyst/backfill-journal', async (req, res) => {
+  try {
+    const pool = database.pool;
+    const { rows: preview } = await pool.query(`
+      SELECT p.name AS account,
+             COUNT(*)                                       AS observation_count,
+             COUNT(CASE WHEN t.pnl > 0 THEN 1 END)        AS would_become_win,
+             COUNT(CASE WHEN t.pnl < 0 THEN 1 END)        AS would_become_loss,
+             COUNT(CASE WHEN t.pnl = 0 THEN 1 END)        AS would_stay_observation
+      FROM journal j
+      JOIN trades t ON t.id = j.signal_or_trade_id
+      JOIN portfolios p ON p.id = j.portfolio_id
+      WHERE j.portfolio_id IN (2, 3)
+        AND j.entry_type = 'observation'
+        AND t.exit_reason IN ('WINDOW_CLOSE', 'CIRCUIT_BREAKER', 'MANAGED_CLOSE')
+        AND t.pnl IS NOT NULL
+      GROUP BY p.name
+    `);
+    res.json({ dry_run: true, would_reclassify: preview });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/analyst/backfill-journal', async (req, res) => {
+  try {
+    const pool = database.pool;
+
+    // Before counts
+    const { rows: before } = await pool.query(`
+      SELECT p.name AS account, j.entry_type, COUNT(*) AS n
+      FROM journal j
+      JOIN portfolios p ON p.id = j.portfolio_id
+      WHERE j.portfolio_id IN (2, 3) AND j.entry_type IN ('win','loss','observation')
+      GROUP BY p.name, j.entry_type ORDER BY p.name, j.entry_type
+    `);
+
+    // Step 1: tag existing strategy win/loss entries (TARGET_HIT/STOP_HIT) with exit_type
+    const { rowCount: strategyTagged } = await pool.query(`
+      UPDATE journal j
+      SET exit_type = 'strategy'
+      FROM trades t
+      WHERE j.signal_or_trade_id = t.id
+        AND j.portfolio_id IN (2, 3)
+        AND j.entry_type IN ('win', 'loss')
+        AND j.exit_type IS NULL
+        AND t.exit_reason IN ('TARGET_HIT', 'STOP_HIT')
+    `);
+
+    // Step 2: reclassify WINDOW_CLOSE/CIRCUIT_BREAKER observations as win/loss
+    const { rowCount: reclassified } = await pool.query(`
+      UPDATE journal j
+      SET entry_type = CASE WHEN t.pnl > 0 THEN 'win' WHEN t.pnl < 0 THEN 'loss' ELSE 'observation' END,
+          exit_type  = 'forced'
+      FROM trades t
+      WHERE j.signal_or_trade_id = t.id
+        AND j.portfolio_id IN (2, 3)
+        AND j.entry_type = 'observation'
+        AND t.exit_reason IN ('WINDOW_CLOSE', 'CIRCUIT_BREAKER', 'MANAGED_CLOSE')
+        AND t.pnl IS NOT NULL
+    `);
+
+    // After counts
+    const { rows: after } = await pool.query(`
+      SELECT p.name AS account, j.entry_type, COUNT(*) AS n
+      FROM journal j
+      JOIN portfolios p ON p.id = j.portfolio_id
+      WHERE j.portfolio_id IN (2, 3) AND j.entry_type IN ('win','loss','observation')
+      GROUP BY p.name, j.entry_type ORDER BY p.name, j.entry_type
+    `);
+
+    // Re-run analysis on the now-complete dataset
+    const analystResult = await runAnalysis(pool);
+
+    res.json({
+      strategy_tagged: strategyTagged,
+      reclassified,
+      before,
+      after,
+      analyst: analystResult,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/analyst/rulebook', async (req, res) => {
   try {
     const pool = database.pool;
