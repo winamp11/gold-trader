@@ -335,6 +335,40 @@ class DatabaseService {
       )
     `);
 
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS mechanical_rulebook (
+        id                      SERIAL PRIMARY KEY,
+        direction               TEXT NOT NULL,
+        session                 TEXT,
+        adx_bucket              TEXT,
+        rsi_bucket              TEXT,
+        macd_bias               TEXT,
+        n_total                 INTEGER NOT NULL,
+        n_wins                  INTEGER NOT NULL,
+        n_losses                INTEGER NOT NULL,
+        win_rate                DOUBLE PRECISION NOT NULL,
+        avg_win_pnl             DOUBLE PRECISION,
+        avg_loss_pnl            DOUBLE PRECISION,
+        expectancy              DOUBLE PRECISION,
+        entry_h4_adx_avg        DOUBLE PRECISION,
+        entry_h1_adx_avg        DOUBLE PRECISION,
+        entry_h4_rsi_avg        DOUBLE PRECISION,
+        entry_h1_rsi_avg        DOUBLE PRECISION,
+        entry_h4_macd_avg       DOUBLE PRECISION,
+        entry_h1_macd_avg       DOUBLE PRECISION,
+        entry_h1_atr_avg        DOUBLE PRECISION,
+        entry_adr_consumed_avg  DOUBLE PRECISION,
+        avg_stop_atr_multiple   DOUBLE PRECISION,
+        avg_rr_planned          DOUBLE PRECISION,
+        pct_target_hit          DOUBLE PRECISION,
+        pct_stop_hit            DOUBLE PRECISION,
+        pct_window_close        DOUBLE PRECISION,
+        sample_confidence       TEXT,
+        last_trade_date         TEXT,
+        last_updated            TEXT NOT NULL
+      )
+    `);
+
     // Confirm row count unchanged after all DDL
     try {
       const r = await this.pool.query('SELECT COUNT(*) AS n FROM trades');
