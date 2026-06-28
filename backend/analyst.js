@@ -337,12 +337,202 @@ export async function runAnalysis(pool) {
     combinationRowsWritten++;
   }
 
+  // ── Step F — Process mechanical_rulebook ─────────────────────────────────
+  // Reads closed mechanical trades joined to their signal's at-signal columns.
+  // Groups by direction + session + ADX bucket + RSI bucket + MACD bias.
+  // No journal needed — outcome is derived directly from exit_reason + pnl.
+
+  const { rows: mechTrades } = await pool.query(`
+    SELECT
+      t.direction,
+      t.session                   AS trade_session,
+      t.entry_price,
+      t.stop_loss,
+      t.take_profit,
+      t.exit_reason,
+      t.pnl,
+      t.exit_timestamp,
+      s.session                   AS signal_session,
+      s.h4_adx_at_signal,
+      s.h1_adx_at_signal,
+      s.h4_rsi_at_signal,
+      s.h1_rsi_at_signal,
+      s.h4_macd_hist_at_signal,
+      s.h1_macd_hist_at_signal,
+      s.h1_atr_at_signal,
+      s.adr_consumed_pct,
+      s.h4_adx,
+      s.h1_adx,
+      s.h4_rsi,
+      s.h1_rsi,
+      s.h4_macd,
+      s.h1_macd
+    FROM trades t
+    JOIN portfolios p ON p.id = t.portfolio_id
+    LEFT JOIN signals s ON s.id = t.signal_id
+    WHERE p.name = 'mechanical'
+      AND t.exit_reason IS NOT NULL
+      AND t.pnl IS NOT NULL
+      AND t.exit_reason NOT IN ('NO_ENTRY', 'EXPIRED')
+    ORDER BY t.exit_timestamp
+  `);
+
+  // Helper: pick the best available ADX value for a row
+  // Prefers at-signal columns (enriched), falls back to signal-level columns
+  function mechAdx(row, tf) {
+    if (tf === 'h4') return row.h4_adx_at_signal ?? row.h4_adx ?? null;
+    if (tf === 'h1') return row.h1_adx_at_signal ?? row.h1_adx ?? null;
+    return null;
+  }
+  function mechRsi(row, tf) {
+    if (tf === 'h4') return row.h4_rsi_at_signal ?? row.h4_rsi ?? null;
+    if (tf === 'h1') return row.h1_rsi_at_signal ?? row.h1_rsi ?? null;
+    return null;
+  }
+  function mechMacd(row, tf) {
+    if (tf === 'h4') return row.h4_macd_hist_at_signal ?? row.h4_macd ?? null;
+    if (tf === 'h1') return row.h1_macd_hist_at_signal ?? row.h1_macd ?? null;
+    return null;
+  }
+
+  // Derive MACD bias: aligned = histogram same sign as direction, opposed = opposite
+  function macdBias(row) {
+    const h4 = mechMacd(row, 'h4');
+    const h1 = mechMacd(row, 'h1');
+    if (h4 == null && h1 == null) return 'unknown';
+    let aligned = 0, opposed = 0;
+    for (const v of [h4, h1]) {
+      if (v == null) continue;
+      if (row.direction === 'LONG'  && v > 0) aligned++;
+      if (row.direction === 'SHORT' && v < 0) aligned++;
+      if (row.direction === 'LONG'  && v < 0) opposed++;
+      if (row.direction === 'SHORT' && v > 0) opposed++;
+    }
+    if (aligned > opposed) return 'aligned';
+    if (opposed > aligned) return 'opposed';
+    return 'neutral';
+  }
+
+  // Group mechanical trades by condition bucket
+  const mechGroups = {};
+  for (const row of mechTrades) {
+    const sess    = row.signal_session || row.trade_session || 'unknown';
+    const adxB    = adxBucket(mechAdx(row, 'h4'));
+    const rsiB    = rsiBucket(mechRsi(row, 'h4'));
+    const macdB   = macdBias(row);
+    const key     = `${row.direction}:${sess}:${adxB}:${rsiB}:${macdB}`;
+    if (!mechGroups[key]) {
+      mechGroups[key] = {
+        direction: row.direction,
+        session:   sess,
+        adx_bucket: adxB,
+        rsi_bucket: rsiB,
+        macd_bias:  macdB,
+        rows: [],
+      };
+    }
+    mechGroups[key].rows.push(row);
+  }
+
+  await pool.query(`DELETE FROM mechanical_rulebook`);
+
+  let mechRulebookRowsWritten = 0;
+
+  for (const { direction, session, adx_bucket, rsi_bucket, macd_bias: macdBiasVal, rows: grp } of Object.values(mechGroups)) {
+    const nTotal  = grp.length;
+    const wins    = grp.filter(r => r.pnl > 0);
+    const losses  = grp.filter(r => r.pnl < 0);
+    const nWins   = wins.length;
+    const nLosses = losses.length;
+    const winRate = nTotal > 0 ? nWins / nTotal : 0;
+
+    const avgWinPnl  = avg(wins.map(r => r.pnl));
+    const avgLossPnl = avg(losses.map(r => r.pnl));
+    const expectancy = (avgWinPnl != null && avgLossPnl != null)
+      ? (winRate * avgWinPnl) + ((1 - winRate) * avgLossPnl)
+      : null;
+
+    const entryH4AdxAvg       = avg(grp.map(r => mechAdx(r, 'h4')));
+    const entryH1AdxAvg       = avg(grp.map(r => mechAdx(r, 'h1')));
+    const entryH4RsiAvg       = avg(grp.map(r => mechRsi(r, 'h4')));
+    const entryH1RsiAvg       = avg(grp.map(r => mechRsi(r, 'h1')));
+    const entryH4MacdAvg      = avg(grp.map(r => mechMacd(r, 'h4')));
+    const entryH1MacdAvg      = avg(grp.map(r => mechMacd(r, 'h1')));
+    const entryH1AtrAvg       = avg(grp.map(r => r.h1_atr_at_signal));
+    const entryAdrConsumedAvg = avg(grp.map(r => r.adr_consumed_pct));
+
+    const avgStopAtrMult = avg(grp.map(r => {
+      const stopDist = Math.abs(r.entry_price - r.stop_loss);
+      const atr      = r.h1_atr_at_signal;
+      return (stopDist && atr) ? stopDist / atr : null;
+    }));
+
+    const avgRrPlanned = avg(grp.map(r => {
+      const targetDist = Math.abs(r.take_profit - r.entry_price);
+      const stopDist   = Math.abs(r.entry_price  - r.stop_loss);
+      return (targetDist && stopDist) ? targetDist / stopDist : null;
+    }));
+
+    const pctTargetHit   = (grp.filter(r => r.exit_reason === 'TARGET_HIT').length   / nTotal) * 100;
+    const pctStopHit     = (grp.filter(r => r.exit_reason === 'STOP_HIT').length     / nTotal) * 100;
+    const pctWindowClose = (grp.filter(r => r.exit_reason === 'WINDOW_CLOSE').length  / nTotal) * 100;
+
+    const lastTradeDate = grp
+      .map(r => r.exit_timestamp)
+      .filter(Boolean)
+      .sort()
+      .reverse()[0]
+      ?.slice(0, 10) ?? null;
+
+    const confidence = sampleConfidence(nTotal);
+
+    await pool.query(`
+      INSERT INTO mechanical_rulebook (
+        direction, session, adx_bucket, rsi_bucket, macd_bias,
+        n_total, n_wins, n_losses, win_rate,
+        avg_win_pnl, avg_loss_pnl, expectancy,
+        entry_h4_adx_avg, entry_h1_adx_avg,
+        entry_h4_rsi_avg, entry_h1_rsi_avg,
+        entry_h4_macd_avg, entry_h1_macd_avg,
+        entry_h1_atr_avg, entry_adr_consumed_avg,
+        avg_stop_atr_multiple, avg_rr_planned,
+        pct_target_hit, pct_stop_hit, pct_window_close,
+        sample_confidence, last_trade_date, last_updated
+      ) VALUES (
+        $1,$2,$3,$4,$5,
+        $6,$7,$8,$9,
+        $10,$11,$12,
+        $13,$14,
+        $15,$16,
+        $17,$18,
+        $19,$20,
+        $21,$22,
+        $23,$24,$25,
+        $26,$27,$28
+      )
+    `, [
+      direction, session, adx_bucket, rsi_bucket, macdBiasVal,
+      nTotal, nWins, nLosses, winRate,
+      avgWinPnl, avgLossPnl, expectancy,
+      entryH4AdxAvg, entryH1AdxAvg,
+      entryH4RsiAvg, entryH1RsiAvg,
+      entryH4MacdAvg, entryH1MacdAvg,
+      entryH1AtrAvg, entryAdrConsumedAvg,
+      avgStopAtrMult, avgRrPlanned,
+      pctTargetHit, pctStopHit, pctWindowClose,
+      confidence, lastTradeDate, now,
+    ]);
+
+    mechRulebookRowsWritten++;
+  }
+
   // Step E — Summary
   return {
-    rulebook_rows_written:     rulebookRowsWritten,
-    combination_rows_written:  combinationRowsWritten,
-    portfolios_processed:      [2, 3],
-    timestamp:                 now,
+    rulebook_rows_written:                rulebookRowsWritten,
+    combination_rows_written:             combinationRowsWritten,
+    mechanical_rulebook_rows_written:     mechRulebookRowsWritten,
+    portfolios_processed:                 [2, 3],
+    timestamp:                            now,
   };
 }
 
