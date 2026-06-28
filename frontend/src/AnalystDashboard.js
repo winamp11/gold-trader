@@ -232,25 +232,114 @@ function CrossAccountSection({ rulebook }) {
   );
 }
 
+// ── Mechanical rulebook ───────────────────────────────────────────────────────
+
+function MechRulebookSection({ rows }) {
+  if (!rows || rows.length === 0) {
+    return <div className="analyst-empty">No mechanical rulebook data yet — run analysis first</div>;
+  }
+
+  const sorted = [...rows].sort((a, b) => {
+    const confOrder = { sufficient: 0, early: 1, insufficient: 2 };
+    const cDiff = (confOrder[a.sample_confidence] ?? 2) - (confOrder[b.sample_confidence] ?? 2);
+    return cDiff !== 0 ? cDiff : b.n_total - a.n_total;
+  });
+
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table className="rulebook-table">
+        <thead>
+          <tr>
+            <th>Dir</th>
+            <th>ADX</th>
+            <th>RSI</th>
+            <th>MACD bias</th>
+            <th>Session</th>
+            <th>Win rate</th>
+            <th>Expectancy</th>
+            <th>Avg H4 ADX</th>
+            <th>Avg H1 RSI</th>
+            <th>Stop ATR×</th>
+            <th>Exit split</th>
+            <th>Confidence</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((r, i) => {
+            const expVal = r.expectancy;
+            return (
+              <tr key={i}>
+                <td>
+                  <span className={r.direction === 'SHORT' ? 'dir--short' : 'dir--long'} style={{ fontWeight: 700 }}>
+                    {r.direction === 'SHORT' ? '↓' : '↑'} {r.direction}
+                  </span>
+                </td>
+                <td><span className={`adx-chip ${adxClass(r.adx_bucket)}`}>{r.adx_bucket}</span></td>
+                <td><span className="adx-chip">{r.rsi_bucket}</span></td>
+                <td>
+                  <span style={{
+                    fontFamily: 'var(--mono)',
+                    fontSize: 10,
+                    color: r.macd_bias === 'aligned' ? 'var(--pos)' : r.macd_bias === 'opposed' ? 'var(--neg)' : 'var(--text3)'
+                  }}>
+                    {r.macd_bias}
+                  </span>
+                </td>
+                <td>{r.session && r.session !== 'unknown' ? <span className="sess-chip">{r.session}</span> : <span style={{ color: 'var(--text3)' }}>—</span>}</td>
+                <td><WinRateBar wr={r.win_rate} n={r.n_total} /></td>
+                <td>
+                  {expVal != null
+                    ? <span className={expVal >= 0 ? 'exp--pos' : 'exp--neg'}>{usd(expVal)}</span>
+                    : <span className="exp--null">n/a</span>}
+                </td>
+                <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text2)' }}>
+                  {r.entry_h4_adx_avg != null ? Math.round(r.entry_h4_adx_avg) : '—'}
+                </td>
+                <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text2)' }}>
+                  {r.entry_h1_rsi_avg != null ? r.entry_h1_rsi_avg.toFixed(1) : '—'}
+                </td>
+                <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text2)' }}>
+                  {r.avg_stop_atr_multiple != null ? r.avg_stop_atr_multiple.toFixed(2) + '×' : '—'}
+                </td>
+                <td style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)' }}>
+                  {r.pct_target_hit != null ? `T${Math.round(r.pct_target_hit)}` : ''}
+                  {r.pct_stop_hit != null ? ` S${Math.round(r.pct_stop_hit)}` : ''}
+                  {r.pct_window_close != null ? ` W${Math.round(r.pct_window_close)}` : ''}
+                </td>
+                <td><span className={`conf-badge ${confClass(r.sample_confidence)}`}>{r.sample_confidence}</span></td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function AnalystDashboard({ onBack }) {
-  const [rulebook,    setRulebook]    = useState(null);
-  const [pins,        setPins]        = useState([]);
-  const [filter,      setFilter]      = useState('all');
-  const [running,     setRunning]     = useState(false);
-  const [lastUpdated, setLastUpdated] = useState(null);
-  const [error,       setError]       = useState(null);
+  const [rulebook,     setRulebook]     = useState(null);
+  const [pins,         setPins]         = useState([]);
+  const [mechRulebook, setMechRulebook] = useState([]);
+  const [filter,       setFilter]       = useState('all');
+  const [running,      setRunning]      = useState(false);
+  const [lastUpdated,  setLastUpdated]  = useState(null);
+  const [error,        setError]        = useState(null);
 
   const fetchData = useCallback(async () => {
     try {
-      const [rbRes, pinRes] = await Promise.all([
+      const [rbRes, pinRes, mechRes] = await Promise.all([
         fetch(`${API}/api/analyst/rulebook`),
         fetch(`${API}/api/pinned-lessons`),
+        fetch(`${API}/api/analyst/mechanical-rulebook`),
       ]);
-      const [rbData, pinData] = await Promise.all([rbRes.json(), pinRes.json()]);
+      const [rbData, pinData, mechData] = await Promise.all([
+        rbRes.json(), pinRes.json(), mechRes.json()
+      ]);
       setRulebook(rbData);
       setPins(pinData.pinned || []);
+      setMechRulebook(mechData.rows || []);
       setLastUpdated(new Date());
       setError(null);
     } catch {
@@ -433,6 +522,15 @@ export default function AnalystDashboard({ onBack }) {
             ? <div className="analyst-empty">Combinations appear when a direction+ADX+RSI+session combo has 3+ trades</div>
             : combos.map((c, i) => <CombinationRow key={i} row={c} />)
           }
+        </div>
+
+        {/* Mechanical Rulebook */}
+        <div className="analyst-card">
+          <div className="analyst-card__header">
+            <span className="analyst-card__title">Mechanical rulebook</span>
+            <span className="analyst-card__count">{mechRulebook.length} condition buckets</span>
+          </div>
+          <MechRulebookSection rows={mechRulebook} />
         </div>
 
       </main>
