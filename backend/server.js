@@ -633,6 +633,100 @@ app.get('/api/export-all', async (req, res) => {
   }
 });
 
+// Trades export — each executed trade joined to its originating signal's at-signal columns.
+// ?format=csv → RFC-4180 CSV download  (default: JSON)
+// ?account=mechanical|claude_overlay|claude_solo → filter to one account
+app.get('/api/export-trades', async (req, res) => {
+  try {
+    const params = [];
+    let accountFilter = '';
+    if (req.query.account) {
+      params.push(req.query.account);
+      accountFilter = `AND p.name = $${params.length}`;
+    }
+
+    const { rows } = await database.pool.query(`
+      SELECT
+        p.name                        AS account,
+        t.id                          AS trade_id,
+        t.direction,
+        t.timestamp                   AS open_time,
+        t.exit_timestamp              AS close_time,
+        t.entry_price,
+        t.exit_price,
+        t.stop_loss,
+        t.take_profit,
+        t.lot_size,
+        t.pnl,
+        t.exit_reason,
+        t.tag,
+        t.session,
+        t.decider,
+        -- signal context
+        t.signal_id,
+        s.timestamp                   AS signal_time,
+        s.session                     AS signal_session,
+        s.range_position_pct,
+        s.range_width_vs_h1_atr,
+        s.session_high,
+        s.session_low,
+        -- at-signal indicator snapshot (NULL for pre-enrichment trades)
+        s.h4_rsi_at_signal,
+        s.h1_rsi_at_signal,
+        s.m30_rsi_at_signal,
+        s.h4_macd_hist_at_signal,
+        s.h1_macd_hist_at_signal,
+        s.m30_macd_hist_at_signal,
+        s.h4_macd_signal_at_signal,
+        s.h1_macd_signal_at_signal,
+        s.m30_macd_signal_at_signal,
+        s.h1_atr_at_signal,
+        s.m30_atr_at_signal,
+        s.h4_adx_at_signal,
+        s.h1_adx_at_signal,
+        s.m30_adx_at_signal,
+        s.day_high_at_signal,
+        s.day_low_at_signal,
+        s.adr_at_signal,
+        s.adr_consumed_pct
+      FROM trades t
+      JOIN portfolios p ON p.id = t.portfolio_id
+      LEFT JOIN signals s ON s.id = t.signal_id
+      WHERE t.exit_reason IS NOT NULL
+        AND t.pnl IS NOT NULL
+        AND t.exit_reason NOT IN ('NO_ENTRY', 'EXPIRED')
+        ${accountFilter}
+      ORDER BY p.name, t.timestamp
+    `, params);
+
+    if (req.query.format === 'csv') {
+      if (rows.length === 0) {
+        res.setHeader('Content-Type', 'text/csv');
+        return res.send('');
+      }
+      const headers = Object.keys(rows[0]);
+      const escape = v => {
+        if (v == null) return '';
+        const s = String(v);
+        return s.includes(',') || s.includes('"') || s.includes('\n')
+          ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      const csv = [
+        headers.join(','),
+        ...rows.map(row => headers.map(h => escape(row[h])).join(',')),
+      ].join('\n');
+      res.setHeader('Content-Type', 'text/csv');
+      const fname = req.query.account ? `trades_${req.query.account}.csv` : 'trades_all.csv';
+      res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+      return res.send(csv);
+    }
+
+    res.json({ count: rows.length, data: rows });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to export trades', message: error.message });
+  }
+});
+
 app.post('/api/account/update', async (req, res) => {
   try {
     const { date, balance, dailyPnl, tradesCount, winRate } = req.body;
