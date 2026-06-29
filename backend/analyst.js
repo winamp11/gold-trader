@@ -315,8 +315,8 @@ export async function runAnalysis(pool) {
     const cLosses = cRows.filter(r => r.entry_type === 'loss');
     const avgWinPnlC  = avg(cWins.map(r => r.pnl));
     const avgLossPnlC = avg(cLosses.map(r => r.pnl));
-    const expectancy  = (avgWinPnlC != null && avgLossPnlC != null)
-      ? (winRate * avgWinPnlC) + ((1 - winRate) * avgLossPnlC)
+    const expectancy  = (avgWinPnlC != null || avgLossPnlC != null)
+      ? (winRate * (avgWinPnlC ?? 0)) + ((1 - winRate) * (avgLossPnlC ?? 0))
       : null;
     const confidence = sampleConfidence(nTotal);
 
