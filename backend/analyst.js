@@ -198,8 +198,8 @@ export async function runAnalysis(pool) {
 
     const avgWinPnl  = avg(wins.map(r => r.pnl));
     const avgLossPnl = avg(losses.map(r => r.pnl));
-    const expectancy = (avgWinPnl != null && avgLossPnl != null)
-      ? (winRate * avgWinPnl) + ((1 - winRate) * avgLossPnl)
+    const expectancy = (avgWinPnl != null || avgLossPnl != null)
+      ? (winRate * (avgWinPnl ?? 0)) + ((1 - winRate) * (avgLossPnl ?? 0))
       : null;
 
     const longs  = grp.filter(r => r.direction === 'LONG');
@@ -448,8 +448,8 @@ export async function runAnalysis(pool) {
 
     const avgWinPnl  = avg(wins.map(r => r.pnl));
     const avgLossPnl = avg(losses.map(r => r.pnl));
-    const expectancy = (avgWinPnl != null && avgLossPnl != null)
-      ? (winRate * avgWinPnl) + ((1 - winRate) * avgLossPnl)
+    const expectancy = (avgWinPnl != null || avgLossPnl != null)
+      ? (winRate * (avgWinPnl ?? 0)) + ((1 - winRate) * (avgLossPnl ?? 0))
       : null;
 
     const entryH4AdxAvg       = avg(grp.map(r => mechAdx(r, 'h4')));
