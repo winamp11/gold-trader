@@ -1,7 +1,8 @@
 import fetch from 'node-fetch';
 
-const API_KEY = process.env.TWELVE_DATA_API_KEY;
+const API_KEY  = process.env.TWELVE_DATA_API_KEY;
 const BASE_URL = 'https://api.twelvedata.com';
+const DXY_SYMBOL = 'DX-Y.NYB'; // US Dollar Index futures on Twelve Data
 
 class TwelveDataService {
   constructor() {
@@ -213,8 +214,8 @@ class TwelveDataService {
     };
 
     try {
-      // All three fetches in parallel — H1 candles run alongside the bulk POST
-      const [response, currentPrice, h1CandlesRes] = await Promise.all([
+      // All four fetches in parallel — H1 candles + DXY run alongside the bulk POST
+      const [response, currentPrice, h1CandlesRes, dxyBias] = await Promise.all([
         fetch(
           `${BASE_URL}/complex_data?apikey=${API_KEY}`,
           {
@@ -225,8 +226,9 @@ class TwelveDataService {
         ),
         this.fetchPrice(symbol),
         fetch(`${BASE_URL}/time_series?apikey=${API_KEY}&symbol=${encodeURIComponent(symbol)}&interval=1h&outputsize=10`),
+        this.getDXYBias(),
       ]);
-      this.callCount += 2; // bulk POST + H1 time_series count as 2; fetchPrice() increments itself
+      this.callCount += 2; // bulk POST + H1 time_series count as 2; fetchPrice() and getDXYBias() increment themselves
 
       const raw = await response.json();
       console.log(`✅ complex_data POST returned ${raw.data?.length ?? 0} items`);
@@ -322,10 +324,43 @@ class TwelveDataService {
       console.log(`📐 ADX — H4: ${h4.adx?.toFixed(1)}, H1: ${h1.adx?.toFixed(1)}, M30: ${m30.adx?.toFixed(1)}`);
       console.log(`📞 Total API calls this cycle: ${this.callCount}`);
 
-      return { symbol, timestamp: new Date().toISOString(), h4, h1, m30, m15, m5, atrCaveat, h1Candles, apiCallCount: this.callCount };
+      return { symbol, timestamp: new Date().toISOString(), h4, h1, m30, m15, m5, atrCaveat, h1Candles, dxyBias, apiCallCount: this.callCount };
     } catch (error) {
       console.error('Error in getMarketDataBulk:', error.message);
       throw error;
+    }
+  }
+
+  // Fetch DXY H1 candles and compute a 3-candle-lookback bias.
+  // Returns { bias: 'rising'|'falling'|'flat', dxy_price, dxy_change_pct }.
+  // Never throws — on any error returns bias: 'flat' with nulls.
+  async getDXYBias() {
+    try {
+      const url = `${BASE_URL}/time_series?apikey=${API_KEY}&symbol=${encodeURIComponent(DXY_SYMBOL)}&interval=1h&outputsize=5`;
+      const response = await fetch(url);
+      const data = await response.json();
+      this.callCount++;
+
+      if (data.status === 'error' || !Array.isArray(data.values) || data.values.length < 4) {
+        console.warn(`⚠️  DXY fetch: ${data.message ?? 'insufficient candles'} — defaulting to flat`);
+        return { bias: 'flat', dxy_price: null, dxy_change_pct: null };
+      }
+
+      const current   = parseFloat(data.values[0].close); // latest H1 close
+      const threeAgo  = parseFloat(data.values[3].close); // 3 H1 candles ago
+
+      if (!isFinite(current) || !isFinite(threeAgo) || threeAgo === 0) {
+        return { bias: 'flat', dxy_price: isFinite(current) ? current : null, dxy_change_pct: null };
+      }
+
+      const changePct = ((current - threeAgo) / threeAgo) * 100;
+      const bias = changePct > 0.1 ? 'rising' : changePct < -0.1 ? 'falling' : 'flat';
+
+      console.log(`💵 DXY: ${current.toFixed(3)} (${changePct >= 0 ? '+' : ''}${changePct.toFixed(3)}%) → ${bias}`);
+      return { bias, dxy_price: current, dxy_change_pct: changePct };
+    } catch (err) {
+      console.warn(`⚠️  DXY fetch error: ${err.message} — defaulting to flat`);
+      return { bias: 'flat', dxy_price: null, dxy_change_pct: null };
     }
   }
 
