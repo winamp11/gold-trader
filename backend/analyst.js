@@ -366,7 +366,8 @@ export async function runAnalysis(pool) {
       s.h4_rsi,
       s.h1_rsi,
       s.h4_macd,
-      s.h1_macd
+      s.h1_macd,
+      s.dxy_bias_at_signal
     FROM trades t
     JOIN portfolios p ON p.id = t.portfolio_id
     LEFT JOIN signals s ON s.id = t.signal_id
@@ -477,6 +478,12 @@ export async function runAnalysis(pool) {
     const pctStopHit     = (grp.filter(r => r.exit_reason === 'STOP_HIT').length     / nTotal) * 100;
     const pctWindowClose = (grp.filter(r => r.exit_reason === 'WINDOW_CLOSE').length  / nTotal) * 100;
 
+    // DXY bias distribution — passive correlation signal, not a grouping key
+    const dxyKnown     = grp.filter(r => r.dxy_bias_at_signal != null);
+    const dxyRisingPct  = dxyKnown.length > 0 ? (dxyKnown.filter(r => r.dxy_bias_at_signal === 'rising').length  / nTotal) * 100 : null;
+    const dxyFallingPct = dxyKnown.length > 0 ? (dxyKnown.filter(r => r.dxy_bias_at_signal === 'falling').length / nTotal) * 100 : null;
+    const dxyFlatPct    = dxyKnown.length > 0 ? (dxyKnown.filter(r => r.dxy_bias_at_signal === 'flat').length    / nTotal) * 100 : null;
+
     const lastTradeDate = grp
       .map(r => r.exit_timestamp)
       .filter(Boolean)
@@ -497,7 +504,8 @@ export async function runAnalysis(pool) {
         entry_h1_atr_avg, entry_adr_consumed_avg,
         avg_stop_atr_multiple, avg_rr_planned,
         pct_target_hit, pct_stop_hit, pct_window_close,
-        sample_confidence, last_trade_date, last_updated
+        sample_confidence, last_trade_date, last_updated,
+        dxy_rising_pct, dxy_falling_pct, dxy_flat_pct
       ) VALUES (
         $1,$2,$3,$4,$5,
         $6,$7,$8,$9,
@@ -508,7 +516,8 @@ export async function runAnalysis(pool) {
         $19,$20,
         $21,$22,
         $23,$24,$25,
-        $26,$27,$28
+        $26,$27,$28,
+        $29,$30,$31
       )
     `, [
       direction, session, adx_bucket, rsi_bucket, macdBiasVal,
@@ -521,6 +530,7 @@ export async function runAnalysis(pool) {
       avgStopAtrMult, avgRrPlanned,
       pctTargetHit, pctStopHit, pctWindowClose,
       confidence, lastTradeDate, now,
+      dxyRisingPct, dxyFallingPct, dxyFlatPct,
     ]);
 
     mechRulebookRowsWritten++;
