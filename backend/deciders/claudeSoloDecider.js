@@ -180,6 +180,19 @@ function formatSnapshot(marketData, atr, portfolio, session = null) {
     lines.push(``, marketData.sessionRange);
   }
 
+  // DXY (US Dollar Index) bias
+  const dxy = marketData.dxyBias;
+  if (dxy) {
+    lines.push(
+      ``,
+      `DXY (US Dollar Index):`,
+      `- Current bias: ${dxy.bias}`,
+      dxy.dxy_price    != null ? `- Price: ${dxy.dxy_price.toFixed(3)}`                                 : `- Price: n/a`,
+      dxy.dxy_change_pct != null ? `- Change (3H): ${dxy.dxy_change_pct >= 0 ? '+' : ''}${dxy.dxy_change_pct.toFixed(3)}%` : `- Change (3H): n/a`,
+      `- Note: Gold and DXY are inversely correlated. Rising DXY = headwind for gold longs, tailwind for gold shorts.`,
+    );
+  }
+
   if (marketData.atrCaveat) {
     lines.push(
       ``,
