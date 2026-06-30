@@ -253,6 +253,11 @@ class DatabaseService {
     await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS adr_at_signal             DOUBLE PRECISION`);
     await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS adr_consumed_pct          DOUBLE PRECISION`);
 
+    // DXY (US Dollar Index) bias at signal time — passive enrichment for correlation analysis
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS dxy_bias_at_signal        VARCHAR(10)`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS dxy_price_at_signal       DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS dxy_change_pct_at_signal  DOUBLE PRECISION`);
+
     // Circuit-breaker state: session-start balance + per-day halt flag.
     await this.pool.query(`ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS day_start_balance DOUBLE PRECISION`);
     await this.pool.query(`ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS circuit_breaker_date TEXT`);
@@ -368,6 +373,11 @@ class DatabaseService {
         last_updated            TEXT NOT NULL
       )
     `);
+
+    // DXY distribution on mechanical_rulebook (additive — table may already exist)
+    await this.pool.query(`ALTER TABLE mechanical_rulebook ADD COLUMN IF NOT EXISTS dxy_rising_pct  DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE mechanical_rulebook ADD COLUMN IF NOT EXISTS dxy_falling_pct DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE mechanical_rulebook ADD COLUMN IF NOT EXISTS dxy_flat_pct    DOUBLE PRECISION`);
 
     // Confirm row count unchanged after all DDL
     try {
@@ -561,7 +571,8 @@ class DatabaseService {
         h4_macd_signal_at_signal, h1_macd_signal_at_signal, m30_macd_signal_at_signal,
         h1_atr_at_signal, m30_atr_at_signal,
         h4_adx_at_signal, h1_adx_at_signal, m30_adx_at_signal,
-        day_high_at_signal, day_low_at_signal, adr_at_signal, adr_consumed_pct
+        day_high_at_signal, day_low_at_signal, adr_at_signal, adr_consumed_pct,
+        dxy_bias_at_signal, dxy_price_at_signal, dxy_change_pct_at_signal
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
         $12,$13,$14,$15,$16,$17,$18,$19,$20,
@@ -573,7 +584,8 @@ class DatabaseService {
         $41,$42,$43,
         $44,$45,
         $46,$47,$48,
-        $49,$50,$51,$52
+        $49,$50,$51,$52,
+        $53,$54,$55
       ) RETURNING id
     `, [
       signalData.timestamp,
@@ -625,10 +637,13 @@ class DatabaseService {
       md.h4?.adx          ?? null,
       md.h1?.adx          ?? null,
       md.m30?.adx         ?? null,
-      signalData.dayHighAtSignal  ?? null,
-      signalData.dayLowAtSignal   ?? null,
-      signalData.adrAtSignal      ?? null,
-      signalData.adrConsumedPct   ?? null,
+      signalData.dayHighAtSignal      ?? null,
+      signalData.dayLowAtSignal       ?? null,
+      signalData.adrAtSignal          ?? null,
+      signalData.adrConsumedPct       ?? null,
+      signalData.dxyBiasAtSignal      ?? null,
+      signalData.dxyPriceAtSignal     ?? null,
+      signalData.dxyChangePctAtSignal ?? null,
     ]);
 
     const id = result.rows[0].id;
