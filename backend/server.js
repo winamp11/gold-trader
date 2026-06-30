@@ -329,6 +329,11 @@ async function generateSignalIfTradingHours() {
     mechSignal.adrConsumedPct = (adrValue && sessionHigh != null && sessionLow != null && adrValue > 0)
       ? ((sessionHigh - sessionLow) / adrValue * 100)
       : null;
+    // DXY bias enrichment — already fetched in parallel by getMarketDataBulk, never blocks
+    const dxyBias = marketData.dxyBias ?? { bias: 'flat', dxy_price: null, dxy_change_pct: null };
+    mechSignal.dxyBiasAtSignal      = dxyBias.bias;
+    mechSignal.dxyPriceAtSignal     = dxyBias.dxy_price;
+    mechSignal.dxyChangePctAtSignal = dxyBias.dxy_change_pct;
     const signalId = await database.saveSignal(mechSignal);
 
     // ── Circuit-breaker check — fires before any new positions are opened ────
