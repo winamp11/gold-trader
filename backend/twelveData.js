@@ -2,7 +2,11 @@ import fetch from 'node-fetch';
 
 const API_KEY  = process.env.TWELVE_DATA_API_KEY;
 const BASE_URL = 'https://api.twelvedata.com';
-const DXY_SYMBOL = 'DX-Y.NYB'; // US Dollar Index futures on Twelve Data
+
+// DX-Y.NYB and DXY return 404 on the Grow plan; USDX/DX are wrong instruments (~25/~13).
+// EUR/USD is available and is a reliable proxy: DXY is 57.6% EUR-weighted so
+// EUR/USD direction inverted gives the dollar bias with minimal lag.
+let _dxyMethodLogged = false;
 
 class TwelveDataService {
   constructor() {
@@ -331,35 +335,47 @@ class TwelveDataService {
     }
   }
 
-  // Fetch DXY H1 candles and compute a 3-candle-lookback bias.
-  // Returns { bias: 'rising'|'falling'|'flat', dxy_price, dxy_change_pct }.
-  // Never throws — on any error returns bias: 'flat' with nulls.
+  // Compute dollar bias via EUR/USD H1 (3-candle lookback, inverted).
+  // Direct DXY symbols (DX-Y.NYB, DXY) return 404 on the Grow plan; USDX/DX are
+  // wrong instruments. EUR/USD is the reliable substitute: EUR/USD falling means
+  // dollar rising, and vice versa.
+  //
+  // Returns { bias: 'rising'|'falling'|'flat', dxy_price: eurusd_close, dxy_change_pct: dollar_change_pct }.
+  // dxy_change_pct is expressed as dollar change (+ve = dollar strengthening).
+  // Never throws — defaults to { bias: 'flat', dxy_price: null, dxy_change_pct: null } on error.
   async getDXYBias() {
+    if (!_dxyMethodLogged) {
+      console.log(`💵 [DXY] Using EUR/USD H1 inverse proxy (DX-Y.NYB not available on Grow plan)`);
+      _dxyMethodLogged = true;
+    }
     try {
-      const url = `${BASE_URL}/time_series?apikey=${API_KEY}&symbol=${encodeURIComponent(DXY_SYMBOL)}&interval=1h&outputsize=5`;
+      const url = `${BASE_URL}/time_series?apikey=${API_KEY}&symbol=EUR%2FUSD&interval=1h&outputsize=5`;
       const response = await fetch(url);
       const data = await response.json();
       this.callCount++;
 
       if (data.status === 'error' || !Array.isArray(data.values) || data.values.length < 4) {
-        console.warn(`⚠️  DXY fetch: ${data.message ?? 'insufficient candles'} — defaulting to flat`);
+        console.warn(`⚠️  DXY proxy (EUR/USD): ${data.message ?? 'insufficient candles'} — defaulting to flat`);
         return { bias: 'flat', dxy_price: null, dxy_change_pct: null };
       }
 
-      const current   = parseFloat(data.values[0].close); // latest H1 close
-      const threeAgo  = parseFloat(data.values[3].close); // 3 H1 candles ago
+      const eurCurrent = parseFloat(data.values[0].close); // latest EUR/USD H1 close
+      const eurThreeAgo = parseFloat(data.values[3].close); // 3 H1 candles ago
 
-      if (!isFinite(current) || !isFinite(threeAgo) || threeAgo === 0) {
-        return { bias: 'flat', dxy_price: isFinite(current) ? current : null, dxy_change_pct: null };
+      if (!isFinite(eurCurrent) || !isFinite(eurThreeAgo) || eurThreeAgo === 0) {
+        return { bias: 'flat', dxy_price: isFinite(eurCurrent) ? eurCurrent : null, dxy_change_pct: null };
       }
 
-      const changePct = ((current - threeAgo) / threeAgo) * 100;
-      const bias = changePct > 0.1 ? 'rising' : changePct < -0.1 ? 'falling' : 'flat';
+      const eurChangePct  = ((eurCurrent - eurThreeAgo) / eurThreeAgo) * 100;
+      const dollarChangePct = -eurChangePct; // invert: EUR up → dollar down
 
-      console.log(`💵 DXY: ${current.toFixed(3)} (${changePct >= 0 ? '+' : ''}${changePct.toFixed(3)}%) → ${bias}`);
-      return { bias, dxy_price: current, dxy_change_pct: changePct };
+      // >+0.1% dollar change = rising, <-0.1% = falling, else flat
+      const bias = dollarChangePct > 0.1 ? 'rising' : dollarChangePct < -0.1 ? 'falling' : 'flat';
+
+      console.log(`💵 DXY proxy EUR/USD: ${eurCurrent.toFixed(5)} (EUR ${eurChangePct >= 0 ? '+' : ''}${eurChangePct.toFixed(3)}% → dollar ${dollarChangePct >= 0 ? '+' : ''}${dollarChangePct.toFixed(3)}%) → ${bias}`);
+      return { bias, dxy_price: eurCurrent, dxy_change_pct: dollarChangePct };
     } catch (err) {
-      console.warn(`⚠️  DXY fetch error: ${err.message} — defaulting to flat`);
+      console.warn(`⚠️  DXY proxy fetch error: ${err.message} — defaulting to flat`);
       return { bias: 'flat', dxy_price: null, dxy_change_pct: null };
     }
   }
