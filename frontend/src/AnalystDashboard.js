@@ -39,6 +39,11 @@ function pct(n) {
   return (n * 100).toFixed(0) + '%';
 }
 
+function pts(n) {
+  if (n == null) return '—';
+  return (n >= 0 ? '+' : '') + n.toFixed(1);
+}
+
 function winRateColor(wr) {
   if (wr == null) return '#4b6070';
   if (wr >= 0.7)  return '#22c55e';
@@ -316,12 +321,126 @@ function MechRulebookSection({ rows }) {
   );
 }
 
+// ── Forward rulebook ──────────────────────────────────────────────────────────
+// Market behavior by condition bucket across ALL cycles (traded or not).
+// Values are price points over the horizon after the signal.
+
+function PtsCell({ val }) {
+  if (val == null) return <span className="exp--null">—</span>;
+  return (
+    <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: val >= 0 ? 'var(--pos)' : 'var(--neg)' }}>
+      {pts(val)}
+    </span>
+  );
+}
+
+function ForwardRulebookSection({ rows }) {
+  if (!rows || rows.length === 0) {
+    return <div className="analyst-empty">No forward-labeled data yet — the labeler runs hourly</div>;
+  }
+  const sorted = [...rows].sort((a, b) => b.n_total - a.n_total);
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table className="rulebook-table">
+        <thead>
+          <tr>
+            <th>Session</th>
+            <th>ADX</th>
+            <th>RSI</th>
+            <th>n</th>
+            <th>Avg 1h</th>
+            <th>Avg 4h</th>
+            <th>% up 4h</th>
+            <th>Avg EOD</th>
+            <th>Max up 4h</th>
+            <th>Max dn 4h</th>
+            <th>DXY ↑/↓/=</th>
+            <th>Confidence</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((r, i) => {
+            const up = r.pct_up_4h;
+            const upColor = up == null ? 'var(--text3)' : up >= 55 ? 'var(--pos)' : up <= 45 ? 'var(--neg)' : 'var(--text2)';
+            return (
+              <tr key={i}>
+                <td>{r.session && r.session !== 'unknown' ? <span className="sess-chip">{r.session}</span> : <span style={{ color: 'var(--text3)' }}>—</span>}</td>
+                <td><span className={`adx-chip ${adxClass(r.adx_bucket)}`}>{r.adx_bucket}</span></td>
+                <td><span className="adx-chip">{r.rsi_bucket}</span></td>
+                <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text2)' }}>{r.n_total}</td>
+                <td><PtsCell val={r.avg_fwd_1h} /></td>
+                <td><PtsCell val={r.avg_fwd_4h} /></td>
+                <td style={{ fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 700, color: upColor }}>
+                  {up != null ? Math.round(up) + '%' : '—'}
+                </td>
+                <td><PtsCell val={r.avg_fwd_eod} /></td>
+                <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--pos)' }}>
+                  {r.avg_max_up_4h != null ? r.avg_max_up_4h.toFixed(1) : '—'}
+                </td>
+                <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--neg)' }}>
+                  {r.avg_max_down_4h != null ? r.avg_max_down_4h.toFixed(1) : '—'}
+                </td>
+                <td style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)' }}>
+                  {r.dxy_rising_pct != null
+                    ? `${Math.round(r.dxy_rising_pct)}/${Math.round(r.dxy_falling_pct)}/${Math.round(r.dxy_flat_pct)}`
+                    : '—'}
+                </td>
+                <td><span className={`conf-badge ${confClass(r.sample_confidence)}`}>{r.sample_confidence}</span></td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ── Collapsible section card ──────────────────────────────────────────────────
+// Open/closed state persists per section in localStorage.
+
+function Section({ id, title, count, defaultOpen = false, children }) {
+  const [open, setOpen] = useState(() => {
+    try {
+      const saved = localStorage.getItem(`analyst.section.${id}`);
+      return saved != null ? saved === '1' : defaultOpen;
+    } catch {
+      return defaultOpen;
+    }
+  });
+
+  const toggle = () => {
+    setOpen(prev => {
+      try { localStorage.setItem(`analyst.section.${id}`, prev ? '0' : '1'); } catch { /* private mode */ }
+      return !prev;
+    });
+  };
+
+  return (
+    <div className="analyst-card">
+      <button
+        type="button"
+        className={`analyst-card__header analyst-card__header--btn ${open ? '' : 'analyst-card__header--closed'}`}
+        onClick={toggle}
+        aria-expanded={open}
+      >
+        <span className="analyst-card__title">
+          <span className={`section-chev ${open ? 'section-chev--open' : ''}`}>▸</span>
+          {title}
+        </span>
+        <span className="analyst-card__count">{count}</span>
+      </button>
+      {open && children}
+    </div>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function AnalystDashboard({ onBack }) {
   const [rulebook,     setRulebook]     = useState(null);
   const [pins,         setPins]         = useState([]);
   const [mechRulebook, setMechRulebook] = useState([]);
+  const [fwdRulebook,  setFwdRulebook]  = useState([]);
   const [filter,       setFilter]       = useState('all');
   const [running,      setRunning]      = useState(false);
   const [lastUpdated,  setLastUpdated]  = useState(null);
@@ -329,17 +448,19 @@ export default function AnalystDashboard({ onBack }) {
 
   const fetchData = useCallback(async () => {
     try {
-      const [rbRes, pinRes, mechRes] = await Promise.all([
+      const [rbRes, pinRes, mechRes, fwdRes] = await Promise.all([
         fetch(`${API}/api/analyst/rulebook`),
         fetch(`${API}/api/pinned-lessons`),
         fetch(`${API}/api/analyst/mechanical-rulebook`),
+        fetch(`${API}/api/analyst/forward-rulebook`),
       ]);
-      const [rbData, pinData, mechData] = await Promise.all([
-        rbRes.json(), pinRes.json(), mechRes.json()
+      const [rbData, pinData, mechData, fwdData] = await Promise.all([
+        rbRes.json(), pinRes.json(), mechRes.json(), fwdRes.json()
       ]);
       setRulebook(rbData);
       setPins(pinData.pinned || []);
       setMechRulebook(mechData.rows || []);
+      setFwdRulebook(fwdData.rows || []);
       setLastUpdated(new Date());
       setError(null);
     } catch {
@@ -445,24 +566,21 @@ export default function AnalystDashboard({ onBack }) {
           </div>
         </div>
 
+        {/* Forward rulebook — market behavior across ALL cycles, traded or not */}
+        <Section id="forward" title="Forward rulebook — market behavior" count={`${fwdRulebook.length} condition buckets`} defaultOpen={true}>
+          <ForwardRulebookSection rows={fwdRulebook} />
+        </Section>
+
         {/* Pinned lessons */}
-        <div className="analyst-card">
-          <div className="analyst-card__header">
-            <span className="analyst-card__title">Pinned lessons</span>
-            <span className="analyst-card__count">{pins.filter(p => p.active).length} active</span>
-          </div>
+        <Section id="pins" title="Pinned lessons" count={`${pins.filter(p => p.active).length} active`}>
           <div className="pins-grid">
             <PinnedCol label="Solo" color={C.solo} pins={soloPins} />
             <PinnedCol label="Overlay" color={C.overlay} pins={overlayPins} />
           </div>
-        </div>
+        </Section>
 
         {/* Rulebook */}
-        <div className="analyst-card">
-          <div className="analyst-card__header">
-            <span className="analyst-card__title">Rulebook</span>
-            <span className="analyst-card__count">{filteredRows.length} patterns</span>
-          </div>
+        <Section id="rulebook" title="Rulebook" count={`${filteredRows.length} patterns`}>
           <div className="analyst-filters">
             {['all', 'solo', 'overlay', 'sufficient', 'early'].map(f => (
               <button
@@ -501,37 +619,25 @@ export default function AnalystDashboard({ onBack }) {
               </div>
             )
           }
-        </div>
+        </Section>
 
         {/* Cross-account patterns */}
-        <div className="analyst-card">
-          <div className="analyst-card__header">
-            <span className="analyst-card__title">Cross-account patterns</span>
-            <span className="analyst-card__count">same tag, both accounts</span>
-          </div>
+        <Section id="cross" title="Cross-account patterns" count="same tag, both accounts">
           <CrossAccountSection rulebook={allRows} />
-        </div>
+        </Section>
 
         {/* Combinations */}
-        <div className="analyst-card">
-          <div className="analyst-card__header">
-            <span className="analyst-card__title">Condition combinations</span>
-            <span className="analyst-card__count">n≥3</span>
-          </div>
+        <Section id="combos" title="Condition combinations" count="n≥3">
           {combos.length === 0
             ? <div className="analyst-empty">Combinations appear when a direction+ADX+RSI+session combo has 3+ trades</div>
             : combos.map((c, i) => <CombinationRow key={i} row={c} />)
           }
-        </div>
+        </Section>
 
         {/* Mechanical Rulebook */}
-        <div className="analyst-card">
-          <div className="analyst-card__header">
-            <span className="analyst-card__title">Mechanical rulebook</span>
-            <span className="analyst-card__count">{mechRulebook.length} condition buckets</span>
-          </div>
+        <Section id="mech" title="Mechanical rulebook" count={`${mechRulebook.length} condition buckets`}>
           <MechRulebookSection rows={mechRulebook} />
-        </div>
+        </Section>
 
       </main>
     </div>

@@ -391,6 +391,27 @@
 .cross-agree   { color: var(--pos); font-size: 10px; }
 .cross-disagree { color: #fb923c; font-size: 10px; }
 
+/* ── Collapsible section header ── */
+.analyst-card__header--btn {
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+.analyst-card__header--btn:hover { background: var(--bg2); }
+.analyst-card__header--closed { border-bottom: none; }
+
+.section-chev {
+  display: inline-block;
+  margin-right: 8px;
+  color: var(--text3);
+  transition: transform 0.15s ease;
+}
+.section-chev--open { transform: rotate(90deg); }
+
 /* ── Empty state ── */
 .analyst-empty {
   padding: 28px;
