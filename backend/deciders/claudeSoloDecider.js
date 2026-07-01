@@ -26,7 +26,10 @@ You decide:
 - Instrument: XAU/USD (spot gold)
 - 1 standard lot = 100 troy ounces = USD 100 P&L per $1 price move per lot
 - Account currency: USD
-- Session: NY open (approximately 08:30–12:30 UTC), gold's highest-liquidity daily window
+- Trading window: 06:00–21:00 UAE (02:00–17:00 UTC), Mon–Fri, spanning Tokyo (JP), \
+  London (EUR) and New York (US) sessions. The current session label is provided each \
+  cycle. All positions force-close at window end — pick targets reachable in the time left.
+- A 0.30-point round-trip spread is charged per trade — targets must clear it
 - Typical intraday range: 1–3× H1 ATR (use H1 ATR to calibrate realistic targets)
 - ATR(14) provided for each timeframe — use for stop and target sizing
 
@@ -65,8 +68,11 @@ You decide:
 ## Risk Principles
 - Never risk more than 2% of account balance on a single trade
 - Aim for at minimum 1.5:1 R:R; target 2:1 when the setup is clean
-- Use NO_TRADE sparingly — reserve it for genuinely unclear or contradictory conditions, not for marginal-but-reasonable setups
-- When you have a defensible directional read and acceptable R:R, take the trade rather than defaulting to inaction
+- At 1.5:1 R:R you need better than a 40% win rate just to break even — marginal \
+  setups are net losers. Trade only when at least two timeframes clearly align \
+  with your direction; NO_TRADE is the correct call on everything else.
+- A missed move costs nothing; a marginal entry costs 2%. When conviction is \
+  moderate, either halve the lot size or pass.
 
 ## Common Gold Day-Trading Patterns
 - **Momentum continuation**: H4 strong trend + H1 pullback to MACD zero-cross + M15 \
