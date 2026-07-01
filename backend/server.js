@@ -43,14 +43,41 @@ let adrCache = { date: null, value: null };
 
 function updateSessionRange(price) {
   const today = uaeDate();
+  let changed = false;
   if (sessionRangeDate !== today) {
     sessionHigh      = price;
     sessionLow       = price;
     sessionRangeDate = today;
+    changed = true;
     console.log(`📏 [SESSION RANGE] Reset for ${today} @ $${price.toFixed(2)}`);
   } else {
-    if (price > sessionHigh) sessionHigh = price;
-    if (price < sessionLow)  sessionLow  = price;
+    if (price > sessionHigh) { sessionHigh = price; changed = true; }
+    if (price < sessionLow)  { sessionLow  = price; changed = true; }
+  }
+  // Write-through so the range survives redeploys (fire-and-forget)
+  if (changed) {
+    database.setServiceState('session_range', JSON.stringify({
+      date: sessionRangeDate, high: sessionHigh, low: sessionLow,
+    })).catch(err => console.warn(`⚠️  session_range persist failed: ${err.message}`));
+  }
+}
+
+// Restore the day's high/low after a restart so range-derived signal
+// features (range_position_pct, adr_consumed_pct, day_high/low) aren't
+// silently rebuilt from the restart price.
+async function restoreSessionRange() {
+  try {
+    const raw = await database.getServiceState('session_range');
+    if (!raw) return;
+    const saved = JSON.parse(raw);
+    if (saved.date === uaeDate() && saved.high != null && saved.low != null) {
+      sessionHigh      = saved.high;
+      sessionLow       = saved.low;
+      sessionRangeDate = saved.date;
+      console.log(`📏 [SESSION RANGE] Restored for ${saved.date}: ${saved.low.toFixed(2)}–${saved.high.toFixed(2)}`);
+    }
+  } catch (err) {
+    console.warn(`⚠️  session_range restore failed: ${err.message}`);
   }
 }
 
@@ -1231,6 +1258,9 @@ app.get('/api/pinned-lessons', async (req, res) => {
 
 // Top-level await: must connect to PostgreSQL before accepting requests.
 await database.init();
+
+// Restore the day's session range (survives redeploys).
+await restoreSessionRange();
 
 // Restore circuit-breaker state from DB (handles server restarts mid-session).
 {

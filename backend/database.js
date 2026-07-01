@@ -379,6 +379,17 @@ class DatabaseService {
       )
     `);
 
+    // Small key-value store for in-memory service state that must survive
+    // redeploys (e.g. the session high/low — resetting it mid-day corrupted
+    // range_position_pct / adr_consumed_pct / day_high/low on deploy days).
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS service_state (
+        key        TEXT PRIMARY KEY,
+        value      TEXT,
+        updated_at TEXT NOT NULL
+      )
+    `);
+
     // DXY distribution on mechanical_rulebook (additive — table may already exist)
     await this.pool.query(`ALTER TABLE mechanical_rulebook ADD COLUMN IF NOT EXISTS dxy_rising_pct  DOUBLE PRECISION`);
     await this.pool.query(`ALTER TABLE mechanical_rulebook ADD COLUMN IF NOT EXISTS dxy_falling_pct DOUBLE PRECISION`);
@@ -749,6 +760,19 @@ class DatabaseService {
     const id = r.rows[0].id;
     console.log(`💾 Trade saved (ID: ${id}, portfolio: ${tradeData.portfolio_id || 1})`);
     return id;
+  }
+
+  async getServiceState(key) {
+    const r = await this.pool.query(`SELECT value FROM service_state WHERE key = $1`, [key]);
+    return r.rows[0]?.value ?? null;
+  }
+
+  async setServiceState(key, value) {
+    await this.pool.query(`
+      INSERT INTO service_state (key, value, updated_at)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = $3
+    `, [key, value, new Date().toISOString()]);
   }
 
   async updateTradeExit(tradeId, exitData) {
