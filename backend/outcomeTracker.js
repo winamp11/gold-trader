@@ -127,6 +127,9 @@ class OutcomeTracker {
       if (this.entryFillHit(tracking, currentPrice)) {
         tracking.entryTriggered = true;
         tracking.entryTime = new Date();
+        // Reset extremes at fill so max/min measure the held period only (MAE/MFE)
+        tracking.maxPrice = currentPrice;
+        tracking.minPrice = currentPrice;
         console.log(`✅ Entry triggered [${tracking.portfolioName}] key=${tracking.key}`);
       } else if (ageHours >= 2) {
         await this.finalizePosition(tracking, 'NO_ENTRY');
@@ -227,6 +230,9 @@ class OutcomeTracker {
         exit_timestamp: tracking.endTime.toISOString(),
         exit_reason:    outcome,
         pnl,
+        // Held-period extremes (reset at entry trigger) — null if never filled
+        max_price_during: tracking.entryTriggered ? tracking.maxPrice : null,
+        min_price_during: tracking.entryTriggered ? tracking.minPrice : null,
       });
     }
 

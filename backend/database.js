@@ -258,6 +258,11 @@ class DatabaseService {
     await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS dxy_price_at_signal       DOUBLE PRECISION`);
     await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS dxy_change_pct_at_signal  DOUBLE PRECISION`);
 
+    // MAE/MFE raw material: price extremes observed while the position was held
+    // (from entry trigger to close). MAE/MFE derive from these vs entry_price.
+    await this.pool.query(`ALTER TABLE trades ADD COLUMN IF NOT EXISTS max_price_during DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE trades ADD COLUMN IF NOT EXISTS min_price_during DOUBLE PRECISION`);
+
     // Circuit-breaker state: session-start balance + per-day halt flag.
     await this.pool.query(`ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS day_start_balance DOUBLE PRECISION`);
     await this.pool.query(`ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS circuit_breaker_date TEXT`);
@@ -749,13 +754,16 @@ class DatabaseService {
   async updateTradeExit(tradeId, exitData) {
     await this.pool.query(`
       UPDATE trades
-      SET exit_price = $1, exit_timestamp = $2, exit_reason = $3, pnl = $4
-      WHERE id = $5
+      SET exit_price = $1, exit_timestamp = $2, exit_reason = $3, pnl = $4,
+          max_price_during = $5, min_price_during = $6
+      WHERE id = $7
     `, [
       exitData.exit_price,
       exitData.exit_timestamp,
       exitData.exit_reason || null,
       exitData.pnl,
+      exitData.max_price_during ?? null,
+      exitData.min_price_during ?? null,
       tradeId,
     ]);
     console.log(`💾 Trade ${tradeId} updated with exit`);
