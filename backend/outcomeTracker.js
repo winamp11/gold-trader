@@ -100,14 +100,31 @@ class OutcomeTracker {
     }
   }
 
+  // ── Entry-fill semantics ──────────────────────────────────────────────────
+  // Judged from entry vs startPrice (price at decision time):
+  //   entry ≈ startPrice                        → market order: fills on first tick
+  //   LONG entry below / SHORT entry above      → pullback limit: fills on touch
+  //   LONG entry above / SHORT entry below      → stop-entry: fills on breakout cross
+  // The old logic treated every entry as a pullback limit, which filtered out
+  // trades that ran immediately (winners) and always filled adverse moves.
+
+  entryFillHit(t, currentPrice) {
+    const { direction, entryPrice, startPrice } = t;
+    if (Math.abs(entryPrice - (startPrice ?? entryPrice)) <= 0.05) return true; // market
+    const isPullbackLimit = direction === 'LONG' ? entryPrice < startPrice : entryPrice > startPrice;
+    if (isPullbackLimit) {
+      return direction === 'LONG' ? currentPrice <= entryPrice : currentPrice >= entryPrice;
+    }
+    return direction === 'LONG' ? currentPrice >= entryPrice : currentPrice <= entryPrice;
+  }
+
   // ── GREEN position logic ──────────────────────────────────────────────────
 
   async checkGreenPosition(tracking, currentPrice, ageHours) {
     const { direction, entryPrice, stopLoss, target, entryTriggered } = tracking;
 
     if (!entryTriggered) {
-      const entryHit = direction === 'LONG' ? currentPrice <= entryPrice : currentPrice >= entryPrice;
-      if (entryHit) {
+      if (this.entryFillHit(tracking, currentPrice)) {
         tracking.entryTriggered = true;
         tracking.entryTime = new Date();
         console.log(`✅ Entry triggered [${tracking.portfolioName}] key=${tracking.key}`);
@@ -143,8 +160,7 @@ class OutcomeTracker {
     const { direction, entryPrice, stopLoss, target, entryTriggered } = shadow;
 
     if (!entryTriggered) {
-      const entryHit = direction === 'LONG' ? currentPrice <= entryPrice : currentPrice >= entryPrice;
-      if (entryHit) {
+      if (this.entryFillHit(shadow, currentPrice)) {
         shadow.entryTriggered = true;
       } else if (ageHours >= 2) {
         await this.finalizeShadow(shadow, 'NO_ENTRY', null);
