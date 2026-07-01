@@ -1,7 +1,7 @@
 import database from './database.js';
 import { isTradingHours } from './tradingHours.js';
 import { reflect, reflectVeto } from './deciders/reflector.js';
-import { VALUE_PER_LOT } from './contractSpec.js';
+import { VALUE_PER_LOT, SPREAD_POINTS } from './contractSpec.js';
 
 class OutcomeTracker {
   constructor() {
@@ -199,7 +199,7 @@ class OutcomeTracker {
       const priceMove = tracking.direction === 'LONG'
         ? fillPrice - tracking.entryPrice
         : tracking.entryPrice - fillPrice;
-      pnl = priceMove * VALUE_PER_LOT * lots;
+      pnl = (priceMove - SPREAD_POINTS) * VALUE_PER_LOT * lots;
 
       const portfolio = await database.getPortfolioById(tracking.portfolioId);
       if (portfolio) {
@@ -260,7 +260,7 @@ class OutcomeTracker {
       const priceMove = shadow.direction === 'LONG'
         ? fillPrice - shadow.entryPrice
         : shadow.entryPrice - fillPrice;
-      pnl = priceMove * VALUE_PER_LOT * lots;
+      pnl = (priceMove - SPREAD_POINTS) * VALUE_PER_LOT * lots;
     }
 
     await database.updateVetoShadow(shadow.shadowId, wouldBeOutcome, pnl);
