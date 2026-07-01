@@ -536,11 +536,74 @@ export async function runAnalysis(pool) {
     mechRulebookRowsWritten++;
   }
 
+  // ── Step G — Forward rulebook ────────────────────────────────────────────
+  // Market behavior by condition bucket across ALL labeled signal cycles,
+  // traded or not — no execution selection bias. Source: forward-outcome
+  // labels written by forwardLabeler.js.
+
+  const { rows: fwdRows } = await pool.query(`
+    SELECT session,
+           COALESCE(h4_adx_at_signal, h4_adx) AS h4_adx_v,
+           COALESCE(h4_rsi_at_signal, h4_rsi) AS h4_rsi_v,
+           dxy_bias_at_signal,
+           fwd_return_1h, fwd_return_4h, fwd_return_eod,
+           fwd_max_up_4h, fwd_max_down_4h
+    FROM signals
+    WHERE fwd_labeled_at IS NOT NULL AND fwd_return_4h IS NOT NULL
+  `);
+
+  const fwdGroups = {};
+  for (const r of fwdRows) {
+    const sess = r.session || 'unknown';
+    const adxB = adxBucket(r.h4_adx_v);
+    const rsiB = rsiBucket(r.h4_rsi_v);
+    const key  = `${sess}:${adxB}:${rsiB}`;
+    if (!fwdGroups[key]) fwdGroups[key] = { session: sess, adx_bucket: adxB, rsi_bucket: rsiB, rows: [] };
+    fwdGroups[key].rows.push(r);
+  }
+
+  await pool.query(`DELETE FROM forward_rulebook`);
+
+  let forwardRulebookRowsWritten = 0;
+
+  for (const { session, adx_bucket, rsi_bucket, rows: grp } of Object.values(fwdGroups)) {
+    const nTotal  = grp.length;
+    const pctUp4h = (grp.filter(r => r.fwd_return_4h > 0).length / nTotal) * 100;
+
+    const dxyKnown      = grp.filter(r => r.dxy_bias_at_signal != null);
+    const dxyRisingPct  = dxyKnown.length > 0 ? (dxyKnown.filter(r => r.dxy_bias_at_signal === 'rising').length  / nTotal) * 100 : null;
+    const dxyFallingPct = dxyKnown.length > 0 ? (dxyKnown.filter(r => r.dxy_bias_at_signal === 'falling').length / nTotal) * 100 : null;
+    const dxyFlatPct    = dxyKnown.length > 0 ? (dxyKnown.filter(r => r.dxy_bias_at_signal === 'flat').length    / nTotal) * 100 : null;
+
+    await pool.query(`
+      INSERT INTO forward_rulebook (
+        session, adx_bucket, rsi_bucket, n_total,
+        avg_fwd_1h, avg_fwd_4h, avg_fwd_eod, pct_up_4h,
+        avg_max_up_4h, avg_max_down_4h,
+        dxy_rising_pct, dxy_falling_pct, dxy_flat_pct,
+        sample_confidence, last_updated
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+    `, [
+      session, adx_bucket, rsi_bucket, nTotal,
+      avg(grp.map(r => r.fwd_return_1h)),
+      avg(grp.map(r => r.fwd_return_4h)),
+      avg(grp.map(r => r.fwd_return_eod)),
+      pctUp4h,
+      avg(grp.map(r => r.fwd_max_up_4h)),
+      avg(grp.map(r => r.fwd_max_down_4h)),
+      dxyRisingPct, dxyFallingPct, dxyFlatPct,
+      sampleConfidence(nTotal), now,
+    ]);
+
+    forwardRulebookRowsWritten++;
+  }
+
   // Step E — Summary
   return {
     rulebook_rows_written:                rulebookRowsWritten,
     combination_rows_written:             combinationRowsWritten,
     mechanical_rulebook_rows_written:     mechRulebookRowsWritten,
+    forward_rulebook_rows_written:        forwardRulebookRowsWritten,
     portfolios_processed:                 [2, 3],
     timestamp:                            now,
   };

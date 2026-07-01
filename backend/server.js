@@ -1222,6 +1222,18 @@ app.get('/api/analyst/mechanical-rulebook', async (req, res) => {
   }
 });
 
+app.get('/api/analyst/forward-rulebook', async (req, res) => {
+  try {
+    const { rows } = await database.pool.query(`
+      SELECT * FROM forward_rulebook
+      ORDER BY n_total DESC
+    `);
+    res.json({ rows, count: rows.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/analyst/rulebook/prompt', async (req, res) => {
   try {
     const pool = database.pool;

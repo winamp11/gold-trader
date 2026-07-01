@@ -407,6 +407,31 @@ class DatabaseService {
     await this.pool.query(`ALTER TABLE mechanical_rulebook ADD COLUMN IF NOT EXISTS dxy_falling_pct DOUBLE PRECISION`);
     await this.pool.query(`ALTER TABLE mechanical_rulebook ADD COLUMN IF NOT EXISTS dxy_flat_pct    DOUBLE PRECISION`);
 
+    // Forward rulebook: market behavior by condition bucket across ALL cycles
+    // (traded or not), aggregated from the forward-outcome labels. This is the
+    // selection-bias-free companion to the per-account rulebooks. Rebuilt on
+    // every analyst run. Values in price points; pct_up_4h in percent.
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS forward_rulebook (
+        id               SERIAL PRIMARY KEY,
+        session          TEXT,
+        adx_bucket       TEXT,
+        rsi_bucket       TEXT,
+        n_total          INTEGER NOT NULL,
+        avg_fwd_1h       DOUBLE PRECISION,
+        avg_fwd_4h       DOUBLE PRECISION,
+        avg_fwd_eod      DOUBLE PRECISION,
+        pct_up_4h        DOUBLE PRECISION,
+        avg_max_up_4h    DOUBLE PRECISION,
+        avg_max_down_4h  DOUBLE PRECISION,
+        dxy_rising_pct   DOUBLE PRECISION,
+        dxy_falling_pct  DOUBLE PRECISION,
+        dxy_flat_pct     DOUBLE PRECISION,
+        sample_confidence TEXT,
+        last_updated     TEXT NOT NULL
+      )
+    `);
+
     // Confirm row count unchanged after all DDL
     try {
       const r = await this.pool.query('SELECT COUNT(*) AS n FROM trades');
