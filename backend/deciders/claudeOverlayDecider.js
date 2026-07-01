@@ -264,7 +264,7 @@ function formatLessons(lessons) {
 
 // ── Decider ──────────────────────────────────────────────────────────────
 
-export async function decide(marketData, atr, portfolio, recentLessons, mechanicalProposal = null, openPositions = null, session = null) {
+export async function decide(marketData, atr, portfolio, recentLessons, mechanicalProposal = null, openPositions = null, session = null, rulebookStats = null) {
   // Nothing to overlay when mechanical did not produce a trade.
   if (!mechanicalProposal || mechanicalProposal.action !== 'TRADE') {
     return {
@@ -286,10 +286,13 @@ export async function decide(marketData, atr, portfolio, recentLessons, mechanic
     '',
     formatProposal(mechanicalProposal),
     '',
+    `YOUR STATISTICAL RULEBOOK (own trade history, aggregated by the analyst):`,
+    rulebookStats ?? 'No patterns with sufficient sample size yet.',
+    '',
     `RECENT LESSONS (${recentLessons?.length ?? 0}):`,
     formatLessons(recentLessons),
     '',
-    `Review the proposal above. Approve (TRADE), resize (TRADE with adjusted levels), or reject (VETO)?`,
+    `Review the proposal above. Resize and trade (TRADE with ATR-calibrated levels), approve as-is (TRADE), or reject the direction (VETO)?`,
   ].join('\n');
 
   const decision = await callDecider({ systemPrompt: SYSTEM, userContent, deciderName: 'overlay' });

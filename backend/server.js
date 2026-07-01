@@ -85,6 +85,31 @@ async function getOrFetchAdr() {
 }
 
 // ── Helper: open a real position for one portfolio ─────────────────────────
+// Compact own-account rulebook stats for a decider prompt.
+// Returns a short text block or null (never throws — a missing rulebook
+// must not block the cycle).
+async function getRulebookStatsFor(portfolioId) {
+  try {
+    const { rows } = await database.pool.query(`
+      SELECT tag, n_total, win_rate, expectancy, sample_confidence
+      FROM analyst_rulebook
+      WHERE portfolio_id = $1 AND n_total >= 3
+      ORDER BY n_total DESC
+      LIMIT 10
+    `, [portfolioId]);
+    if (rows.length === 0) return null;
+    const lines = rows.map(r => {
+      const wr  = (r.win_rate * 100).toFixed(0);
+      const exp = r.expectancy != null ? `${r.expectancy >= 0 ? '+' : ''}$${Math.round(r.expectancy)}` : 'n/a';
+      return `- ${r.tag}: ${wr}% WR over ${r.n_total} | expectancy ${exp} | ${r.sample_confidence}`;
+    });
+    return lines.join('\n');
+  } catch (err) {
+    console.warn(`⚠️  rulebook stats fetch failed (portfolio ${portfolioId}): ${err.message}`);
+    return null;
+  }
+}
+
 async function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwner, session = null }) {
   const tradeId = await database.saveTrade({
     signal_id:    signalId,
@@ -301,6 +326,10 @@ async function generateSignalIfTradingHours() {
     const overlayLessons = await database.getRecentLessons(overlayPortfolio.id);
     const soloLessons    = await database.getRecentLessons(soloPortfolio.id);
 
+    // Own-account statistical rulebook (analyst output) for each Claude prompt.
+    const overlayRulebook = await getRulebookStatsFor(overlayPortfolio.id);
+    const soloRulebook    = await getRulebookStatsFor(soloPortfolio.id);
+
     // ── Mechanical decider — pure market-analysis proposal ─────────────────
     // mechDecision reflects technical analysis ONLY — no position/budget gating.
     // It is ALWAYS passed to the overlay decider unchanged below.
@@ -388,7 +417,7 @@ async function generateSignalIfTradingHours() {
       overlayDecision = { action: 'NO_TRADE', direction: null, entry: null, stop: null, target: null, lots: null, reasoning: 'circuit breaker halt', tag: 'circuit_breaker_halt' };
     } else {
       overlayDecision = await claudeOverlayDecide(
-        marketData, atr, overlayPortfolio, overlayLessons, mechDecision, overlayOpenPositions, currentSession
+        marketData, atr, overlayPortfolio, overlayLessons, mechDecision, overlayOpenPositions, currentSession, overlayRulebook
       );
       if (overlayDecision.action === 'TRADE') {
         await openPosition({ portfolio: overlayPortfolio, decision: overlayDecision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
@@ -404,7 +433,7 @@ async function generateSignalIfTradingHours() {
       soloDecision = { action: 'NO_TRADE', direction: null, entry: null, stop: null, target: null, lots: null, reasoning: 'circuit breaker halt', tag: 'circuit_breaker_halt' };
     } else {
       soloDecision = await claudeSoloDecide(
-        marketData, atr, soloPortfolio, soloLessons, soloOpenPositions, null, currentSession
+        marketData, atr, soloPortfolio, soloLessons, soloOpenPositions, soloRulebook, currentSession
       );
       if (soloDecision.action === 'TRADE') {
         await openPosition({ portfolio: soloPortfolio, decision: soloDecision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
