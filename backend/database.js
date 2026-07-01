@@ -258,6 +258,18 @@ class DatabaseService {
     await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS dxy_price_at_signal       DOUBLE PRECISION`);
     await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS dxy_change_pct_at_signal  DOUBLE PRECISION`);
 
+    // Forward-outcome labels: what price actually did AFTER each signal row,
+    // filled in later by the forward labeler for EVERY cycle (traded or not).
+    // Units are price points (USD). fwd_max_up/down are positive magnitudes of
+    // the best/worst excursion within 4h of the signal. eod = 21:00 UAE close.
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS price_at_signal  DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS fwd_return_1h    DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS fwd_return_4h    DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS fwd_return_eod   DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS fwd_max_up_4h    DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS fwd_max_down_4h  DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS fwd_labeled_at   TEXT`);
+
     // MAE/MFE raw material: price extremes observed while the position was held
     // (from entry trigger to close). MAE/MFE derive from these vs entry_price.
     await this.pool.query(`ALTER TABLE trades ADD COLUMN IF NOT EXISTS max_price_during DOUBLE PRECISION`);
@@ -588,7 +600,8 @@ class DatabaseService {
         h1_atr_at_signal, m30_atr_at_signal,
         h4_adx_at_signal, h1_adx_at_signal, m30_adx_at_signal,
         day_high_at_signal, day_low_at_signal, adr_at_signal, adr_consumed_pct,
-        dxy_bias_at_signal, dxy_price_at_signal, dxy_change_pct_at_signal
+        dxy_bias_at_signal, dxy_price_at_signal, dxy_change_pct_at_signal,
+        price_at_signal
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
         $12,$13,$14,$15,$16,$17,$18,$19,$20,
@@ -601,7 +614,8 @@ class DatabaseService {
         $44,$45,
         $46,$47,$48,
         $49,$50,$51,$52,
-        $53,$54,$55
+        $53,$54,$55,
+        $56
       ) RETURNING id
     `, [
       signalData.timestamp,
@@ -660,6 +674,7 @@ class DatabaseService {
       signalData.dxyBiasAtSignal      ?? null,
       signalData.dxyPriceAtSignal     ?? null,
       signalData.dxyChangePctAtSignal ?? null,
+      signalData.currentPrice         ?? null,
     ]);
 
     const id = result.rows[0].id;
