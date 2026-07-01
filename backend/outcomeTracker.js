@@ -49,7 +49,7 @@ class OutcomeTracker {
     }
     for (const [, shadow] of this.shadowTracking) {
       const ageHours = (now - shadow.startTime) / 3600000;
-      if (ageHours >= 4) {
+      if (ageHours >= 4 && !shadow.entryTriggered) {
         await this.finalizeShadow(shadow, 'EXPIRED', null);
       }
     }
@@ -168,6 +168,10 @@ class OutcomeTracker {
       return;
     }
 
+    // Triggered shadows ride to stop/target/window-close exactly like real
+    // positions — no time expiry. Expiring them at 4h undercounted missed
+    // wins (a veto that would have won in hour 5 counted as EXPIRED), which
+    // flattered the veto record in the counterfactual accounting.
     if (direction === 'LONG') {
       if (currentPrice <= stopLoss)    await this.finalizeShadow(shadow, 'STOP_HIT',   currentPrice);
       else if (currentPrice >= target) await this.finalizeShadow(shadow, 'TARGET_HIT', currentPrice);
@@ -175,7 +179,6 @@ class OutcomeTracker {
       if (currentPrice >= stopLoss)    await this.finalizeShadow(shadow, 'STOP_HIT',   currentPrice);
       else if (currentPrice <= target) await this.finalizeShadow(shadow, 'TARGET_HIT', currentPrice);
     }
-    if (ageHours >= 4) await this.finalizeShadow(shadow, 'EXPIRED', null);
   }
 
   // ── Finalization ──────────────────────────────────────────────────────────
