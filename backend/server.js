@@ -12,6 +12,7 @@ import { decide as claudeSoloDecide }    from './deciders/claudeSoloDecider.js';
 import { VALUE_PER_LOT } from './contractSpec.js';
 import { TAG_TAXONOMY } from './tagTaxonomy.js';
 import { runAnalysis, formatRulebookPrompt } from './analyst.js';
+import { runForwardLabeling } from './forwardLabeler.js';
 
 dotenv.config();
 
@@ -568,6 +569,13 @@ function startBackgroundSignalGeneration() {
   setInterval(() => generateSignalIfTradingHours(), 5 * 60 * 1000);
 }
 
+// ── Forward labeler cron — hourly, plus one pass shortly after boot ───────
+function startForwardLabeler() {
+  console.log('🏷️  Starting forward labeler (hourly)...');
+  setTimeout(() => runForwardLabeling(database.pool), 2 * 60 * 1000);
+  setInterval(() => runForwardLabeling(database.pool), 60 * 60 * 1000);
+}
+
 // ── REST API ───────────────────────────────────────────────────────────────
 
 app.get('/', (req, res) => {
@@ -1028,6 +1036,34 @@ app.post('/api/autochartist/patterns', async (req, res) => {
 
 // ── Analyst endpoints ─────────────────────────────────────────────────────
 
+// Manual labeler trigger — used for backfilling history. Call repeatedly
+// until remaining=0; each run is capped at ?max_calls M1 fetches (default 6).
+app.post('/api/labeler/run', async (req, res) => {
+  try {
+    const maxApiCalls = Math.min(parseInt(req.query.max_calls) || 6, 20);
+    const result = await runForwardLabeling(database.pool, { maxApiCalls });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Labeling progress snapshot.
+app.get('/api/labeler/status', async (req, res) => {
+  try {
+    const { rows } = await database.pool.query(`
+      SELECT COUNT(*)                                        AS total,
+             COUNT(fwd_labeled_at)                           AS labeled,
+             COUNT(fwd_return_4h)                            AS with_4h_label,
+             MIN(timestamp) FILTER (WHERE fwd_labeled_at IS NULL) AS oldest_unlabeled
+      FROM signals
+    `);
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/analyst/run', async (req, res) => {
   try {
     const result = await runAnalysis(database.pool);
@@ -1395,6 +1431,7 @@ app.listen(PORT, () => {
 
   startBackgroundSignalGeneration();
   startPricePoller();
+  startForwardLabeler();
 });
 
 process.on('SIGINT', () => {
