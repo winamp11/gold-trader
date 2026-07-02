@@ -478,11 +478,13 @@ export async function runAnalysis(pool) {
     const pctStopHit     = (grp.filter(r => r.exit_reason === 'STOP_HIT').length     / nTotal) * 100;
     const pctWindowClose = (grp.filter(r => r.exit_reason === 'WINDOW_CLOSE').length  / nTotal) * 100;
 
-    // DXY bias distribution — passive correlation signal, not a grouping key
+    // DXY bias distribution — passive correlation signal, not a grouping key.
+    // Percentages are of DXY-known rows (capture began 2026-07) so they sum
+    // to 100 instead of being diluted by pre-capture history.
     const dxyKnown     = grp.filter(r => r.dxy_bias_at_signal != null);
-    const dxyRisingPct  = dxyKnown.length > 0 ? (dxyKnown.filter(r => r.dxy_bias_at_signal === 'rising').length  / nTotal) * 100 : null;
-    const dxyFallingPct = dxyKnown.length > 0 ? (dxyKnown.filter(r => r.dxy_bias_at_signal === 'falling').length / nTotal) * 100 : null;
-    const dxyFlatPct    = dxyKnown.length > 0 ? (dxyKnown.filter(r => r.dxy_bias_at_signal === 'flat').length    / nTotal) * 100 : null;
+    const dxyRisingPct  = dxyKnown.length > 0 ? (dxyKnown.filter(r => r.dxy_bias_at_signal === 'rising').length  / dxyKnown.length) * 100 : null;
+    const dxyFallingPct = dxyKnown.length > 0 ? (dxyKnown.filter(r => r.dxy_bias_at_signal === 'falling').length / dxyKnown.length) * 100 : null;
+    const dxyFlatPct    = dxyKnown.length > 0 ? (dxyKnown.filter(r => r.dxy_bias_at_signal === 'flat').length    / dxyKnown.length) * 100 : null;
 
     const lastTradeDate = grp
       .map(r => r.exit_timestamp)
@@ -571,9 +573,9 @@ export async function runAnalysis(pool) {
     const pctUp4h = (grp.filter(r => r.fwd_return_4h > 0).length / nTotal) * 100;
 
     const dxyKnown      = grp.filter(r => r.dxy_bias_at_signal != null);
-    const dxyRisingPct  = dxyKnown.length > 0 ? (dxyKnown.filter(r => r.dxy_bias_at_signal === 'rising').length  / nTotal) * 100 : null;
-    const dxyFallingPct = dxyKnown.length > 0 ? (dxyKnown.filter(r => r.dxy_bias_at_signal === 'falling').length / nTotal) * 100 : null;
-    const dxyFlatPct    = dxyKnown.length > 0 ? (dxyKnown.filter(r => r.dxy_bias_at_signal === 'flat').length    / nTotal) * 100 : null;
+    const dxyRisingPct  = dxyKnown.length > 0 ? (dxyKnown.filter(r => r.dxy_bias_at_signal === 'rising').length  / dxyKnown.length) * 100 : null;
+    const dxyFallingPct = dxyKnown.length > 0 ? (dxyKnown.filter(r => r.dxy_bias_at_signal === 'falling').length / dxyKnown.length) * 100 : null;
+    const dxyFlatPct    = dxyKnown.length > 0 ? (dxyKnown.filter(r => r.dxy_bias_at_signal === 'flat').length    / dxyKnown.length) * 100 : null;
 
     await pool.query(`
       INSERT INTO forward_rulebook (
