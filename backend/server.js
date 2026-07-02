@@ -448,7 +448,14 @@ async function generateSignalIfTradingHours() {
         marketData, atr, overlayPortfolio, overlayLessons, mechDecision, overlayOpenPositions, currentSession, overlayRulebook
       );
       if (overlayDecision.action === 'TRADE') {
-        await openPosition({ portfolio: overlayPortfolio, decision: overlayDecision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
+        // Position cap (same as mechanical's 3): post-rework the overlay
+        // approves most proposals, which stacks correlated same-direction
+        // positions up against the 10% risk budget without a cap.
+        if (overlayOpenPositions.length >= 3) {
+          console.log(`⏸️  [OVERLAY] Position cap: ${overlayOpenPositions.length}/3 open — no new position this cycle`);
+        } else {
+          await openPosition({ portfolio: overlayPortfolio, decision: overlayDecision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
+        }
       } else if (overlayDecision.action === 'VETO') {
         await openVetoShadow({ portfolio: overlayPortfolio, decision: overlayDecision, currentPrice, session: currentSession });
       }
@@ -464,7 +471,11 @@ async function generateSignalIfTradingHours() {
         marketData, atr, soloPortfolio, soloLessons, soloOpenPositions, soloRulebook, currentSession
       );
       if (soloDecision.action === 'TRADE') {
-        await openPosition({ portfolio: soloPortfolio, decision: soloDecision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
+        if (soloOpenPositions.length >= 3) {
+          console.log(`⏸️  [SOLO] Position cap: ${soloOpenPositions.length}/3 open — no new position this cycle`);
+        } else {
+          await openPosition({ portfolio: soloPortfolio, decision: soloDecision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
+        }
       } else if (soloDecision.action === 'VETO') {
         await openVetoShadow({ portfolio: soloPortfolio, decision: soloDecision, currentPrice, session: currentSession });
       }
