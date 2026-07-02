@@ -349,6 +349,14 @@
   font-size: 12px;
   color: var(--text2);
   line-height: 1.5;
+  cursor: pointer;
+}
+
+.pin-item__text--clamped {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .pin-empty {
@@ -429,4 +437,6 @@
   .pin-col { border-right: none; border-bottom: 1px solid var(--border); }
   .rulebook-table th:nth-child(n+5),
   .rulebook-table td:nth-child(n+5) { display: none; }
+  /* subtitle collides with the title at phone widths */
+  .analyst-header__sub { display: none; }
 }

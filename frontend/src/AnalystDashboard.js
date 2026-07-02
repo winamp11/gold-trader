@@ -141,21 +141,32 @@ function RulebookRow({ row }) {
 
 // ── Pinned lessons ────────────────────────────────────────────────────────────
 
+function PinItem({ pin }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="pin-item">
+      <div className="pin-item__tag">
+        <span>{pin.tag}</span>
+        <span className="pin-item__losses">{pin.tag_loss_count} losses</span>
+      </div>
+      <div
+        className={`pin-item__text ${expanded ? '' : 'pin-item__text--clamped'}`}
+        onClick={() => setExpanded(e => !e)}
+        title={expanded ? 'Click to collapse' : 'Click to read full lesson'}
+      >
+        {pin.lesson_text}
+      </div>
+    </div>
+  );
+}
+
 function PinnedCol({ label, color, pins }) {
   return (
     <div className="pin-col">
       <div className="pin-col__label" style={{ color }}>{label}</div>
       {pins.length === 0
         ? <div className="pin-empty">No pins yet — fires after a tag accumulates 2+ losses</div>
-        : pins.map(p => (
-            <div className="pin-item" key={p.id}>
-              <div className="pin-item__tag">
-                <span>{p.tag}</span>
-                <span className="pin-item__losses">{p.tag_loss_count} losses</span>
-              </div>
-              <div className="pin-item__text">{p.lesson_text}</div>
-            </div>
-          ))
+        : pins.map(p => <PinItem pin={p} key={p.id} />)
       }
     </div>
   );
@@ -240,6 +251,8 @@ function CrossAccountSection({ rulebook }) {
 // ── Mechanical rulebook ───────────────────────────────────────────────────────
 
 function MechRulebookSection({ rows }) {
+  const [showAll, setShowAll] = useState(false);
+
   if (!rows || rows.length === 0) {
     return <div className="analyst-empty">No mechanical rulebook data yet — run analysis first</div>;
   }
@@ -250,8 +263,19 @@ function MechRulebookSection({ rows }) {
     return cDiff !== 0 ? cDiff : b.n_total - a.n_total;
   });
 
+  // n=1-2 buckets are noise; hide them behind a toggle so the signal rows lead
+  const hiddenCount = sorted.filter(r => r.sample_confidence === 'insufficient').length;
+  const visible = showAll ? sorted : sorted.filter(r => r.sample_confidence !== 'insufficient');
+
   return (
     <div style={{ overflowX: 'auto' }}>
+      {hiddenCount > 0 && (
+        <div style={{ padding: '8px 18px 0' }}>
+          <button className="filter-tab" onClick={() => setShowAll(s => !s)}>
+            {showAll ? `hide ${hiddenCount} insufficient` : `show all (+${hiddenCount} insufficient)`}
+          </button>
+        </div>
+      )}
       <table className="rulebook-table">
         <thead>
           <tr>
@@ -270,7 +294,7 @@ function MechRulebookSection({ rows }) {
           </tr>
         </thead>
         <tbody>
-          {sorted.map((r, i) => {
+          {visible.map((r, i) => {
             const expVal = r.expectancy;
             return (
               <tr key={i}>
