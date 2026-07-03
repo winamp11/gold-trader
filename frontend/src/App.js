@@ -561,12 +561,89 @@ function MarketPanel({ snapshot, missed }) {
   );
 }
 
+// ─── Prop-firm simulation panel (FTMO rule gauges) ───────────────────────────
+
+function PropGauge({ label, value, detail, tone }) {
+  const color = tone === 'bad' ? 'var(--neg)' : tone === 'warn' ? '#fb923c' : 'var(--pos)';
+  return (
+    <div style={{ minWidth: 150, flex: 1 }}>
+      <div style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 3 }}>
+        {label}
+      </div>
+      <div style={{ fontFamily: 'var(--mono)', fontSize: 15, fontWeight: 700, color }}>{value}</div>
+      {detail && <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--text3)', marginTop: 2 }}>{detail}</div>}
+    </div>
+  );
+}
+
+function PropPanel({ prop }) {
+  if (!prop) return null;
+  const usd0 = n => `${n < 0 ? '-' : '+'}$${Math.abs(n).toFixed(0)}`;
+
+  const dayTone    = prop.day_pnl <= -1200 ? 'bad' : prop.day_pnl < 0 ? 'warn' : 'ok';
+  const equityRoom = prop.balance - prop.trailing_halt_at;
+  const ddTone     = equityRoom < 3000 ? 'bad' : equityRoom < 6000 ? 'warn' : 'ok';
+  const bestTone   = prop.best_day_rule_ok ? 'ok' : 'warn';
+  const tgtPct     = Math.max(0, Math.min(100, prop.target_progress_pct));
+
+  let statusChip = null;
+  if (prop.hard_halted)             statusChip = ['HARD HALTED', 'var(--neg)'];
+  else if (prop.halted_today)       statusChip = ['DAY HALTED', 'var(--neg)'];
+  else if (prop.profit_governor_hit) statusChip = ['GOVERNOR', '#fb923c'];
+
+  return (
+    <div className="account-panel" style={{ borderLeftColor: '#a78bfa' }}>
+      <div className="panel-headline">
+        <div className="panel-headline__top">
+          <span className="panel-headline__dot" style={{ background: '#a78bfa' }} />
+          <span className="panel-headline__name">Prop Sim · FTMO 1-Step</span>
+          {statusChip && (
+            <span className="panel-headline__open" style={{ color: statusChip[1], borderColor: statusChip[1] }}>
+              {statusChip[0]}
+            </span>
+          )}
+        </div>
+        <div className="panel-headline__balance">
+          ${prop.balance.toLocaleString('en-US', { maximumFractionDigits: 2 })}
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, padding: '4px 0 2px' }}>
+          <PropGauge
+            label="Day P&L / halt"
+            value={usd0(prop.day_pnl)}
+            detail={`halts at ${usd0(prop.daily_halt_at)}`}
+            tone={dayTone}
+          />
+          <PropGauge
+            label="Trailing DD room"
+            value={usd0(equityRoom).replace('+', '')}
+            detail={`kill at $${prop.trailing_halt_at.toLocaleString()}`}
+            tone={ddTone}
+          />
+          <PropGauge
+            label="Target progress"
+            value={`${tgtPct.toFixed(0)}%`}
+            detail={`$${prop.profit_target.toLocaleString()} to pass`}
+            tone="ok"
+          />
+          <PropGauge
+            label="Best-day rule"
+            value={prop.best_day_ratio != null ? `${(prop.best_day_ratio * 100).toFixed(0)}%` : '—'}
+            detail="must be ≤ 50%"
+            tone={bestTone}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [showCalc,    setShowCalc]    = useState(false);
   const [showAnalyst, setShowAnalyst] = useState(false);
   const [accounts,    setAccounts]    = useState(null);
+  const [propStatus,  setPropStatus]  = useState(null);
   const [equity,      setEquity]      = useState(null);
   const [positions,   setPositions]   = useState([]);
   const [snapshot,    setSnapshot]    = useState(null);
@@ -593,7 +670,7 @@ export default function App() {
       const [
         accRes, equityRes, posRes, snapRes, missedRes,
         mechTR, overlayTR, soloTR,
-        overlayJR, soloJR,
+        overlayJR, soloJR, propRes,
       ] = await Promise.all([
         fetch(`${API}/api/accounts`),
         fetch(`${API}/api/equity`),
@@ -605,6 +682,7 @@ export default function App() {
         fetch(`${API}/api/trades/recent?account=claude_solo&limit=${TRADE_PAGE}`),
         fetch(`${API}/api/journal?account=claude_overlay&limit=${JOURNAL_LIMIT}`),
         fetch(`${API}/api/journal?account=claude_solo&limit=${JOURNAL_LIMIT}`),
+        fetch(`${API}/api/prop/status`),
       ]);
 
       const [
@@ -616,6 +694,7 @@ export default function App() {
         mechTR.json(), overlayTR.json(), soloTR.json(),
         overlayJR.json(), soloJR.json(),
       ]);
+      setPropStatus(propRes.ok ? await propRes.json() : null);
 
       setAccounts(accData.accounts || []);
       setEquity(equityData.equity || null);
@@ -733,6 +812,8 @@ export default function App() {
           journal={journal.claude_solo}
           onLoadMoreTrades={() => loadMoreTrades('claude_solo')}
         />
+
+        <PropPanel prop={propStatus} />
 
         <MarketPanel snapshot={snapshot} missed={missed} />
       </main>
