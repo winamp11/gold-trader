@@ -123,6 +123,18 @@ class DatabaseService {
       ON CONFLICT (name) DO NOTHING
     `);
 
+    // FTMO-style prop-firm simulation account: reuses the overlay's decisions
+    // through a strict risk envelope (see PROP config in server.js).
+    await this.pool.query(`
+      INSERT INTO portfolios (name, starting_balance, current_balance) VALUES
+        ('prop_sim', 100000, 100000)
+      ON CONFLICT (name) DO NOTHING
+    `);
+
+    // Highest balance recorded at any day boundary — anchor for FTMO's
+    // trailing Maximum Loss rule (limit = high water − 10% of initial).
+    await this.pool.query(`ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS high_water_balance DOUBLE PRECISION`);
+
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS trades (
         id SERIAL PRIMARY KEY,
@@ -945,6 +957,13 @@ class DatabaseService {
     await this.pool.query(
       'UPDATE portfolios SET circuit_breaker_date = $1 WHERE id = $2',
       [dateStr, portfolioId]
+    );
+  }
+
+  async setHighWaterBalance(portfolioId, balance) {
+    await this.pool.query(
+      'UPDATE portfolios SET high_water_balance = $1 WHERE id = $2',
+      [balance, portfolioId]
     );
   }
 
