@@ -34,6 +34,24 @@ let wasInTradingHours  = false;
 const circuitBreakerState = {};
 let currentSessionDate    = null;  // UAE date of the last initSessionDay() call
 
+// ── FTMO prop-firm simulation (portfolio 'prop_sim') ───────────────────────
+// Reuses the overlay's decision each cycle (no extra Claude calls) through a
+// strict risk envelope modeled on FTMO 1-Step rules. Halt thresholds sit at
+// 80% of FTMO's limits as a slippage/spread buffer.
+// FTMO's day boundary is 00:00 CE(S)T; all positions are flat by 21:00 UAE
+// (19:00 CEST), so the day-start balance equals the midnight balance and the
+// session day maps 1:1 onto the FTMO day.
+const PROP = {
+  name:                'prop_sim',
+  initialCapital:      100000,
+  riskPerTrade:        500,     // 0.5% of INITIAL capital (FTMO limits are % of initial)
+  maxOpenPositions:    3,
+  dailyLossHalt:       2400,    // halt day at −$2,400 (FTMO Max Daily Loss: 3% = $3,000)
+  totalDrawdownHalt:   8000,    // permanent halt at high-water −$8,000 (FTMO Max Loss: 10% = $10,000)
+  dailyProfitGovernor: 2000,    // no new entries after +$2,000 closed on the day (Best Day rule ≤50%)
+};
+let propHardHalted = null;      // ISO date string when the trailing Max Loss guard fired, else null
+
 // ── Session range (tracked from 06:00 UAE open, reset daily) ──────────────
 let sessionHigh      = null;
 let sessionLow       = null;
@@ -259,6 +277,14 @@ async function initSessionDay() {
     }
     circuitBreakerState[p.id] = { halted: haltedToday, haltedOnDate: haltedToday ? today : null, dayStartBalance };
     if (haltedToday) console.log(`🛑 [CIRCUIT BREAKER] ${p.name} still halted (restored)`);
+
+    // FTMO trailing Max Loss anchor: high water = highest day-boundary balance
+    // (or initial capital if higher). Positions are flat overnight, so the
+    // day-start balance IS the midnight balance.
+    if (p.name === PROP.name) {
+      const hw = Math.max(p.high_water_balance ?? PROP.initialCapital, p.current_balance);
+      if (hw !== p.high_water_balance) await database.setHighWaterBalance(p.id, hw);
+    }
   }
   currentSessionDate = today;
   console.log(`🌅 [SESSION] Day-start balances: ${portfolios.map(p => `${p.name}=$${(circuitBreakerState[p.id].dayStartBalance).toFixed(2)}`).join(', ')}`);
@@ -281,11 +307,13 @@ async function checkCircuitBreakers(currentPrice) {
     const realized   = p.current_balance - state.dayStartBalance;
     const unrealized = computeUnrealizedPnl(p.id, currentPrice);
     const dayPnl     = realized + unrealized;
-    const threshold  = -(state.dayStartBalance * 0.10);
+    const isProp     = p.name === PROP.name;
+    // prop_sim halts at FTMO's Max Daily Loss (with buffer); others keep -10%
+    const threshold  = isProp ? -PROP.dailyLossHalt : -(state.dayStartBalance * 0.10);
 
     if (dayPnl <= threshold) {
       console.log(
-        `🛑 [CIRCUIT BREAKER] ${p.name} hit -10% day loss` +
+        `🛑 [CIRCUIT BREAKER] ${p.name} hit ${isProp ? 'FTMO daily-loss' : '-10%'} day loss` +
         ` (realized $${realized.toFixed(2)} + unrealized $${unrealized.toFixed(2)} = $${dayPnl.toFixed(2)},` +
         ` threshold $${threshold.toFixed(2)}) — flattened and halted until next session`
       );
@@ -294,6 +322,22 @@ async function checkCircuitBreakers(currentPrice) {
       state.haltedOnDate = today;
       await database.setCircuitBreakerDate(p.id, today);
       console.log(`🛑 [CIRCUIT BREAKER] ${p.name} — ${closed} position(s)/shadow(s) closed, halted for session day ${today}`);
+    }
+
+    // FTMO trailing Max Loss (10% of initial below high-water): permanent halt.
+    if (isProp && !propHardHalted) {
+      const equity     = p.current_balance + unrealized;
+      const highWater  = p.high_water_balance ?? PROP.initialCapital;
+      const totalLimit = highWater - PROP.totalDrawdownHalt;
+      if (equity <= totalLimit) {
+        console.log(
+          `🛑 [PROP HARD HALT] ${p.name} equity $${equity.toFixed(2)} ≤ trailing limit $${totalLimit.toFixed(2)}` +
+          ` (high water $${highWater.toFixed(2)} − $${PROP.totalDrawdownHalt}) — account permanently halted`
+        );
+        await outcomeTracker.forceClosePortfolio(p.id, currentPrice);
+        propHardHalted = today;
+        await database.setServiceState('prop_hard_halt', JSON.stringify({ date: today, equity, limit: totalLimit }));
+      }
     }
   }
 }
@@ -459,6 +503,43 @@ async function generateSignalIfTradingHours() {
       } else if (overlayDecision.action === 'VETO') {
         await openVetoShadow({ portfolio: overlayPortfolio, decision: overlayDecision, currentPrice, session: currentSession });
       }
+    }
+
+    // ── Prop-sim executor — overlay's decision through the FTMO envelope ──
+    // No Claude call of its own: same brain, prop-firm risk rules.
+    try {
+      const propPortfolio = await database.getPortfolioByName(PROP.name);
+      if (propPortfolio && overlayDecision.action === 'TRADE' && overlayDecision.entry != null && overlayDecision.stop != null) {
+        const propOpen  = outcomeTracker.getOpenPositionsForPortfolio(propPortfolio.id);
+        const propState = circuitBreakerState[propPortfolio.id];
+        const dayRealized = propState ? propPortfolio.current_balance - propState.dayStartBalance : 0;
+
+        let skip = null;
+        if (propHardHalted)                                   skip = `hard-halted since ${propHardHalted} (trailing Max Loss)`;
+        else if (isHaltedToday(propPortfolio.id))             skip = 'FTMO daily-loss halt active';
+        else if (propOpen.length >= PROP.maxOpenPositions)    skip = `position cap ${propOpen.length}/${PROP.maxOpenPositions}`;
+        else if (dayRealized >= PROP.dailyProfitGovernor)     skip = `profit governor: day P&L $${dayRealized.toFixed(0)} ≥ $${PROP.dailyProfitGovernor} (Best Day rule)`;
+
+        const stopDist = Math.abs(overlayDecision.entry - overlayDecision.stop);
+        if (!skip && !(stopDist > 0)) skip = 'invalid stop distance';
+
+        if (skip) {
+          console.log(`⏸️  [PROP] no entry — ${skip}`);
+        } else {
+          // Fixed $ risk per trade, % of INITIAL capital as FTMO measures it
+          const lots = Math.max(0.01, Math.min(Math.floor((PROP.riskPerTrade / (stopDist * VALUE_PER_LOT)) * 100) / 100, 1.0));
+          await openPosition({
+            portfolio:     propPortfolio,
+            decision:      { ...overlayDecision, lots },
+            signalId,
+            currentPrice,
+            isSignalOwner: false,
+            session:       currentSession,
+          });
+        }
+      }
+    } catch (propErr) {
+      console.error(`❌ [PROP] executor error (cycle continues): ${propErr.message}`);
     }
 
     // ── Claude Solo decider ───────────────────────────────────────────────
@@ -1059,6 +1140,57 @@ app.post('/api/labeler/run', async (req, res) => {
   }
 });
 
+// FTMO prop-sim account status: all four rule gauges in one payload.
+app.get('/api/prop/status', async (req, res) => {
+  try {
+    const p = await database.getPortfolioByName(PROP.name);
+    if (!p) return res.status(404).json({ error: 'prop_sim portfolio not found' });
+
+    const state       = circuitBreakerState[p.id];
+    const dayStart    = state?.dayStartBalance ?? p.day_start_balance ?? p.current_balance;
+    const dayPnl      = p.current_balance - dayStart;
+    const highWater   = p.high_water_balance ?? PROP.initialCapital;
+
+    // Best Day rule: best positive day ≤ 50% of the sum of positive days
+    const { rows: days } = await database.pool.query(`
+      SELECT date, realized_pnl FROM account_pnl_daily
+      WHERE portfolio_id = $1 AND realized_pnl > 0
+    `, [p.id]);
+    const positiveDaysProfit = days.reduce((s, d) => s + d.realized_pnl, 0);
+    const bestDay            = days.reduce((m, d) => d.realized_pnl > (m?.realized_pnl ?? 0) ? d : m, null);
+    const bestDayRatio       = positiveDaysProfit > 0 && bestDay ? bestDay.realized_pnl / positiveDaysProfit : null;
+
+    res.json({
+      balance:              p.current_balance,
+      initial_capital:      PROP.initialCapital,
+      profit_target:        PROP.initialCapital * 1.10,
+      target_progress_pct:  ((p.current_balance - PROP.initialCapital) / (PROP.initialCapital * 0.10)) * 100,
+      day_start_balance:    dayStart,
+      day_pnl:              dayPnl,
+      daily_halt_at:        -PROP.dailyLossHalt,
+      daily_budget_left:    PROP.dailyLossHalt + Math.min(dayPnl, 0),
+      high_water:           highWater,
+      trailing_halt_at:     highWater - PROP.totalDrawdownHalt,
+      halted_today:         isHaltedToday(p.id),
+      hard_halted:          propHardHalted,
+      profit_governor_hit:  dayPnl >= PROP.dailyProfitGovernor,
+      best_day:             bestDay ? { date: bestDay.date, pnl: bestDay.realized_pnl } : null,
+      positive_days_profit: positiveDaysProfit,
+      best_day_ratio:       bestDayRatio,
+      best_day_rule_ok:     bestDayRatio == null || bestDayRatio <= 0.5,
+      rules: {
+        risk_per_trade:        PROP.riskPerTrade,
+        max_open_positions:    PROP.maxOpenPositions,
+        daily_loss_halt:       PROP.dailyLossHalt,
+        total_drawdown_halt:   PROP.totalDrawdownHalt,
+        daily_profit_governor: PROP.dailyProfitGovernor,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Labeling progress snapshot.
 app.get('/api/labeler/status', async (req, res) => {
   try {
@@ -1320,6 +1452,15 @@ await database.init();
 
 // Restore the day's session range (survives redeploys).
 await restoreSessionRange();
+
+// Restore the prop hard-halt flag (a fired trailing Max Loss is permanent).
+try {
+  const raw = await database.getServiceState('prop_hard_halt');
+  if (raw) {
+    propHardHalted = JSON.parse(raw).date ?? 'unknown';
+    console.log(`🛑 [PROP] hard halt restored (fired ${propHardHalted})`);
+  }
+} catch { /* absent = never fired */ }
 
 // Restore circuit-breaker state from DB (handles server restarts mid-session).
 {
