@@ -138,11 +138,17 @@ class OutcomeTracker {
     }
 
     if (direction === 'LONG') {
-      if (currentPrice <= stopLoss)    await this.finalizePosition(tracking, 'STOP_HIT',   currentPrice);
-      else if (currentPrice >= target) await this.finalizePosition(tracking, 'TARGET_HIT', currentPrice);
+      if (currentPrice <= stopLoss)    return this.finalizePosition(tracking, 'STOP_HIT',   currentPrice);
+      else if (currentPrice >= target) return this.finalizePosition(tracking, 'TARGET_HIT', currentPrice);
     } else {
-      if (currentPrice >= stopLoss)    await this.finalizePosition(tracking, 'STOP_HIT',   currentPrice);
-      else if (currentPrice <= target) await this.finalizePosition(tracking, 'TARGET_HIT', currentPrice);
+      if (currentPrice >= stopLoss)    return this.finalizePosition(tracking, 'STOP_HIT',   currentPrice);
+      else if (currentPrice <= target) return this.finalizePosition(tracking, 'TARGET_HIT', currentPrice);
+    }
+
+    // Time-based exit (rulebook positions): hold for exactly the horizon the
+    // forward label measured, then close at market as MANAGED_CLOSE.
+    if (tracking.timeExitHours != null && ageHours >= tracking.timeExitHours) {
+      await this.finalizePosition(tracking, 'MANAGED_CLOSE', currentPrice);
     }
   }
 
@@ -197,7 +203,7 @@ class OutcomeTracker {
 
     if (tracking.type === 'GREEN' &&
         (outcome === 'TARGET_HIT' || outcome === 'STOP_HIT' ||
-         ((outcome === 'WINDOW_CLOSE' || outcome === 'CIRCUIT_BREAKER') && tracking.entryTriggered))) {
+         ((outcome === 'WINDOW_CLOSE' || outcome === 'CIRCUIT_BREAKER' || outcome === 'MANAGED_CLOSE') && tracking.entryTriggered))) {
       const lots = tracking.lots || 0.01;
       const priceMove = tracking.direction === 'LONG'
         ? fillPrice - tracking.entryPrice
