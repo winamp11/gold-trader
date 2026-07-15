@@ -60,7 +60,8 @@ const PROP = {
     holdHours:       4,        // exit horizon = the label's horizon
     stopExcursionX:  2.5,      // disaster stop = 2.5× the bucket's avg adverse excursion
     minStopPoints:   15,
-    lastEntryUaeMin: 17 * 60,  // no entries after 17:00 UAE — full 4h must fit before the 21:00 flush
+    // Entries allowed for the full trading window; late positions simply get
+    // WINDOW_CLOSE'd at 21:00 UAE before completing the 4h hold.
   },
 };
 let propHardHalted = null;      // ISO date string when the trailing Max Loss guard fired, else null
@@ -530,14 +531,12 @@ async function generateSignalIfTradingHours() {
         const propOpen    = outcomeTracker.getOpenPositionsForPortfolio(propPortfolio.id);
         const propState   = circuitBreakerState[propPortfolio.id];
         const dayRealized = propState ? propPortfolio.current_balance - propState.dayStartBalance : 0;
-        const uaeNowMin   = (() => { const d = new Date(Date.now() + 4 * 3600000); return d.getUTCHours() * 60 + d.getUTCMinutes(); })();
 
         let skip = null;
         if (propHardHalted)                               skip = `hard-halted since ${propHardHalted} (trailing Max Loss)`;
         else if (isHaltedToday(propPortfolio.id))         skip = 'FTMO daily-loss halt active';
         else if (propOpen.length >= 1)                    skip = 'position already open (rulebook trades one at a time)';
         else if (dayRealized >= PROP.dailyProfitGovernor) skip = `profit governor: day P&L $${dayRealized.toFixed(0)} ≥ $${PROP.dailyProfitGovernor} (Best Day rule)`;
-        else if (uaeNowMin >= PROP.rule.lastEntryUaeMin)  skip = 'past 17:00 UAE — full 4h hold no longer fits before window close';
 
         let bucketDesc = null;
         if (!skip) {
@@ -1237,6 +1236,38 @@ app.get('/api/prop/status', async (req, res) => {
         daily_profit_governor: PROP.dailyProfitGovernor,
       },
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Reset prop_sim as a fresh FTMO challenge: balance, high-water and halts
+// back to initial. Trade history stays in the tables (the old attempt's
+// record); only the account state resets — "buying a new challenge".
+app.post('/api/prop/reset', async (req, res) => {
+  try {
+    const p = await database.getPortfolioByName(PROP.name);
+    if (!p) return res.status(404).json({ error: 'prop_sim portfolio not found' });
+
+    const open = outcomeTracker.getOpenPositionsForPortfolio(p.id);
+    if (open.length > 0 && lastKnownPrice) {
+      await outcomeTracker.forceClosePortfolio(p.id, lastKnownPrice);
+    }
+
+    await database.pool.query(
+      `UPDATE portfolios
+       SET current_balance = $1, high_water_balance = $1, day_start_balance = $1, circuit_breaker_date = NULL
+       WHERE id = $2`,
+      [PROP.initialCapital, p.id]
+    );
+    await database.pool.query(`DELETE FROM service_state WHERE key = 'prop_hard_halt'`);
+    propHardHalted = null;
+    if (circuitBreakerState[p.id]) {
+      circuitBreakerState[p.id] = { halted: false, haltedOnDate: null, dayStartBalance: PROP.initialCapital };
+    }
+
+    console.log(`🔄 [PROP] account reset to $${PROP.initialCapital.toLocaleString()} — fresh challenge`);
+    res.json({ reset: true, balance: PROP.initialCapital, positions_closed: open.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
