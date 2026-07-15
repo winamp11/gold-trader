@@ -5,7 +5,9 @@
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-function adxBucket(adx) {
+// Exported: the prop rulebook executor (server.js) must classify live
+// conditions with EXACTLY the same buckets the forward rulebook was built on.
+export function adxBucket(adx) {
   if (adx === null || adx === undefined) return 'unknown';
   if (adx < 20) return 'chop';
   if (adx < 35) return 'mild';
@@ -13,7 +15,7 @@ function adxBucket(adx) {
   return 'strong';
 }
 
-function rsiBucket(rsi) {
+export function rsiBucket(rsi) {
   if (rsi === null || rsi === undefined) return 'unknown';
   if (rsi < 30) return 'oversold';
   if (rsi < 45) return 'bearish';
