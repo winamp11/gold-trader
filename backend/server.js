@@ -11,7 +11,7 @@ import { decide as claudeOverlayDecide } from './deciders/claudeOverlayDecider.j
 import { decide as claudeSoloDecide }    from './deciders/claudeSoloDecider.js';
 import { VALUE_PER_LOT } from './contractSpec.js';
 import { TAG_TAXONOMY } from './tagTaxonomy.js';
-import { runAnalysis, formatRulebookPrompt } from './analyst.js';
+import { runAnalysis, formatRulebookPrompt, adxBucket, rsiBucket } from './analyst.js';
 import { runForwardLabeling } from './forwardLabeler.js';
 
 dotenv.config();
@@ -49,6 +49,19 @@ const PROP = {
   dailyLossHalt:       2400,    // halt day at −$2,400 (FTMO Max Daily Loss: 3% = $3,000)
   totalDrawdownHalt:   8000,    // permanent halt at high-water −$8,000 (FTMO Max Loss: 10% = $10,000)
   dailyProfitGovernor: 2000,    // no new entries after +$2,000 closed on the day (Best Day rule ≤50%)
+
+  // Rulebook-executor gates: prop trades ONLY forward_rulebook buckets that
+  // earned it. Trades the exact thing the label measured: market entry,
+  // 4h hold, disaster stop far enough that realized ≈ measured.
+  rule: {
+    minSamples:      100,      // bucket n_total floor
+    minPctUp:        58,       // LONG when pct_up_4h ≥ 58; SHORT when ≤ 42
+    minAvgMove:      5,        // |avg_fwd_4h| floor in points (spread is 0.30)
+    holdHours:       4,        // exit horizon = the label's horizon
+    stopExcursionX:  2.5,      // disaster stop = 2.5× the bucket's avg adverse excursion
+    minStopPoints:   15,
+    lastEntryUaeMin: 17 * 60,  // no entries after 17:00 UAE — full 4h must fit before the 21:00 flush
+  },
 };
 let propHardHalted = null;      // ISO date string when the trailing Max Loss guard fired, else null
 
@@ -193,9 +206,10 @@ async function openPosition({ portfolio, decision, signalId, currentPrice, isSig
     entryTriggered: false,
     outcome:        null,
     maxPrice:       currentPrice,
-    minPrice:       currentPrice
+    minPrice:       currentPrice,
+    timeExitHours:  decision.timeExitHours ?? null
   });
-  console.log(`🟢 [OPEN] ${portfolio.name} | ${decision.direction} entry=${decision.entry?.toFixed(2)} stop=${decision.stop?.toFixed(2)} target=${decision.target?.toFixed(2)} lots=${decision.lots}`);
+  console.log(`🟢 [OPEN] ${portfolio.name} | ${decision.direction} entry=${decision.entry?.toFixed(2)} stop=${decision.stop?.toFixed(2)} target=${decision.target?.toFixed(2)} lots=${decision.lots}${decision.timeExitHours ? ` timeExit=${decision.timeExitHours}h` : ''}`);
 }
 
 // ── Helper: open a veto shadow for one portfolio ───────────────────────────
@@ -505,38 +519,75 @@ async function generateSignalIfTradingHours() {
       }
     }
 
-    // ── Prop-sim executor — overlay's decision through the FTMO envelope ──
-    // No Claude call of its own: same brain, prop-firm risk rules.
+    // ── Prop-sim rulebook executor — trades the analyst's forward rulebook ──
+    // No Claude call, no dependence on the other deciders: if the CURRENT
+    // condition bucket (session + H4 ADX + H4 RSI) has a statistically
+    // qualified edge, trade the exact thing the label measured — market
+    // entry, 4h hold (MANAGED_CLOSE), disaster stop — inside the FTMO envelope.
     try {
       const propPortfolio = await database.getPortfolioByName(PROP.name);
-      if (propPortfolio && overlayDecision.action === 'TRADE' && overlayDecision.entry != null && overlayDecision.stop != null) {
-        const propOpen  = outcomeTracker.getOpenPositionsForPortfolio(propPortfolio.id);
-        const propState = circuitBreakerState[propPortfolio.id];
+      if (propPortfolio) {
+        const propOpen    = outcomeTracker.getOpenPositionsForPortfolio(propPortfolio.id);
+        const propState   = circuitBreakerState[propPortfolio.id];
         const dayRealized = propState ? propPortfolio.current_balance - propState.dayStartBalance : 0;
+        const uaeNowMin   = (() => { const d = new Date(Date.now() + 4 * 3600000); return d.getUTCHours() * 60 + d.getUTCMinutes(); })();
 
         let skip = null;
-        if (propHardHalted)                                   skip = `hard-halted since ${propHardHalted} (trailing Max Loss)`;
-        else if (isHaltedToday(propPortfolio.id))             skip = 'FTMO daily-loss halt active';
-        else if (propOpen.length >= PROP.maxOpenPositions)    skip = `position cap ${propOpen.length}/${PROP.maxOpenPositions}`;
-        else if (dayRealized >= PROP.dailyProfitGovernor)     skip = `profit governor: day P&L $${dayRealized.toFixed(0)} ≥ $${PROP.dailyProfitGovernor} (Best Day rule)`;
+        if (propHardHalted)                               skip = `hard-halted since ${propHardHalted} (trailing Max Loss)`;
+        else if (isHaltedToday(propPortfolio.id))         skip = 'FTMO daily-loss halt active';
+        else if (propOpen.length >= 1)                    skip = 'position already open (rulebook trades one at a time)';
+        else if (dayRealized >= PROP.dailyProfitGovernor) skip = `profit governor: day P&L $${dayRealized.toFixed(0)} ≥ $${PROP.dailyProfitGovernor} (Best Day rule)`;
+        else if (uaeNowMin >= PROP.rule.lastEntryUaeMin)  skip = 'past 17:00 UAE — full 4h hold no longer fits before window close';
 
-        const stopDist = Math.abs(overlayDecision.entry - overlayDecision.stop);
-        if (!skip && !(stopDist > 0)) skip = 'invalid stop distance';
+        let bucketDesc = null;
+        if (!skip) {
+          const sess = currentSession ?? 'unknown';
+          const adxB = adxBucket(marketData.h4?.adx);
+          const rsiB = rsiBucket(marketData.h4?.rsi);
+          bucketDesc = `${sess}/${adxB}/${rsiB}`;
 
-        if (skip) {
-          console.log(`⏸️  [PROP] no entry — ${skip}`);
-        } else {
-          // Fixed $ risk per trade, % of INITIAL capital as FTMO measures it
-          const lots = Math.max(0.01, Math.min(Math.floor((PROP.riskPerTrade / (stopDist * VALUE_PER_LOT)) * 100) / 100, 1.0));
-          await openPosition({
-            portfolio:     propPortfolio,
-            decision:      { ...overlayDecision, lots },
-            signalId,
-            currentPrice,
-            isSignalOwner: false,
-            session:       currentSession,
-          });
+          const { rows: bRows } = await database.pool.query(
+            `SELECT * FROM forward_rulebook WHERE session = $1 AND adx_bucket = $2 AND rsi_bucket = $3`,
+            [sess, adxB, rsiB]
+          );
+          const b = bRows[0];
+
+          const longQ  = b && b.n_total >= PROP.rule.minSamples && b.avg_fwd_4h >=  PROP.rule.minAvgMove && b.pct_up_4h >= PROP.rule.minPctUp;
+          const shortQ = b && b.n_total >= PROP.rule.minSamples && b.avg_fwd_4h <= -PROP.rule.minAvgMove && b.pct_up_4h <= (100 - PROP.rule.minPctUp);
+
+          if (!b)                     skip = `no rulebook data for ${bucketDesc}`;
+          else if (!longQ && !shortQ) skip = `${bucketDesc} not qualified (n=${b.n_total}, avg4h=${(b.avg_fwd_4h ?? 0).toFixed(1)}, up=${(b.pct_up_4h ?? 0).toFixed(0)}%)`;
+          else {
+            const direction  = longQ ? 'LONG' : 'SHORT';
+            const advExc     = longQ ? b.avg_max_down_4h : b.avg_max_up_4h;
+            const favExc     = longQ ? b.avg_max_up_4h   : b.avg_max_down_4h;
+            const stopDist   = Math.max(PROP.rule.minStopPoints, PROP.rule.stopExcursionX * (advExc ?? 0));
+            const targetDist = Math.max(PROP.rule.minStopPoints, PROP.rule.stopExcursionX * (favExc ?? 0));
+            const lots       = Math.max(0.01, Math.min(Math.floor((PROP.riskPerTrade / (stopDist * VALUE_PER_LOT)) * 100) / 100, 1.0));
+
+            await openPosition({
+              portfolio: propPortfolio,
+              decision: {
+                action:    'TRADE',
+                direction,
+                entry:     currentPrice,
+                stop:      direction === 'LONG' ? currentPrice - stopDist   : currentPrice + stopDist,
+                target:    direction === 'LONG' ? currentPrice + targetDist : currentPrice - targetDist,
+                lots,
+                reasoning: `rulebook ${bucketDesc}: n=${b.n_total}, avg4h=${b.avg_fwd_4h.toFixed(1)}pts, ${b.pct_up_4h.toFixed(0)}% up — hold ${PROP.rule.holdHours}h`,
+                tag:       `rulebook_${adxB}_${rsiB}`,
+                timeExitHours: PROP.rule.holdHours,
+              },
+              signalId,
+              currentPrice,
+              isSignalOwner: false,
+              session: currentSession,
+            });
+            console.log(`📖 [PROP] rulebook entry: ${direction} ${bucketDesc} (n=${b.n_total}, avg4h=${b.avg_fwd_4h.toFixed(1)}, up=${b.pct_up_4h.toFixed(0)}%)`);
+          }
         }
+
+        if (skip) console.log(`⏸️  [PROP] no entry — ${skip}`);
       }
     } catch (propErr) {
       console.error(`❌ [PROP] executor error (cycle continues): ${propErr.message}`);
