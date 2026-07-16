@@ -620,9 +620,9 @@ function PropPanel({ prop }) {
             tone={ddTone}
           />
           <PropGauge
-            label="Target progress"
-            value={`${tgtPct.toFixed(0)}%`}
-            detail={`$${prop.profit_target.toLocaleString()} to pass`}
+            label="Profit vs target"
+            value={usd0(prop.balance - prop.initial_capital)}
+            detail={`${tgtPct.toFixed(0)}% of the +$${((prop.profit_target - prop.initial_capital) / 1000).toFixed(0)}k needed to pass`}
             tone="ok"
           />
           <PropGauge
