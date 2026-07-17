@@ -199,55 +199,6 @@ function CombinationRow({ row }) {
   );
 }
 
-// ── Cross-account patterns ────────────────────────────────────────────────────
-
-function CrossAccountSection({ rulebook }) {
-  const byTag = {};
-  for (const r of rulebook) {
-    if (!byTag[r.tag]) byTag[r.tag] = {};
-    byTag[r.tag][r.account_name] = r;
-  }
-  const crossTags = Object.entries(byTag).filter(([, accts]) =>
-    accts['claude_overlay'] && accts['claude_solo']
-  );
-  if (crossTags.length === 0) {
-    return <div className="analyst-empty">No cross-account patterns yet — both accounts need trades with the same tag</div>;
-  }
-  return (
-    <>
-      {crossTags.map(([tag, accts]) => {
-        const s = accts['claude_solo'];
-        const o = accts['claude_overlay'];
-        const agree = (s.win_rate >= 0.5) === (o.win_rate >= 0.5);
-        return (
-          <div className="cross-row" key={tag}>
-            <div className="cross-row__tag">{tag}</div>
-            <div className="cross-row__accounts">
-              <div className="cross-row__account-item">
-                <span style={{ color: C.solo, fontSize: 9 }}>SOLO</span>
-                <span style={{ color: winRateColor(s.win_rate), fontSize: 11, fontFamily: 'Space Mono, monospace', fontWeight: 700 }}>
-                  {pct(s.win_rate)}
-                </span>
-                <span style={{ color: '#4b6070', fontSize: 10 }}>/{s.n_total}</span>
-              </div>
-              <div className="cross-row__account-item">
-                <span style={{ color: C.overlay, fontSize: 9 }}>OVERLAY</span>
-                <span style={{ color: winRateColor(o.win_rate), fontSize: 11, fontFamily: 'Space Mono, monospace', fontWeight: 700 }}>
-                  {pct(o.win_rate)}
-                </span>
-                <span style={{ color: '#4b6070', fontSize: 10 }}>/{o.n_total}</span>
-              </div>
-              <span className={agree ? 'cross-agree' : 'cross-disagree'}>
-                {agree ? '● AGREE' : '◐ DISAGREE'}
-              </span>
-            </div>
-          </div>
-        );
-      })}
-    </>
-  );
-}
-
 // ── Mechanical rulebook ───────────────────────────────────────────────────────
 
 function MechRulebookSection({ rows }) {
@@ -595,15 +546,12 @@ export default function AnalystDashboard({ onBack }) {
           <ForwardRulebookSection rows={fwdRulebook} />
         </Section>
 
-        {/* Pinned lessons */}
-        <Section id="pins" title="Pinned lessons" count={`${pins.filter(p => p.active).length} active`}>
-          <div className="pins-grid">
-            <PinnedCol label="Solo" color={C.solo} pins={soloPins} />
-            <PinnedCol label="Overlay" color={C.overlay} pins={overlayPins} />
-          </div>
+        {/* Mechanical Rulebook */}
+        <Section id="mech" title="Mechanical rulebook" count={`${mechRulebook.length} condition buckets`}>
+          <MechRulebookSection rows={mechRulebook} />
         </Section>
 
-        {/* Rulebook */}
+        {/* Rulebook (tag-based, with condition combinations folded in) */}
         <Section id="rulebook" title="Rulebook" count={`${filteredRows.length} patterns`}>
           <div className="analyst-filters">
             {['all', 'solo', 'overlay', 'sufficient', 'early'].map(f => (
@@ -643,24 +591,23 @@ export default function AnalystDashboard({ onBack }) {
               </div>
             )
           }
+          {combos.length > 0 && (
+            <>
+              <div className="analyst-card__header" style={{ borderTop: '1px solid var(--border)' }}>
+                <span className="analyst-card__title">Condition combinations</span>
+                <span className="analyst-card__count">n≥3</span>
+              </div>
+              {combos.map((c, i) => <CombinationRow key={i} row={c} />)}
+            </>
+          )}
         </Section>
 
-        {/* Cross-account patterns */}
-        <Section id="cross" title="Cross-account patterns" count="same tag, both accounts">
-          <CrossAccountSection rulebook={allRows} />
-        </Section>
-
-        {/* Combinations */}
-        <Section id="combos" title="Condition combinations" count="n≥3">
-          {combos.length === 0
-            ? <div className="analyst-empty">Combinations appear when a direction+ADX+RSI+session combo has 3+ trades</div>
-            : combos.map((c, i) => <CombinationRow key={i} row={c} />)
-          }
-        </Section>
-
-        {/* Mechanical Rulebook */}
-        <Section id="mech" title="Mechanical rulebook" count={`${mechRulebook.length} condition buckets`}>
-          <MechRulebookSection rows={mechRulebook} />
+        {/* Pinned lessons */}
+        <Section id="pins" title="Pinned lessons" count={`${pins.filter(p => p.active).length} active`}>
+          <div className="pins-grid">
+            <PinnedCol label="Solo" color={C.solo} pins={soloPins} />
+            <PinnedCol label="Overlay" color={C.overlay} pins={overlayPins} />
+          </div>
         </Section>
 
       </main>
