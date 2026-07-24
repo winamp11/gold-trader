@@ -9,6 +9,7 @@ import { isTradingHours, getNextTradingTime, getSession } from './tradingHours.j
 import { decide as mechanicalDecide }    from './deciders/mechanicalDecider.js';
 import { decide as claudeOverlayDecide } from './deciders/claudeOverlayDecider.js';
 import { decide as claudeSoloDecide }    from './deciders/claudeSoloDecider.js';
+import { decide as claudeHybridDecide }  from './deciders/claudeHybridDecider.js';
 import { reflectDaily } from './deciders/reflector.js';
 import { callDecider, todayCallCount, getLastCallUsage, PROVIDER, MODEL as LLM_MODEL } from './deciders/claudeClient.js';
 import { VALUE_PER_LOT } from './contractSpec.js';
@@ -68,6 +69,27 @@ const PROP = {
   },
 };
 let propHardHalted = null;      // ISO date string when the trailing Max Loss guard fired, else null
+
+// ── Hybrid bot day state ──────────────────────────────────────────────────
+// peakProfit drives the give-back rule; stoppedReason latches the day off
+// once the target, give-back or loss limit fires. Reset each session day.
+const hybridDay = { date: null, peakProfit: 0, stoppedReason: null, lastEntryMs: 0 };
+
+function resetHybridDay(today) {
+  hybridDay.date = today;
+  hybridDay.peakProfit = 0;
+  hybridDay.stoppedReason = null;
+  hybridDay.lastEntryMs = 0;
+}
+
+// Risk currently deployed = sum of (stop distance x lots x value per lot)
+function openRiskFor(portfolioId) {
+  let total = 0;
+  for (const t of outcomeTracker.getOpenPositionsForPortfolio(portfolioId)) {
+    total += Math.abs(t.entryPrice - t.stopLoss) * (t.lots || 0) * VALUE_PER_LOT;
+  }
+  return total;
+}
 
 // ── Session range (tracked from 06:00 UAE open, reset daily) ──────────────
 let sessionHigh      = null;
@@ -599,6 +621,120 @@ async function generateSignalIfTradingHours() {
       } else if (soloDecision.action === 'VETO') {
         await openVetoShadow({ portfolio: soloPortfolio, decision: soloDecision, currentPrice, session: currentSession });
       }
+    }
+
+    // ── Hybrid bot — overlay judgment + forward-rulebook evidence ─────────
+    // Risk envelope is fully config-driven (bot_config table, editable in the
+    // web app). Order matters: day-level guards run before any entry logic so
+    // the give-back and loss rules can flatten even on a cycle that would
+    // otherwise trade.
+    try {
+      const hyPortfolio = await database.getPortfolioByName(HYBRID_BOT);
+      if (hyPortfolio) {
+        const cfg = await getBotConfig(database.pool);
+        if (hybridDay.date !== uaeDate()) resetHybridDay(uaeDate());
+
+        const dayStart  = circuitBreakerState[hyPortfolio.id]?.dayStartBalance ?? hyPortfolio.current_balance;
+        const openPos   = outcomeTracker.getOpenPositionsForPortfolio(hyPortfolio.id);
+        const unrealized = computeUnrealizedPnl(hyPortfolio.id, currentPrice);
+        const dayPnl    = (hyPortfolio.current_balance - dayStart) + unrealized;
+        const bal       = hyPortfolio.starting_balance || 100000;
+
+        if (dayPnl > hybridDay.peakProfit) hybridDay.peakProfit = dayPnl;
+
+        // ── Day-level guards ──────────────────────────────────────────────
+        const targetUsd  = bal * (cfg.dailyProfitTargetPct / 100);
+        const maxLossUsd = bal * (cfg.dailyMaxLossPct / 100);
+        const armUsd     = bal * (cfg.giveBackArmPct / 100);
+        const giveBackFloor = hybridDay.peakProfit * (1 - cfg.giveBackPct / 100);
+
+        let flatten = null;
+        if (!hybridDay.stoppedReason) {
+          if (dayPnl >= targetUsd) {
+            flatten = `daily target hit (+$${dayPnl.toFixed(0)} ≥ $${targetUsd.toFixed(0)})`;
+          } else if (dayPnl <= -maxLossUsd) {
+            flatten = `daily max loss hit ($${dayPnl.toFixed(0)} ≤ -$${maxLossUsd.toFixed(0)})`;
+          } else if (hybridDay.peakProfit >= armUsd && dayPnl < giveBackFloor) {
+            flatten = `give-back rule: peak +$${hybridDay.peakProfit.toFixed(0)} → now +$${dayPnl.toFixed(0)} (floor $${giveBackFloor.toFixed(0)})`;
+          }
+        }
+
+        if (flatten) {
+          hybridDay.stoppedReason = flatten;
+          console.log(`🎯 [HYBRID] ${flatten} — flattening and standing down for the day`);
+          if (openPos.length > 0) await outcomeTracker.forceClosePortfolio(hyPortfolio.id, currentPrice);
+        }
+
+        // ── Entry logic ───────────────────────────────────────────────────
+        const riskUsed    = openRiskFor(hyPortfolio.id);
+        const riskBudget  = bal * (cfg.maxTotalRiskPct / 100);
+        const riskLeft    = Math.max(0, riskBudget - riskUsed);
+        const sinceEntry  = Date.now() - hybridDay.lastEntryMs;
+
+        let skip = null;
+        if (hybridDay.stoppedReason)                          skip = `stood down: ${hybridDay.stoppedReason}`;
+        else if (isHaltedToday(hyPortfolio.id))               skip = 'circuit breaker active';
+        else if (openPos.length >= cfg.maxOpenPositions)      skip = `position cap ${openPos.length}/${cfg.maxOpenPositions}`;
+        else if (sinceEntry < cfg.entryIntervalMin * 60000)   skip = `entry throttle — ${Math.ceil((cfg.entryIntervalMin * 60000 - sinceEntry) / 60000)} min to go`;
+        else if (riskLeft < 50)                               skip = `risk budget exhausted ($${riskUsed.toFixed(0)}/$${riskBudget.toFixed(0)})`;
+
+        if (skip) {
+          console.log(`⏸️  [HYBRID] no entry — ${skip}`);
+        } else {
+          const sess = currentSession ?? 'unknown';
+          const adxB = adxBucket(marketData.h4?.adx);
+          const rsiB = rsiBucket(marketData.h4?.rsi);
+          const bucketDesc = `${sess} / ADX ${adxB} / RSI ${rsiB}`;
+          const { rows: bRows } = await database.pool.query(
+            `SELECT * FROM forward_rulebook WHERE session = $1 AND adx_bucket = $2 AND rsi_bucket = $3`,
+            [sess, adxB, rsiB]
+          );
+
+          const hyDecision = await claudeHybridDecide({
+            marketData, atr, portfolio: hyPortfolio, session: currentSession, price: currentPrice,
+            overlayDecision, bucket: bRows[0] ?? null, bucketDesc, cfg,
+            openPositions: openPos, riskUsed,
+            recentLessons: await database.getRecentLessons(hyPortfolio.id),
+          });
+
+          if (hyDecision.action === 'TRADE') {
+            // Model expressed intent; prices and lots are computed here so it
+            // never has to do arithmetic, and every value is clamped.
+            const h1Atr    = atr?.h1;
+            const mult     = Math.min(cfg.atrMultMax, Math.max(cfg.atrMultMin, Number(hyDecision.stop_atr_mult)));
+            const stopDist = h1Atr ? h1Atr * mult : null;
+            const riskUsd  = Math.min(Number(hyDecision.risk_usd), riskLeft, bal * (cfg.maxRiskPerTradePct / 100));
+            const targetR  = Math.max(1.5, Number(hyDecision.target_r));
+
+            if (!stopDist || stopDist <= 0 || riskUsd < 50) {
+              console.log(`⏸️  [HYBRID] entry rejected — stopDist=${stopDist} riskUsd=${riskUsd?.toFixed?.(0)}`);
+            } else {
+              const lots = Math.max(0.01, Math.min(Math.floor((riskUsd / (stopDist * VALUE_PER_LOT)) * 100) / 100, 1.0));
+              const isLong = hyDecision.direction === 'LONG';
+              await openPosition({
+                portfolio: hyPortfolio,
+                decision: {
+                  action: 'TRADE',
+                  direction: hyDecision.direction,
+                  entry:  currentPrice,
+                  stop:   isLong ? currentPrice - stopDist : currentPrice + stopDist,
+                  target: isLong ? currentPrice + stopDist * targetR : currentPrice - stopDist * targetR,
+                  lots,
+                  reasoning: hyDecision.reasoning,
+                  tag: hyDecision.tag,
+                },
+                signalId, currentPrice, isSignalOwner: false, session: currentSession,
+              });
+              hybridDay.lastEntryMs = Date.now();
+              console.log(`🔀 [HYBRID] ${hyDecision.direction} stop=${mult.toFixed(2)}×ATR (${stopDist.toFixed(1)}pts) risk=$${riskUsd.toFixed(0)} lots=${lots} target=${targetR.toFixed(1)}R | ${bucketDesc}`);
+            }
+          } else {
+            console.log(`⏸️  [HYBRID] NO_TRADE — ${hyDecision.tag}`);
+          }
+        }
+      }
+    } catch (hyErr) {
+      console.error(`❌ [HYBRID] executor error (cycle continues): ${hyErr.message}`);
     }
 
     // Record which decision each Claude account reached (distinguishes
@@ -1376,6 +1512,41 @@ app.post('/api/llm/verify', async (req, res) => {
 app.post('/api/reflect/daily', async (req, res) => {
   try {
     res.json(await reflectDaily(database.pool, { dryRun: req.query.dry_run === '1', limit: parseInt(req.query.limit) || undefined }));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Hybrid bot live state: day P&L against its target, loss limit and the
+// give-back floor, plus why it stood down if it did.
+app.get('/api/hybrid/status', async (req, res) => {
+  try {
+    const p = await database.getPortfolioByName(HYBRID_BOT);
+    if (!p) return res.status(404).json({ error: 'claude_hybrid portfolio not found' });
+    const cfg = await getBotConfig(database.pool);
+
+    const dayStart   = circuitBreakerState[p.id]?.dayStartBalance ?? p.day_start_balance ?? p.current_balance;
+    const unrealized = lastKnownPrice ? computeUnrealizedPnl(p.id, lastKnownPrice) : 0;
+    const dayPnl     = (p.current_balance - dayStart) + unrealized;
+    const bal        = p.starting_balance || 100000;
+    const peak       = hybridDay.date === uaeDate() ? hybridDay.peakProfit : 0;
+    const armUsd     = bal * (cfg.giveBackArmPct / 100);
+
+    res.json({
+      balance:          p.current_balance,
+      starting_balance: bal,
+      day_pnl:          dayPnl,
+      peak_profit:      peak,
+      give_back_armed:  peak >= armUsd,
+      give_back_floor:  peak >= armUsd ? peak * (1 - cfg.giveBackPct / 100) : null,
+      daily_target:     bal * (cfg.dailyProfitTargetPct / 100),
+      daily_max_loss:   -(bal * (cfg.dailyMaxLossPct / 100)),
+      stopped_reason:   hybridDay.date === uaeDate() ? hybridDay.stoppedReason : null,
+      open_positions:   outcomeTracker.getOpenPositionsForPortfolio(p.id).length,
+      risk_used:        openRiskFor(p.id),
+      risk_budget:      bal * (cfg.maxTotalRiskPct / 100),
+      config:           cfg,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
