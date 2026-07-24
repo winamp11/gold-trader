@@ -17,7 +17,8 @@ const ANTHROPIC_MODEL  = process.env.ANTHROPIC_MODEL  || 'claude-sonnet-4-6';
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'anthropic/claude-haiku-4.5';
 const OPENROUTER_URL   = 'https://openrouter.ai/api/v1/chat/completions';
 
-export const MODEL = PROVIDER === 'openrouter' ? OPENROUTER_MODEL : ANTHROPIC_MODEL;
+const MODEL_DEFAULT = PROVIDER === 'openrouter' ? OPENROUTER_MODEL : ANTHROPIC_MODEL;
+export const MODEL  = MODEL_DEFAULT;
 
 const LOT_MIN = 0.01;
 const LOT_MAX = 1.0;
@@ -41,8 +42,9 @@ function logProviderOnce() {
 //   { input, cache_create, cache_read, output }
 // Throws on transport/API errors — callers own the fallback behavior.
 
-async function chat({ systemPrompt, userContent, maxTokens, timeoutMs = 30_000 }) {
+async function chat({ systemPrompt, userContent, maxTokens, timeoutMs = 30_000, modelOverride = null }) {
   logProviderOnce();
+  const MODEL = modelOverride || MODEL_DEFAULT;
 
   if (PROVIDER === 'openrouter') {
     const key = process.env.OPENROUTER_API_KEY;
@@ -241,16 +243,16 @@ export async function callReflector({ systemPrompt, userContent, deciderName }) 
   }
 }
 
-export async function callDecider({ systemPrompt, userContent, deciderName }) {
+export async function callDecider({ systemPrompt, userContent, deciderName, modelOverride = null }) {
   const n = nextCallNum();
-  console.log(`🤖 [${deciderName}] LLM call #${n} today (${MODEL})`);
+  console.log(`🤖 [${deciderName}] LLM call #${n} today (${modelOverride || MODEL})`);
 
   // Tracks which stage we reached — determines the noTrade tag on failure.
   // Starts as 'api_error'; updated as we pass each parsing stage.
   let failureType = 'api_error';
 
   try {
-    const { text: raw, usage } = await chat({ systemPrompt, userContent, maxTokens: MAX_TOKENS });
+    const { text: raw, usage } = await chat({ systemPrompt, userContent, maxTokens: MAX_TOKENS, modelOverride });
 
     _lastUsage = usage;
     console.log(

@@ -1325,7 +1325,8 @@ What is your trading decision for this cycle?`;
 
 app.post('/api/llm/verify', async (req, res) => {
   try {
-    const runs = Math.min(parseInt(req.query.runs) || 3, 10);
+    const runs  = Math.min(parseInt(req.query.runs) || 3, 10);
+    const model = req.query.model || null;   // A/B a candidate without redeploying
     const results = [];
     let ok = 0;
     const t0 = Date.now();
@@ -1335,6 +1336,7 @@ app.post('/api/llm/verify', async (req, res) => {
         systemPrompt: LLM_TEST_SYSTEM,
         userContent:  LLM_TEST_USER,
         deciderName:  'llm_verify',
+        modelOverride: model,
       });
       const failed = typeof d.tag === 'string' && /_(parse_failure|validation_error|api_error)$/.test(d.tag);
       if (!failed) ok++;
@@ -1351,7 +1353,7 @@ app.post('/api/llm/verify', async (req, res) => {
 
     res.json({
       provider: PROVIDER,
-      model:    LLM_MODEL,
+      model:    model || LLM_MODEL,
       runs,
       valid:    ok,
       verdict:  ok === runs ? 'PASS — model holds the schema' : 'FAIL — schema failures become silent NO_TRADE',
