@@ -417,7 +417,7 @@ export default function AnalystDashboard({ onBack }) {
   const [mechRulebook, setMechRulebook] = useState([]);
   const [fwdRulebook,  setFwdRulebook]  = useState([]);
   const [filter,       setFilter]       = useState('all');
-  const [running,      setRunning]      = useState(false);
+
   const [lastUpdated,  setLastUpdated]  = useState(null);
   const [error,        setError]        = useState(null);
 
@@ -449,17 +449,9 @@ export default function AnalystDashboard({ onBack }) {
     return () => clearInterval(id);
   }, [fetchData]);
 
-  const runAnalysis = async () => {
-    setRunning(true);
-    try {
-      await fetch(`${API}/api/analyst/run`, { method: 'POST' });
-      await fetchData();
-    } catch {
-      setError('Run failed');
-    } finally {
-      setRunning(false);
-    }
-  };
+  // The "Run now" button was removed to prevent accidental clicks — the
+  // analyst runs nightly on its own, and POST /api/analyst/run remains
+  // available for a deliberate manual run.
 
   const summary = rulebook?.summary;
   const allRows = rulebook?.rulebook || [];
@@ -491,13 +483,6 @@ export default function AnalystDashboard({ onBack }) {
             </span>
           )}
           {error && <span style={{ color: '#ef4444', fontSize: 11, fontFamily: 'Space Mono' }}>{error}</span>}
-          <button
-            className="analyst-btn analyst-btn--run"
-            onClick={runAnalysis}
-            disabled={running}
-          >
-            {running ? 'Running…' : '▶ Run now'}
-          </button>
         </div>
       </header>
 
