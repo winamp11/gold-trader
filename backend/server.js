@@ -75,6 +75,14 @@ let sessionRangeDate = null;  // UAE date of last range reset
 // ── ADR cache: average daily range over 14 days, recomputed once per day ──
 let adrCache = { date: null, value: null };
 
+// ── Solo decider throttle ─────────────────────────────────────────────────
+// Solo re-evaluates from scratch every cycle, which made it ~70% of LLM spend.
+// Its trades hold for hours, so a 15-minute cadence loses nothing but cost.
+// Overlay is deliberately NOT throttled: it must see every mechanical proposal.
+// Time-based rather than a cycle counter so restarts don't reset the cadence.
+const SOLO_INTERVAL_MS = (parseInt(process.env.SOLO_INTERVAL_MIN) || 15) * 60 * 1000;
+let lastSoloCallMs = 0;
+
 function updateSessionRange(price) {
   const today = uaeDate();
   let changed = false;
@@ -380,6 +388,8 @@ function decisionLabel(decision) {
   if (tag.endsWith('_parse_failure'))    return 'PARSE_FAILURE';
   if (tag.endsWith('_validation_error')) return 'VALIDATION_ERROR';
   if (tag.endsWith('_api_error'))        return 'API_ERROR';
+  // Distinct from a real NO_TRADE: the decider was never consulted this cycle.
+  if (tag === 'solo_throttled')          return 'THROTTLED';
   return decision?.action ?? 'NO_TRADE';
 }
 
@@ -595,10 +605,15 @@ async function generateSignalIfTradingHours() {
 
     // ── Claude Solo decider ───────────────────────────────────────────────
     let soloDecision;
+    const soloDueMs = SOLO_INTERVAL_MS - (Date.now() - lastSoloCallMs);
     if (isHaltedToday(soloPortfolio.id)) {
       console.log(`🛑 [SOLO] Circuit breaker active — skipping Claude call this cycle`);
       soloDecision = { action: 'NO_TRADE', direction: null, entry: null, stop: null, target: null, lots: null, reasoning: 'circuit breaker halt', tag: 'circuit_breaker_halt' };
+    } else if (soloDueMs > 0) {
+      console.log(`⏭️  [SOLO] throttled — next evaluation in ${Math.ceil(soloDueMs / 60000)} min (every ${SOLO_INTERVAL_MS / 60000} min)`);
+      soloDecision = { action: 'NO_TRADE', direction: null, entry: null, stop: null, target: null, lots: null, reasoning: `throttled — solo evaluates every ${SOLO_INTERVAL_MS / 60000} min`, tag: 'solo_throttled' };
     } else {
+      lastSoloCallMs = Date.now();
       soloDecision = await claudeSoloDecide(
         marketData, atr, soloPortfolio, soloLessons, soloOpenPositions, soloRulebook, currentSession
       );
