@@ -1403,7 +1403,7 @@ app.post('/api/llm/verify', async (req, res) => {
 // Manual trigger for the daily batch reflection (also runs at 21:15 UAE).
 app.post('/api/reflect/daily', async (req, res) => {
   try {
-    res.json(await reflectDaily(database.pool));
+    res.json(await reflectDaily(database.pool, { dryRun: req.query.dry_run === '1' }));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

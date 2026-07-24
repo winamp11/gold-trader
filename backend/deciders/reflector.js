@@ -84,8 +84,25 @@ Output format — one object per item you were given, echoing its id exactly:
   { "id": <the id given>, "lesson_text": "<first-person lesson, 2-3 sentences>", "tag": "<one tag key from the list above — exact string>" }
 ]`;
 
-export async function reflectDaily(pool) {
+// opts.dryRun — ignore the "not yet journaled" filter and skip all writes.
+// Exercises query → prompt → LLM → parse without mutating the journal, so the
+// batch path can be verified on a day whose trades are already reflected.
+export async function reflectDaily(pool, { dryRun = false } = {}) {
   try {
+    const notJournaledTrade = dryRun ? '' : `
+        AND NOT EXISTS (
+          SELECT 1 FROM journal j
+          WHERE j.signal_or_trade_id = t.id
+            AND j.portfolio_id = t.portfolio_id
+            AND j.entry_type <> 'veto'
+        )`;
+    const notJournaledShadow = dryRun ? '' : `
+        AND NOT EXISTS (
+          SELECT 1 FROM journal j
+          WHERE j.signal_or_trade_id = v.id
+            AND j.portfolio_id = v.portfolio_id
+            AND j.entry_type = 'veto'
+        )`;
     // Closed trades with no journal entry. NO_ENTRY/EXPIRED are excluded —
     // an unfilled order carries no lesson and the Analyst ignores observations.
     const { rows: trades } = await pool.query(`
@@ -97,14 +114,8 @@ export async function reflectDaily(pool) {
       JOIN portfolios p ON p.id = t.portfolio_id
       WHERE t.portfolio_id IN (2, 3)
         AND t.exit_reason IS NOT NULL
-        AND t.exit_reason NOT IN ('NO_ENTRY', 'EXPIRED')
-        AND NOT EXISTS (
-          SELECT 1 FROM journal j
-          WHERE j.signal_or_trade_id = t.id
-            AND j.portfolio_id = t.portfolio_id
-            AND j.entry_type <> 'veto'
-        )
-      ORDER BY t.exit_timestamp
+        AND t.exit_reason NOT IN ('NO_ENTRY', 'EXPIRED')${notJournaledTrade}
+      ORDER BY t.exit_timestamp DESC
       LIMIT ${BATCH_LIMIT}
     `);
 
@@ -115,14 +126,8 @@ export async function reflectDaily(pool) {
       FROM veto_shadows v
       JOIN portfolios p ON p.id = v.portfolio_id
       WHERE v.portfolio_id IN (2, 3)
-        AND v.would_be_outcome IS NOT NULL
-        AND NOT EXISTS (
-          SELECT 1 FROM journal j
-          WHERE j.signal_or_trade_id = v.id
-            AND j.portfolio_id = v.portfolio_id
-            AND j.entry_type = 'veto'
-        )
-      ORDER BY v.timestamp
+        AND v.would_be_outcome IS NOT NULL${notJournaledShadow}
+      ORDER BY v.timestamp DESC
       LIMIT ${BATCH_LIMIT}
     `);
 
@@ -165,6 +170,16 @@ export async function reflectDaily(pool) {
       maxTokens:    Math.min(8000, 400 + total * 220),
     });
     if (!lessons) return { trades: trades.length, vetoes: shadows.length, written: 0, error: 'llm_failed' };
+
+    if (dryRun) {
+      console.log(`🧪 [reflectDaily] dry run — ${lessons.length}/${total} lessons returned, nothing written`);
+      return {
+        dry_run: true, trades: trades.length, vetoes: shadows.length,
+        lessons_returned: lessons.length, expected: total,
+        matched_ids: lessons.filter(l => [...trades, ...shadows].some(x => x.id === l.id)).length,
+        sample: lessons.slice(0, 3),
+      };
+    }
 
     const byId = new Map(lessons.map(l => [l.id, l]));
     const touchedPortfolios = new Set();
