@@ -9,6 +9,7 @@ import { isTradingHours, getNextTradingTime, getSession } from './tradingHours.j
 import { decide as mechanicalDecide }    from './deciders/mechanicalDecider.js';
 import { decide as claudeOverlayDecide } from './deciders/claudeOverlayDecider.js';
 import { decide as claudeSoloDecide }    from './deciders/claudeSoloDecider.js';
+import { reflectDaily } from './deciders/reflector.js';
 import { callDecider, todayCallCount, getLastCallUsage, PROVIDER, MODEL as LLM_MODEL } from './deciders/claudeClient.js';
 import { VALUE_PER_LOT } from './contractSpec.js';
 import { TAG_TAXONOMY } from './tagTaxonomy.js';
@@ -727,6 +728,25 @@ function startBackgroundSignalGeneration() {
   setInterval(() => generateSignalIfTradingHours(), 5 * 60 * 1000);
 }
 
+// ── Daily reflection cron — one batched LLM call at 21:15 UAE ────────────
+// Runs 15 min after the window close, so every position is closed and P&L
+// booked. Replaces ~15 per-trade calls with one.
+function startDailyReflector() {
+  const REFLECT_UAE_MIN = (parseInt(process.env.REFLECT_UAE_MIN) || (21 * 60 + 15));
+  let lastRunDate = null;
+  console.log(`🪞 Starting daily reflector (${Math.floor(REFLECT_UAE_MIN / 60)}:${String(REFLECT_UAE_MIN % 60).padStart(2, '0')} UAE)...`);
+
+  setInterval(async () => {
+    const uae   = new Date(Date.now() + 4 * 3600000);
+    const mins  = uae.getUTCHours() * 60 + uae.getUTCMinutes();
+    const today = uaeDate();
+    if (lastRunDate === today || mins < REFLECT_UAE_MIN) return;
+    lastRunDate = today;   // set before awaiting so a slow run can't double-fire
+    console.log(`\n🪞 [DAILY REFLECTION] ${today} ─────────────────────────`);
+    await reflectDaily(database.pool);
+  }, 60 * 1000);
+}
+
 // ── Forward labeler cron — hourly, plus one pass shortly after boot ───────
 function startForwardLabeler() {
   console.log('🏷️  Starting forward labeler (hourly)...');
@@ -1380,6 +1400,15 @@ app.post('/api/llm/verify', async (req, res) => {
   }
 });
 
+// Manual trigger for the daily batch reflection (also runs at 21:15 UAE).
+app.post('/api/reflect/daily', async (req, res) => {
+  try {
+    res.json(await reflectDaily(database.pool));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Labeling progress snapshot.
 app.get('/api/labeler/status', async (req, res) => {
   try {
@@ -1785,6 +1814,7 @@ app.listen(PORT, () => {
   startBackgroundSignalGeneration();
   startPricePoller();
   startForwardLabeler();
+  startDailyReflector();
 });
 
 process.on('SIGINT', () => {

@@ -243,6 +243,51 @@ export async function callReflector({ systemPrompt, userContent, deciderName }) 
   }
 }
 
+// ── Batch reflection — one call, many lessons ───────────────────────────
+// Returns an array of objects, or null on any failure (caller skips writes).
+// Validation is per-item: malformed entries are dropped, good ones kept, so
+// one bad lesson can't cost the whole day's journal.
+
+export async function callBatchReflector({ systemPrompt, userContent, deciderName, maxTokens }) {
+  const n = nextCallNum();
+  console.log(`🪞 [${deciderName}] batch reflection call #${n} today (${MODEL})`);
+
+  try {
+    const { text: raw, usage } = await chat({ systemPrompt, userContent, maxTokens, timeoutMs: 90_000 });
+
+    _lastUsage = usage;
+    console.log(
+      `📊 [${deciderName}] tokens: in=${usage.input}` +
+      ` (cache_create=${usage.cache_create} cache_read=${usage.cache_read}) out=${usage.output}`
+    );
+
+    const match = raw.match(/\[[\s\S]*\]/);
+    if (!match) throw new Error('no JSON array in batch reflection response');
+
+    let parsed;
+    try   { parsed = JSON.parse(match[0]); }
+    catch (e) { throw new Error(`JSON.parse failed: ${e.message}`); }
+    if (!Array.isArray(parsed)) throw new Error('batch reflection did not return an array');
+
+    const good = [];
+    for (const item of parsed) {
+      const id = Number(item?.id);
+      if (!Number.isFinite(id))                                     continue;
+      if (typeof item.lesson_text !== 'string' || !item.lesson_text.trim()) continue;
+      if (typeof item.tag !== 'string' || !item.tag.trim())         continue;
+      good.push({ id, lesson_text: item.lesson_text.trim(), tag: item.tag.trim() });
+    }
+    if (good.length < parsed.length) {
+      console.warn(`⚠️  [${deciderName}] dropped ${parsed.length - good.length} malformed lesson(s)`);
+    }
+    return good;
+
+  } catch (err) {
+    console.error(`❌ [${deciderName}] batch reflection failed: ${err.message}`);
+    return null;
+  }
+}
+
 export async function callDecider({ systemPrompt, userContent, deciderName, modelOverride = null }) {
   const n = nextCallNum();
   console.log(`🤖 [${deciderName}] LLM call #${n} today (${modelOverride || MODEL})`);
