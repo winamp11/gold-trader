@@ -9,6 +9,7 @@ import { isTradingHours, getNextTradingTime, getSession } from './tradingHours.j
 import { decide as mechanicalDecide }    from './deciders/mechanicalDecider.js';
 import { decide as claudeOverlayDecide } from './deciders/claudeOverlayDecider.js';
 import { decide as claudeSoloDecide }    from './deciders/claudeSoloDecider.js';
+import { callDecider, todayCallCount, getLastCallUsage, PROVIDER, MODEL as LLM_MODEL } from './deciders/claudeClient.js';
 import { VALUE_PER_LOT } from './contractSpec.js';
 import { TAG_TAXONOMY } from './tagTaxonomy.js';
 import { runAnalysis, formatRulebookPrompt, adxBucket, rsiBucket } from './analyst.js';
@@ -1268,6 +1269,95 @@ app.post('/api/prop/reset', async (req, res) => {
 
     console.log(`🔄 [PROP] account reset to $${PROP.initialCapital.toLocaleString()} — fresh challenge`);
     res.json({ reset: true, balance: PROP.initialCapital, positions_closed: open.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── LLM diagnostics ───────────────────────────────────────────────────────
+// GET  /api/llm/config  — which provider/model is live (free, no API call)
+// POST /api/llm/verify  — fires N real decider prompts and reports schema
+//   compliance. Run this after any model change: a model that can't hold the
+//   JSON schema turns an account into a silent permanent NO_TRADE.
+
+app.get('/api/llm/config', (req, res) => {
+  res.json({ provider: PROVIDER, model: LLM_MODEL, calls_today: todayCallCount(), last_call_usage: getLastCallUsage() });
+});
+
+const LLM_TEST_SYSTEM = `You are a gold (XAU/USD) trading decider.
+Respond with a single valid JSON object. No markdown, no text outside the JSON.
+
+{
+  "action": "TRADE" | "NO_TRADE" | "VETO",
+  "direction": "LONG" | "SHORT" | null,
+  "entry": <number or null>,
+  "stop": <number or null>,
+  "target": <number or null>,
+  "lots": <number or null>,
+  "reasoning": "<1-2 sentences>",
+  "tag": "<snake_case label>"
+}
+
+For TRADE all numeric fields must be present:
+  LONG: stop < entry < target (strictly)
+  SHORT: target < entry < stop (strictly)
+For VETO or NO_TRADE set direction/entry/stop/target/lots to null.`;
+
+const LLM_TEST_USER = `MARKET SNAPSHOT — XAU/USD
+Current price: $4050.00
+Current session: EUR
+Account balance: $100000.00
+
+TIMEFRAMES:
+H4 : price=4050.00  RSI=58.2  MACD=4.10/sig=2.90/hist=1.20  ATR=22.0  ADX=31.5
+H1 : price=4050.00  RSI=61.4  MACD=2.80/sig=1.60/hist=1.20  ATR=15.0  ADX=28.0
+M30: price=4050.00  RSI=59.0  MACD=1.40/sig=0.90/hist=0.50  ATR=9.0   ADX=24.0
+
+PRIMARY ATR: H1=15.0  M30=9.0
+
+OPEN POSITIONS: none
+RISK BUDGET: $0 used / $10000 limit
+
+You have a defensible bullish read. Size a LONG with a 1.5x H1 ATR stop and
+at least 1.5:1 reward-to-risk, risking 2% of the account.
+
+What is your trading decision for this cycle?`;
+
+app.post('/api/llm/verify', async (req, res) => {
+  try {
+    const runs = Math.min(parseInt(req.query.runs) || 3, 10);
+    const results = [];
+    let ok = 0;
+    const t0 = Date.now();
+
+    for (let i = 0; i < runs; i++) {
+      const d = await callDecider({
+        systemPrompt: LLM_TEST_SYSTEM,
+        userContent:  LLM_TEST_USER,
+        deciderName:  'llm_verify',
+      });
+      const failed = typeof d.tag === 'string' && /_(parse_failure|validation_error|api_error)$/.test(d.tag);
+      if (!failed) ok++;
+      results.push({
+        valid:     !failed,
+        action:    d.action,
+        direction: d.direction ?? null,
+        entry: d.entry ?? null, stop: d.stop ?? null, target: d.target ?? null, lots: d.lots ?? null,
+        tag:       d.tag,
+        detail:    failed ? d.reasoning : undefined,
+        usage:     getLastCallUsage(),
+      });
+    }
+
+    res.json({
+      provider: PROVIDER,
+      model:    LLM_MODEL,
+      runs,
+      valid:    ok,
+      verdict:  ok === runs ? 'PASS — model holds the schema' : 'FAIL — schema failures become silent NO_TRADE',
+      avg_seconds: +((Date.now() - t0) / 1000 / runs).toFixed(1),
+      results,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -12,7 +12,7 @@ import fetch from 'node-fetch';
 
 export const MAX_TOKENS = 1024;  // raised from 500 — preamble prose can consume ~200 tokens before JSON
 
-const PROVIDER = (process.env.LLM_PROVIDER || 'anthropic').toLowerCase();
+export const PROVIDER = (process.env.LLM_PROVIDER || 'anthropic').toLowerCase();
 const ANTHROPIC_MODEL  = process.env.ANTHROPIC_MODEL  || 'claude-sonnet-4-6';
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'anthropic/claude-haiku-4.5';
 const OPENROUTER_URL   = 'https://openrouter.ai/api/v1/chat/completions';
