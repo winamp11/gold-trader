@@ -637,6 +637,142 @@ function PropPanel({ prop }) {
   );
 }
 
+// ─── Hybrid bot panel + live settings ────────────────────────────────────────
+
+function HybridSettings({ schema, config, onSaved }) {
+  const [draft, setDraft] = useState(config);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  useEffect(() => { setDraft(config); }, [config]);
+
+  const dirty = schema.some(f => Number(draft[f.key]) !== Number(config[f.key]));
+
+  const save = async () => {
+    setSaving(true); setMsg(null);
+    try {
+      const res  = await fetch(`${API}/api/bot-config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config: draft }),
+      });
+      const data = await res.json();
+      if (data.saved) { setMsg('saved'); onSaved(data.config); }
+      else setMsg(data.error || 'save failed');
+    } catch { setMsg('save failed'); }
+    finally { setSaving(false); setTimeout(() => setMsg(null), 3000); }
+  };
+
+  const groups = [...new Set(schema.map(f => f.group))];
+
+  return (
+    <div style={{ padding: '12px 18px 16px', borderTop: '1px solid var(--border)' }}>
+      {groups.map(g => (
+        <div key={g} style={{ marginBottom: 14 }}>
+          <div style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text3)', marginBottom: 8 }}>
+            {g}
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 }}>
+            {schema.filter(f => f.group === g).map(f => (
+              <label key={f.key} title={f.help} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                <span style={{ fontSize: 10, color: 'var(--text2)' }}>
+                  {f.label}{f.unit ? ` (${f.unit})` : ''}
+                </span>
+                <input
+                  type="number"
+                  value={draft[f.key] ?? ''}
+                  min={f.min} max={f.max} step={f.step}
+                  onChange={e => setDraft(d => ({ ...d, [f.key]: e.target.value }))}
+                  style={{
+                    fontFamily: 'var(--mono)', fontSize: 12, padding: '5px 7px',
+                    background: 'var(--bg3)', color: 'var(--text)',
+                    border: '1px solid var(--border2)', borderRadius: 3, width: '100%',
+                  }}
+                />
+                <span style={{ fontSize: 9, color: 'var(--text3)' }}>{f.min}–{f.max}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+      ))}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <button
+          className="topbar__btn"
+          onClick={save}
+          disabled={!dirty || saving}
+          style={{ opacity: dirty && !saving ? 1 : 0.45 }}
+        >
+          {saving ? 'Saving…' : dirty ? 'Save changes' : 'No changes'}
+        </button>
+        {msg && <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: msg === 'saved' ? 'var(--pos)' : 'var(--neg)' }}>{msg}</span>}
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--text3)' }}>
+          values are clamped server-side · takes effect next cycle
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function HybridPanel({ status, schema, onConfigSaved }) {
+  const [showSettings, setShowSettings] = useState(false);
+  if (!status) return null;
+
+  const usd0 = n => `${n < 0 ? '-' : '+'}$${Math.abs(n).toFixed(0)}`;
+
+  return (
+    <div className="account-panel" style={{ borderLeftColor: '#38bdf8' }}>
+      <div className="panel-headline">
+        <div className="panel-headline__top">
+          <span className="panel-headline__dot" style={{ background: '#38bdf8' }} />
+          <span className="panel-headline__name">Hybrid · overlay + rulebook</span>
+          {status.open_positions > 0 && (
+            <span className="panel-headline__open">{status.open_positions} open</span>
+          )}
+          {status.stopped_reason && (
+            <span className="panel-headline__open" style={{ color: '#fb923c', borderColor: '#fb923c' }}>STOOD DOWN</span>
+          )}
+          <button
+            className="topbar__btn"
+            onClick={() => setShowSettings(s => !s)}
+            style={{ fontSize: 10, padding: '2px 8px' }}
+          >
+            {showSettings ? 'Hide settings' : '⚙ Settings'}
+          </button>
+        </div>
+
+        <div className="panel-headline__balance">
+          ${status.balance.toLocaleString('en-US', { maximumFractionDigits: 2 })}
+        </div>
+
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, padding: '4px 0 2px' }}>
+          <PropGauge label="Day P&L" value={usd0(status.day_pnl)}
+            detail={`target ${usd0(status.daily_target)} · halt ${usd0(status.daily_max_loss)}`}
+            tone={status.day_pnl >= 0 ? 'ok' : status.day_pnl <= status.daily_max_loss * 0.7 ? 'bad' : 'warn'} />
+          <PropGauge label="Peak today" value={usd0(status.peak_profit)}
+            detail={status.give_back_armed
+              ? `give-back floor ${usd0(status.give_back_floor)}`
+              : 'give-back not armed yet'}
+            tone={status.give_back_armed ? 'warn' : 'ok'} />
+          <PropGauge label="Risk deployed"
+            value={`$${status.risk_used.toFixed(0)}`}
+            detail={`of $${status.risk_budget.toFixed(0)} budget`}
+            tone={status.risk_used > status.risk_budget * 0.8 ? 'warn' : 'ok'} />
+        </div>
+
+        {status.stopped_reason && (
+          <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: '#fb923c', marginTop: 6 }}>
+            {status.stopped_reason}
+          </div>
+        )}
+      </div>
+
+      {showSettings && schema && (
+        <HybridSettings schema={schema} config={status.config} onSaved={onConfigSaved} />
+      )}
+    </div>
+  );
+}
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -644,6 +780,8 @@ export default function App() {
   const [showAnalyst, setShowAnalyst] = useState(false);
   const [accounts,    setAccounts]    = useState(null);
   const [propStatus,  setPropStatus]  = useState(null);
+  const [hybridStatus, setHybridStatus] = useState(null);
+  const [hybridSchema, setHybridSchema] = useState(null);
   const [equity,      setEquity]      = useState(null);
   const [positions,   setPositions]   = useState([]);
   const [snapshot,    setSnapshot]    = useState(null);
@@ -670,7 +808,7 @@ export default function App() {
       const [
         accRes, equityRes, posRes, snapRes, missedRes,
         mechTR, overlayTR, soloTR,
-        overlayJR, soloJR, propRes,
+        overlayJR, soloJR, propRes, hybridRes, cfgRes,
       ] = await Promise.all([
         fetch(`${API}/api/accounts`),
         fetch(`${API}/api/equity`),
@@ -683,6 +821,8 @@ export default function App() {
         fetch(`${API}/api/journal?account=claude_overlay&limit=${JOURNAL_LIMIT}`),
         fetch(`${API}/api/journal?account=claude_solo&limit=${JOURNAL_LIMIT}`),
         fetch(`${API}/api/prop/status`),
+        fetch(`${API}/api/hybrid/status`),
+        fetch(`${API}/api/bot-config`),
       ]);
 
       const [
@@ -695,6 +835,8 @@ export default function App() {
         overlayJR.json(), soloJR.json(),
       ]);
       setPropStatus(propRes.ok ? await propRes.json() : null);
+      setHybridStatus(hybridRes.ok ? await hybridRes.json() : null);
+      if (cfgRes.ok) setHybridSchema((await cfgRes.json()).schema);
 
       setAccounts(accData.accounts || []);
       setEquity(equityData.equity || null);
@@ -811,6 +953,12 @@ export default function App() {
           tradeHasMore={tradeHasMore.claude_solo}
           journal={journal.claude_solo}
           onLoadMoreTrades={() => loadMoreTrades('claude_solo')}
+        />
+
+        <HybridPanel
+          status={hybridStatus}
+          schema={hybridSchema}
+          onConfigSaved={cfg => setHybridStatus(s => s ? { ...s, config: cfg } : s)}
         />
 
         <PropPanel prop={propStatus} />
