@@ -288,7 +288,21 @@ export async function callBatchReflector({ systemPrompt, userContent, deciderNam
   }
 }
 
-export async function callDecider({ systemPrompt, userContent, deciderName, modelOverride = null }) {
+// Validator for deciders that express INTENT (stop as an ATR multiple, risk in
+// dollars, target in R) rather than absolute prices. Prices and lots are then
+// computed deterministically in code, so the model never does arithmetic.
+export function validateIntent(obj) {
+  if (!['TRADE', 'NO_TRADE'].includes(obj.action)) return `invalid action "${obj.action}"`;
+  if (obj.action !== 'TRADE') return null;
+  if (!['LONG', 'SHORT'].includes(obj.direction)) return `invalid direction "${obj.direction}"`;
+  for (const f of ['stop_atr_mult', 'risk_usd', 'target_r']) {
+    const v = Number(obj[f]);
+    if (!isFinite(v) || v <= 0) return `"${f}" must be a positive number (got ${JSON.stringify(obj[f])})`;
+  }
+  return null;
+}
+
+export async function callDecider({ systemPrompt, userContent, deciderName, modelOverride = null, validator = null }) {
   const n = nextCallNum();
   console.log(`🤖 [${deciderName}] LLM call #${n} today (${modelOverride || MODEL})`);
 
@@ -325,13 +339,14 @@ export async function callDecider({ systemPrompt, userContent, deciderName, mode
 
     // Schema/geometry validation failures are distinct from parse failures.
     failureType = 'validation_error';
-    const err = validateDecision(parsed);
+    const err = (validator ?? validateDecision)(parsed);
     if (err) {
       console.error(`❌ [${deciderName}] validation failed: ${err}. Parsed object: ${JSON.stringify(parsed)}`);
       throw new Error(err);
     }
 
-    if (parsed.action === 'TRADE') {
+    // Lots only exist on the price-based schema; intent deciders size in code.
+    if (parsed.action === 'TRADE' && !validator) {
       parsed.lots = clampLots(parsed.lots, deciderName);
     }
 
