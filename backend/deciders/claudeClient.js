@@ -1,11 +1,23 @@
-// claudeClient.js — shared Anthropic client used by both Claude deciders.
+// claudeClient.js — shared LLM client used by both Claude deciders.
 // Handles lazy init, prompt-caching headers, response validation,
 // lot clamping, daily call counter, and the safe NO_TRADE fallback.
+//
+// Provider is env-switchable so model cost can be tuned without code changes:
+//   LLM_PROVIDER=anthropic   (default) → Anthropic SDK, model from ANTHROPIC_MODEL
+//   LLM_PROVIDER=openrouter            → OpenRouter REST, model from OPENROUTER_MODEL
+// Both paths return the same { text, usage } shape, so callers are unchanged.
 
 import Anthropic from '@anthropic-ai/sdk';
+import fetch from 'node-fetch';
 
-export const MODEL      = 'claude-sonnet-4-6';
 export const MAX_TOKENS = 1024;  // raised from 500 — preamble prose can consume ~200 tokens before JSON
+
+const PROVIDER = (process.env.LLM_PROVIDER || 'anthropic').toLowerCase();
+const ANTHROPIC_MODEL  = process.env.ANTHROPIC_MODEL  || 'claude-sonnet-4-6';
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'anthropic/claude-haiku-4.5';
+const OPENROUTER_URL   = 'https://openrouter.ai/api/v1/chat/completions';
+
+export const MODEL = PROVIDER === 'openrouter' ? OPENROUTER_MODEL : ANTHROPIC_MODEL;
 
 const LOT_MIN = 0.01;
 const LOT_MAX = 1.0;
@@ -15,6 +27,102 @@ let _client = null;
 function getClient() {
   if (!_client) _client = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
   return _client;
+}
+
+let _providerLogged = false;
+function logProviderOnce() {
+  if (_providerLogged) return;
+  _providerLogged = true;
+  console.log(`🧠 [LLM] provider=${PROVIDER} model=${MODEL}`);
+}
+
+// ── Provider-agnostic chat call ─────────────────────────────────────────
+// Returns { text, usage } where usage is normalized to the Anthropic shape:
+//   { input, cache_create, cache_read, output }
+// Throws on transport/API errors — callers own the fallback behavior.
+
+async function chat({ systemPrompt, userContent, maxTokens, timeoutMs = 30_000 }) {
+  logProviderOnce();
+
+  if (PROVIDER === 'openrouter') {
+    const key = process.env.OPENROUTER_API_KEY;
+    if (!key) throw new Error('OPENROUTER_API_KEY is not set');
+
+    // Anthropic models routed via OpenRouter honor cache_control on content
+    // blocks; other providers cache implicitly (or not at all), where a plain
+    // string is the safest payload.
+    const anthropicStyle = MODEL.startsWith('anthropic/');
+    const systemMsg = anthropicStyle
+      ? { role: 'system', content: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }] }
+      : { role: 'system', content: systemPrompt };
+
+    const ctrl  = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    let data;
+    try {
+      const resp = await fetch(OPENROUTER_URL, {
+        method: 'POST',
+        signal: ctrl.signal,
+        headers: {
+          'Authorization': `Bearer ${key}`,
+          'Content-Type':  'application/json',
+          'X-Title':       'gold-trader',
+        },
+        body: JSON.stringify({
+          model:      MODEL,
+          max_tokens: maxTokens,
+          messages:   [systemMsg, { role: 'user', content: userContent }],
+        }),
+      });
+      if (!resp.ok) {
+        const body = await resp.text();
+        throw new Error(`OpenRouter HTTP ${resp.status}: ${body.slice(0, 300)}`);
+      }
+      data = await resp.json();
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (data.error) throw new Error(`OpenRouter error: ${data.error.message ?? JSON.stringify(data.error).slice(0, 200)}`);
+    const text = data.choices?.[0]?.message?.content;
+    if (typeof text !== 'string') throw new Error('OpenRouter response had no message content');
+
+    const u = data.usage ?? {};
+    const cacheRead = u.prompt_tokens_details?.cached_tokens ?? 0;
+    return {
+      text,
+      usage: {
+        input:        (u.prompt_tokens ?? 0) - cacheRead,
+        cache_create: 0,                       // not reported separately by OpenRouter
+        cache_read:   cacheRead,
+        output:       u.completion_tokens ?? 0,
+      },
+    };
+  }
+
+  // Default: Anthropic SDK
+  const resp = await getClient().messages.create(
+    {
+      model:      MODEL,
+      max_tokens: maxTokens,
+      system: [
+        { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }
+      ],
+      messages: [{ role: 'user', content: userContent }]
+    },
+    { timeout: timeoutMs }
+  );
+
+  const u = resp.usage;
+  return {
+    text: resp.content[0]?.text ?? '',
+    usage: {
+      input:        u.input_tokens,
+      cache_create: u.cache_creation_input_tokens ?? 0,
+      cache_read:   u.cache_read_input_tokens ?? 0,
+      output:       u.output_tokens,
+    },
+  };
 }
 
 // ── Daily call counter (in-memory, resets at midnight) ──────────────────
@@ -103,28 +211,14 @@ export async function callReflector({ systemPrompt, userContent, deciderName }) 
   console.log(`🪞 [${deciderName}] reflection call #${n} today`);
 
   try {
-    const resp = await getClient().messages.create(
-      {
-        model:      MODEL,
-        max_tokens: 300,
-        system: [
-          { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }
-        ],
-        messages: [{ role: 'user', content: userContent }]
-      },
-      { timeout: 30_000 }
-    );
+    const { text: raw, usage } = await chat({ systemPrompt, userContent, maxTokens: 300 });
 
-    const u = resp.usage;
-    const cacheCreate = u.cache_creation_input_tokens ?? 0;
-    const cacheRead   = u.cache_read_input_tokens   ?? 0;
-    _lastUsage = { input: u.input_tokens, cache_create: cacheCreate, cache_read: cacheRead, output: u.output_tokens };
+    _lastUsage = usage;
     console.log(
-      `📊 [${deciderName}] tokens: in=${u.input_tokens}` +
-      ` (cache_create=${cacheCreate} cache_read=${cacheRead}) out=${u.output_tokens}`
+      `📊 [${deciderName}] tokens: in=${usage.input}` +
+      ` (cache_create=${usage.cache_create} cache_read=${usage.cache_read}) out=${usage.output}`
     );
 
-    const raw   = resp.content[0]?.text ?? '';
     const match = raw.match(/\{[\s\S]*\}/);
     if (!match) throw new Error('no JSON in reflection response');
 
@@ -149,36 +243,21 @@ export async function callReflector({ systemPrompt, userContent, deciderName }) 
 
 export async function callDecider({ systemPrompt, userContent, deciderName }) {
   const n = nextCallNum();
-  console.log(`🤖 [${deciderName}] Claude call #${n} today`);
+  console.log(`🤖 [${deciderName}] LLM call #${n} today (${MODEL})`);
 
   // Tracks which stage we reached — determines the noTrade tag on failure.
   // Starts as 'api_error'; updated as we pass each parsing stage.
   let failureType = 'api_error';
 
   try {
-    const resp = await getClient().messages.create(
-      {
-        model:      MODEL,
-        max_tokens: MAX_TOKENS,
-        system: [
-          { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }
-        ],
-        messages: [{ role: 'user', content: userContent }]
-      },
-      { timeout: 30_000 }
-    );
+    const { text: raw, usage } = await chat({ systemPrompt, userContent, maxTokens: MAX_TOKENS });
 
-    const u = resp.usage;
-    const cacheCreate = u.cache_creation_input_tokens ?? 0;
-    const cacheRead   = u.cache_read_input_tokens   ?? 0;
-    _lastUsage = { input: u.input_tokens, cache_create: cacheCreate, cache_read: cacheRead, output: u.output_tokens };
+    _lastUsage = usage;
     console.log(
-      `📊 [${deciderName}] tokens: in=${u.input_tokens}` +
-      ` (cache_create=${cacheCreate} cache_read=${cacheRead})` +
-      ` out=${u.output_tokens}`
+      `📊 [${deciderName}] tokens: in=${usage.input}` +
+      ` (cache_create=${usage.cache_create} cache_read=${usage.cache_read})` +
+      ` out=${usage.output}`
     );
-
-    const raw = resp.content[0]?.text ?? '';
 
     // Any failure from here is a content/parse problem, not an API problem.
     failureType = 'parse_failure';
