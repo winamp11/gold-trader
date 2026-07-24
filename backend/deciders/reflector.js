@@ -87,8 +87,9 @@ Output format — one object per item you were given, echoing its id exactly:
 // opts.dryRun — ignore the "not yet journaled" filter and skip all writes.
 // Exercises query → prompt → LLM → parse without mutating the journal, so the
 // batch path can be verified on a day whose trades are already reflected.
-export async function reflectDaily(pool, { dryRun = false } = {}) {
+export async function reflectDaily(pool, { dryRun = false, limit = BATCH_LIMIT } = {}) {
   try {
+    const cap = Math.max(1, Math.min(limit, BATCH_LIMIT));
     const notJournaledTrade = dryRun ? '' : `
         AND NOT EXISTS (
           SELECT 1 FROM journal j
@@ -116,7 +117,7 @@ export async function reflectDaily(pool, { dryRun = false } = {}) {
         AND t.exit_reason IS NOT NULL
         AND t.exit_reason NOT IN ('NO_ENTRY', 'EXPIRED')${notJournaledTrade}
       ORDER BY t.exit_timestamp DESC
-      LIMIT ${BATCH_LIMIT}
+      LIMIT ${cap}
     `);
 
     const { rows: shadows } = await pool.query(`
@@ -128,7 +129,7 @@ export async function reflectDaily(pool, { dryRun = false } = {}) {
       WHERE v.portfolio_id IN (2, 3)
         AND v.would_be_outcome IS NOT NULL${notJournaledShadow}
       ORDER BY v.timestamp DESC
-      LIMIT ${BATCH_LIMIT}
+      LIMIT ${cap}
     `);
 
     if (trades.length === 0 && shadows.length === 0) {
