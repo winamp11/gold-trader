@@ -264,7 +264,7 @@ function formatLessons(lessons) {
 
 // ── Decider ──────────────────────────────────────────────────────────────
 
-export async function decide(marketData, atr, portfolio, recentLessons, mechanicalProposal = null, openPositions = null, session = null, rulebookStats = null) {
+export async function decide(marketData, atr, portfolio, recentLessons, mechanicalProposal = null, openPositions = null, session = null, _rulebookStats = null) {
   // Nothing to overlay when mechanical did not produce a trade.
   if (!mechanicalProposal || mechanicalProposal.action !== 'TRADE') {
     return {
@@ -285,9 +285,6 @@ export async function decide(marketData, atr, portfolio, recentLessons, mechanic
     formatOpenPositions(openPositions, portfolio.current_balance),
     '',
     formatProposal(mechanicalProposal),
-    '',
-    `YOUR STATISTICAL RULEBOOK (own trade history, aggregated by the analyst):`,
-    rulebookStats ?? 'No patterns with sufficient sample size yet.',
     '',
     `RECENT LESSONS (${recentLessons?.length ?? 0}):`,
     formatLessons(recentLessons),

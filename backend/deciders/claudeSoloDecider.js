@@ -250,14 +250,11 @@ function formatLessons(lessons) {
 
 // ── Decider ──────────────────────────────────────────────────────────────
 
-export async function decide(marketData, atr, portfolio, recentLessons, openPositions = null, rulebookStats = null, session = null) {
+export async function decide(marketData, atr, portfolio, recentLessons, openPositions = null, _rulebookStats = null, session = null) {
   const userContent = [
     formatSnapshot(marketData, atr, portfolio, session),
     '',
     formatOpenPositions(openPositions, portfolio.current_balance),
-    '',
-    `YOUR STATISTICAL RULEBOOK (own trade history, aggregated by the analyst):`,
-    rulebookStats ?? 'No patterns with sufficient sample size yet.',
     '',
     `RECENT LESSONS (${recentLessons?.length ?? 0}):`,
     formatLessons(recentLessons),
