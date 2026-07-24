@@ -131,6 +131,14 @@ class DatabaseService {
       ON CONFLICT (name) DO NOTHING
     `);
 
+    // Hybrid bot: overlay's judgment + forward-rulebook evidence, under a
+    // live-editable risk envelope (see botConfig.js).
+    await this.pool.query(`
+      INSERT INTO portfolios (name, starting_balance, current_balance) VALUES
+        ('claude_hybrid', 100000, 100000)
+      ON CONFLICT (name) DO NOTHING
+    `);
+
     // Highest balance recorded at any day boundary — anchor for FTMO's
     // trailing Maximum Loss rule (limit = high water − 10% of initial).
     await this.pool.query(`ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS high_water_balance DOUBLE PRECISION`);
@@ -418,6 +426,18 @@ class DatabaseService {
     await this.pool.query(`ALTER TABLE mechanical_rulebook ADD COLUMN IF NOT EXISTS dxy_rising_pct  DOUBLE PRECISION`);
     await this.pool.query(`ALTER TABLE mechanical_rulebook ADD COLUMN IF NOT EXISTS dxy_falling_pct DOUBLE PRECISION`);
     await this.pool.query(`ALTER TABLE mechanical_rulebook ADD COLUMN IF NOT EXISTS dxy_flat_pct    DOUBLE PRECISION`);
+
+    // Live-editable bot parameters (see botConfig.js for schema + clamps).
+    // Stored as JSON so new parameters need no migration; every value is
+    // clamped server-side on write AND on read, so a bad row can never
+    // produce unsafe trading behavior.
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS bot_config (
+        bot_name   TEXT PRIMARY KEY,
+        config     TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
 
     // Forward rulebook: market behavior by condition bucket across ALL cycles
     // (traded or not), aggregated from the forward-outcome labels. This is the

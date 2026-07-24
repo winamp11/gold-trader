@@ -15,6 +15,7 @@ import { VALUE_PER_LOT } from './contractSpec.js';
 import { TAG_TAXONOMY } from './tagTaxonomy.js';
 import { runAnalysis, formatRulebookPrompt, adxBucket, rsiBucket } from './analyst.js';
 import { runForwardLabeling } from './forwardLabeler.js';
+import { CONFIG_SCHEMA, getBotConfig, saveBotConfig, HYBRID_BOT } from './botConfig.js';
 
 dotenv.config();
 
@@ -1375,6 +1376,26 @@ app.post('/api/llm/verify', async (req, res) => {
 app.post('/api/reflect/daily', async (req, res) => {
   try {
     res.json(await reflectDaily(database.pool, { dryRun: req.query.dry_run === '1', limit: parseInt(req.query.limit) || undefined }));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Bot config — live-editable parameters, no redeploy needed ────────────
+// Schema drives the settings form; every write is clamped server-side.
+app.get('/api/bot-config', async (req, res) => {
+  try {
+    res.json({ bot: HYBRID_BOT, schema: CONFIG_SCHEMA, config: await getBotConfig(database.pool) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/bot-config', async (req, res) => {
+  try {
+    const saved = await saveBotConfig(database.pool, req.body?.config ?? req.body ?? {});
+    console.log(`⚙️  [HYBRID] config updated: ${JSON.stringify(saved)}`);
+    res.json({ saved: true, config: saved });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
