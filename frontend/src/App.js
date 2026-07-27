@@ -563,7 +563,7 @@ function MarketPanel({ snapshot, missed }) {
 
 // ─── Prop-firm simulation panel (FTMO rule gauges) ───────────────────────────
 
-function PropGauge({ label, value, detail, tone }) {
+function Gauge({ label, value, detail, tone }) {
   const color = tone === 'bad' ? 'var(--neg)' : tone === 'warn' ? '#fb923c' : 'var(--pos)';
   return (
     <div style={{ minWidth: 150, flex: 1 }}>
@@ -572,67 +572,6 @@ function PropGauge({ label, value, detail, tone }) {
       </div>
       <div style={{ fontFamily: 'var(--mono)', fontSize: 15, fontWeight: 700, color }}>{value}</div>
       {detail && <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--text3)', marginTop: 2 }}>{detail}</div>}
-    </div>
-  );
-}
-
-function PropPanel({ prop }) {
-  if (!prop) return null;
-  const usd0 = n => `${n < 0 ? '-' : '+'}$${Math.abs(n).toFixed(0)}`;
-
-  const dayTone    = prop.day_pnl <= -1200 ? 'bad' : prop.day_pnl < 0 ? 'warn' : 'ok';
-  const equityRoom = prop.balance - prop.trailing_halt_at;
-  const ddTone     = equityRoom < 3000 ? 'bad' : equityRoom < 6000 ? 'warn' : 'ok';
-  const bestTone   = prop.best_day_rule_ok ? 'ok' : 'warn';
-  const tgtPct     = Math.max(0, Math.min(100, prop.target_progress_pct));
-
-  let statusChip = null;
-  if (prop.hard_halted)             statusChip = ['HARD HALTED', 'var(--neg)'];
-  else if (prop.halted_today)       statusChip = ['DAY HALTED', 'var(--neg)'];
-  else if (prop.profit_governor_hit) statusChip = ['GOVERNOR', '#fb923c'];
-
-  return (
-    <div className="account-panel" style={{ borderLeftColor: '#a78bfa' }}>
-      <div className="panel-headline">
-        <div className="panel-headline__top">
-          <span className="panel-headline__dot" style={{ background: '#a78bfa' }} />
-          <span className="panel-headline__name">Prop Sim · FTMO 1-Step</span>
-          {statusChip && (
-            <span className="panel-headline__open" style={{ color: statusChip[1], borderColor: statusChip[1] }}>
-              {statusChip[0]}
-            </span>
-          )}
-        </div>
-        <div className="panel-headline__balance">
-          ${prop.balance.toLocaleString('en-US', { maximumFractionDigits: 2 })}
-        </div>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, padding: '4px 0 2px' }}>
-          <PropGauge
-            label="Day P&L / halt"
-            value={usd0(prop.day_pnl)}
-            detail={`halts at ${usd0(prop.daily_halt_at)}`}
-            tone={dayTone}
-          />
-          <PropGauge
-            label="Trailing DD room"
-            value={usd0(equityRoom).replace('+', '')}
-            detail={`kill at $${prop.trailing_halt_at.toLocaleString()}`}
-            tone={ddTone}
-          />
-          <PropGauge
-            label="Profit vs target"
-            value={usd0(prop.balance - prop.initial_capital)}
-            detail={`${tgtPct.toFixed(0)}% of the +$${((prop.profit_target - prop.initial_capital) / 1000).toFixed(0)}k needed to pass`}
-            tone="ok"
-          />
-          <PropGauge
-            label="Best-day rule"
-            value={prop.best_day_ratio != null ? `${(prop.best_day_ratio * 100).toFixed(0)}%` : '—'}
-            detail="must be ≤ 50%"
-            tone={bestTone}
-          />
-        </div>
-      </div>
     </div>
   );
 }
@@ -713,11 +652,12 @@ function HybridSettings({ schema, config, onSaved }) {
   );
 }
 
-function HybridPanel({ status, schema, onConfigSaved }) {
+function HybridPanel({ status, schema, onConfigSaved, positions, trades, tradeHasMore, onLoadMoreTrades }) {
   const [showSettings, setShowSettings] = useState(false);
   if (!status) return null;
 
   const usd0 = n => `${n < 0 ? '-' : '+'}$${Math.abs(n).toFixed(0)}`;
+  const myPos = (positions || []).filter(p => p.portfolioName === 'claude_hybrid');
 
   return (
     <div className="account-panel" style={{ borderLeftColor: '#38bdf8' }}>
@@ -745,15 +685,15 @@ function HybridPanel({ status, schema, onConfigSaved }) {
         </div>
 
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, padding: '4px 0 2px' }}>
-          <PropGauge label="Day P&L" value={usd0(status.day_pnl)}
+          <Gauge label="Day P&L" value={usd0(status.day_pnl)}
             detail={`target ${usd0(status.daily_target)} · halt ${usd0(status.daily_max_loss)}`}
             tone={status.day_pnl >= 0 ? 'ok' : status.day_pnl <= status.daily_max_loss * 0.7 ? 'bad' : 'warn'} />
-          <PropGauge label="Peak today" value={usd0(status.peak_profit)}
+          <Gauge label="Peak today" value={usd0(status.peak_profit)}
             detail={status.give_back_armed
               ? `give-back floor ${usd0(status.give_back_floor)}`
               : 'give-back not armed yet'}
             tone={status.give_back_armed ? 'warn' : 'ok'} />
-          <PropGauge label="Risk deployed"
+          <Gauge label="Risk deployed"
             value={`$${status.risk_used.toFixed(0)}`}
             detail={`of $${status.risk_budget.toFixed(0)} budget`}
             tone={status.risk_used > status.risk_budget * 0.8 ? 'warn' : 'ok'} />
@@ -765,6 +705,14 @@ function HybridPanel({ status, schema, onConfigSaved }) {
           </div>
         )}
       </div>
+
+      <CollapsibleSection label="Open" count={myPos.length} defaultOpen={myPos.length > 0}>
+        <OpenSection positions={myPos} />
+      </CollapsibleSection>
+
+      <CollapsibleSection label="History" count={(trades || []).length}>
+        <HistorySection trades={trades || []} hasMore={tradeHasMore} onLoadMore={onLoadMoreTrades} />
+      </CollapsibleSection>
 
       {showSettings && schema && (
         <HybridSettings schema={schema} config={status.config} onSaved={onConfigSaved} />
@@ -779,7 +727,6 @@ export default function App() {
   const [showCalc,    setShowCalc]    = useState(false);
   const [showAnalyst, setShowAnalyst] = useState(false);
   const [accounts,    setAccounts]    = useState(null);
-  const [propStatus,  setPropStatus]  = useState(null);
   const [hybridStatus, setHybridStatus] = useState(null);
   const [hybridSchema, setHybridSchema] = useState(null);
   const [equity,      setEquity]      = useState(null);
@@ -790,13 +737,13 @@ export default function App() {
   const [error,       setError]       = useState(null);
 
   const [trades, setTrades] = useState({
-    mechanical: [], claude_overlay: [], claude_solo: [],
+    mechanical: [], claude_overlay: [], claude_solo: [], claude_hybrid: [],
   });
   const [tradeHasMore, setTradeHasMore] = useState({
-    mechanical: false, claude_overlay: false, claude_solo: false,
+    mechanical: false, claude_overlay: false, claude_solo: false, claude_hybrid: false,
   });
   const [tradeOffsets, setTradeOffsets] = useState({
-    mechanical: 0, claude_overlay: 0, claude_solo: 0,
+    mechanical: 0, claude_overlay: 0, claude_solo: 0, claude_hybrid: 0,
   });
 
   const [journal, setJournal] = useState({
@@ -807,8 +754,8 @@ export default function App() {
     try {
       const [
         accRes, equityRes, posRes, snapRes, missedRes,
-        mechTR, overlayTR, soloTR,
-        overlayJR, soloJR, propRes, hybridRes, cfgRes,
+        mechTR, overlayTR, soloTR, hybridTR,
+        overlayJR, soloJR, hybridRes, cfgRes,
       ] = await Promise.all([
         fetch(`${API}/api/accounts`),
         fetch(`${API}/api/equity`),
@@ -818,23 +765,22 @@ export default function App() {
         fetch(`${API}/api/trades/recent?account=mechanical&limit=${TRADE_PAGE}`),
         fetch(`${API}/api/trades/recent?account=claude_overlay&limit=${TRADE_PAGE}`),
         fetch(`${API}/api/trades/recent?account=claude_solo&limit=${TRADE_PAGE}`),
+        fetch(`${API}/api/trades/recent?account=claude_hybrid&limit=${TRADE_PAGE}`),
         fetch(`${API}/api/journal?account=claude_overlay&limit=${JOURNAL_LIMIT}`),
         fetch(`${API}/api/journal?account=claude_solo&limit=${JOURNAL_LIMIT}`),
-        fetch(`${API}/api/prop/status`),
         fetch(`${API}/api/hybrid/status`),
         fetch(`${API}/api/bot-config`),
       ]);
 
       const [
         accData, equityData, posData, snapData, missedData,
-        mechTD, overlayTD, soloTD,
+        mechTD, overlayTD, soloTD, hybridTD,
         overlayJD, soloJD,
       ] = await Promise.all([
         accRes.json(), equityRes.json(), posRes.json(), snapRes.json(), missedRes.json(),
-        mechTR.json(), overlayTR.json(), soloTR.json(),
+        mechTR.json(), overlayTR.json(), soloTR.json(), hybridTR.json(),
         overlayJR.json(), soloJR.json(),
       ]);
-      setPropStatus(propRes.ok ? await propRes.json() : null);
       setHybridStatus(hybridRes.ok ? await hybridRes.json() : null);
       if (cfgRes.ok) setHybridSchema((await cfgRes.json()).schema);
 
@@ -847,12 +793,14 @@ export default function App() {
       const mt = mechTD.trades    || [];
       const ot = overlayTD.trades || [];
       const st = soloTD.trades    || [];
-      setTrades({ mechanical: mt, claude_overlay: ot, claude_solo: st });
-      setTradeOffsets({ mechanical: 0, claude_overlay: 0, claude_solo: 0 });
+      const ht = hybridTD.trades  || [];
+      setTrades({ mechanical: mt, claude_overlay: ot, claude_solo: st, claude_hybrid: ht });
+      setTradeOffsets({ mechanical: 0, claude_overlay: 0, claude_solo: 0, claude_hybrid: 0 });
       setTradeHasMore({
         mechanical:     mt.length >= TRADE_PAGE,
         claude_overlay: ot.length >= TRADE_PAGE,
         claude_solo:    st.length >= TRADE_PAGE,
+        claude_hybrid:  ht.length >= TRADE_PAGE,
       });
 
       setJournal({
@@ -958,10 +906,12 @@ export default function App() {
         <HybridPanel
           status={hybridStatus}
           schema={hybridSchema}
+          positions={positions}
+          trades={trades.claude_hybrid}
+          tradeHasMore={tradeHasMore.claude_hybrid}
+          onLoadMoreTrades={() => loadMoreTrades('claude_hybrid')}
           onConfigSaved={cfg => setHybridStatus(s => s ? { ...s, config: cfg } : s)}
         />
-
-        <PropPanel prop={propStatus} />
 
         <MarketPanel snapshot={snapshot} missed={missed} />
       </main>
