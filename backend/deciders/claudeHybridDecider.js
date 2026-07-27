@@ -11,6 +11,10 @@
 //
 // Unlike overlay it may size stops freely (clamped by config), and it may
 // add to a position when both signals still support it.
+//
+// By design it keeps NO journal and receives no lessons: the forward rulebook
+// is its only learning input, precisely because that is the one source it
+// cannot distort by relabelling its own outcomes after the fact.
 
 import { callDecider, validateIntent } from './claudeClient.js';
 
@@ -164,7 +168,7 @@ function formatMarket(marketData, atr, session, price) {
 export async function decide({
   marketData, atr, portfolio, session, price,
   overlayDecision, bucket, bucketDesc, cfg,
-  openPositions = [], riskUsed = 0, recentLessons = [],
+  openPositions = [], riskUsed = 0,
 }) {
   const userContent = [
     formatMarket(marketData, atr, session, price),
@@ -174,10 +178,6 @@ export async function decide({
     formatOverlay(overlayDecision),
     '',
     formatPositions(openPositions, cfg, riskUsed, portfolio.current_balance),
-    '',
-    recentLessons.length
-      ? `RECENT LESSONS:\n${recentLessons.slice(0, 5).map((l, i) => `${i + 1}. [${l.entry_type}] ${l.lesson_text} (tag: ${l.tag})`).join('\n')}`
-      : `RECENT LESSONS: none yet.`,
     '',
     `Weigh the two sources of evidence above. Trade, add to your position, or pass?`,
   ].join('\n');
