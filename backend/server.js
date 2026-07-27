@@ -81,6 +81,51 @@ function resetHybridDay(today) {
   hybridDay.stoppedReason = null;
 }
 
+// Hybrid day guards: update the profit peak and flatten if the daily target,
+// max loss, or give-back rule fires. Called from the 5-minute cycle AND from
+// every 1-minute price tick, so the peak is sampled at price resolution
+// rather than cycle resolution.
+async function checkHybridDayGuards(currentPrice) {
+  try {
+    if (currentPrice == null || !isTradingHours()) return;
+    const p = await database.getPortfolioByName(HYBRID_BOT);
+    if (!p) return;
+    if (hybridDay.date !== uaeDate()) resetHybridDay(uaeDate());
+
+    const cfg       = await getBotConfig(database.pool);
+    const dayStart  = circuitBreakerState[p.id]?.dayStartBalance ?? p.current_balance;
+    const dayPnl    = (p.current_balance - dayStart) + computeUnrealizedPnl(p.id, currentPrice);
+    const bal       = p.starting_balance || 100000;
+
+    if (dayPnl > hybridDay.peakProfit) hybridDay.peakProfit = dayPnl;
+    if (hybridDay.stoppedReason) return;
+
+    const targetUsd  = bal * (cfg.dailyProfitTargetPct / 100);
+    const maxLossUsd = bal * (cfg.dailyMaxLossPct / 100);
+    const armUsd     = bal * (cfg.giveBackArmPct / 100);
+    const floorUsd   = hybridDay.peakProfit * (1 - cfg.giveBackPct / 100);
+
+    let flatten = null;
+    if (dayPnl >= targetUsd) {
+      flatten = `daily target hit (+$${dayPnl.toFixed(0)} ≥ $${targetUsd.toFixed(0)})`;
+    } else if (dayPnl <= -maxLossUsd) {
+      flatten = `daily max loss hit ($${dayPnl.toFixed(0)} ≤ -$${maxLossUsd.toFixed(0)})`;
+    } else if (hybridDay.peakProfit >= armUsd && dayPnl < floorUsd) {
+      flatten = `give-back rule: peak +$${hybridDay.peakProfit.toFixed(0)} → now +$${dayPnl.toFixed(0)} (floor $${floorUsd.toFixed(0)})`;
+    }
+
+    if (flatten) {
+      hybridDay.stoppedReason = flatten;
+      console.log(`🎯 [HYBRID] ${flatten} — flattening and standing down for the day`);
+      if (outcomeTracker.getOpenPositionsForPortfolio(p.id).length > 0) {
+        await outcomeTracker.forceClosePortfolio(p.id, currentPrice);
+      }
+    }
+  } catch (err) {
+    console.error(`❌ [HYBRID] day-guard check failed: ${err.message}`);
+  }
+}
+
 // Risk currently deployed = sum of (stop distance x lots x value per lot)
 function openRiskFor(portfolioId) {
   let total = 0;
@@ -565,36 +610,13 @@ async function generateSignalIfTradingHours() {
         const cfg = await getBotConfig(database.pool);
         if (hybridDay.date !== uaeDate()) resetHybridDay(uaeDate());
 
-        const dayStart  = circuitBreakerState[hyPortfolio.id]?.dayStartBalance ?? hyPortfolio.current_balance;
-        const openPos   = outcomeTracker.getOpenPositionsForPortfolio(hyPortfolio.id);
-        const unrealized = computeUnrealizedPnl(hyPortfolio.id, currentPrice);
-        const dayPnl    = (hyPortfolio.current_balance - dayStart) + unrealized;
-        const bal       = hyPortfolio.starting_balance || 100000;
+        const openPos = outcomeTracker.getOpenPositionsForPortfolio(hyPortfolio.id);
+        const bal     = hyPortfolio.starting_balance || 100000;
 
-        if (dayPnl > hybridDay.peakProfit) hybridDay.peakProfit = dayPnl;
-
-        // ── Day-level guards ──────────────────────────────────────────────
-        const targetUsd  = bal * (cfg.dailyProfitTargetPct / 100);
-        const maxLossUsd = bal * (cfg.dailyMaxLossPct / 100);
-        const armUsd     = bal * (cfg.giveBackArmPct / 100);
-        const giveBackFloor = hybridDay.peakProfit * (1 - cfg.giveBackPct / 100);
-
-        let flatten = null;
-        if (!hybridDay.stoppedReason) {
-          if (dayPnl >= targetUsd) {
-            flatten = `daily target hit (+$${dayPnl.toFixed(0)} ≥ $${targetUsd.toFixed(0)})`;
-          } else if (dayPnl <= -maxLossUsd) {
-            flatten = `daily max loss hit ($${dayPnl.toFixed(0)} ≤ -$${maxLossUsd.toFixed(0)})`;
-          } else if (hybridDay.peakProfit >= armUsd && dayPnl < giveBackFloor) {
-            flatten = `give-back rule: peak +$${hybridDay.peakProfit.toFixed(0)} → now +$${dayPnl.toFixed(0)} (floor $${giveBackFloor.toFixed(0)})`;
-          }
-        }
-
-        if (flatten) {
-          hybridDay.stoppedReason = flatten;
-          console.log(`🎯 [HYBRID] ${flatten} — flattening and standing down for the day`);
-          if (openPos.length > 0) await outcomeTracker.forceClosePortfolio(hyPortfolio.id, currentPrice);
-        }
+        // Peak tracking and the day guards also run on every 1-minute price
+        // tick (see checkHybridDayGuards), so a spike between 5-minute cycles
+        // cannot escape the give-back rule.
+        await checkHybridDayGuards(currentPrice);
 
         // ── Entry logic ───────────────────────────────────────────────────
         const riskUsed    = openRiskFor(hyPortfolio.id);
@@ -766,6 +788,7 @@ function startPricePoller() {
       }
       // Circuit-breaker check runs every tick (unrealized P&L moves with price).
       await checkCircuitBreakers(price);
+      await checkHybridDayGuards(price);
     } catch (error) {
       console.error('❌ [POLLER] Price check failed:', error.message);
     }
@@ -1472,7 +1495,9 @@ app.get('/api/hybrid/status', async (req, res) => {
     const unrealized = lastKnownPrice ? computeUnrealizedPnl(p.id, lastKnownPrice) : 0;
     const dayPnl     = (p.current_balance - dayStart) + unrealized;
     const bal        = p.starting_balance || 100000;
-    const peak       = hybridDay.date === uaeDate() ? hybridDay.peakProfit : 0;
+    // Guards sample the peak every minute; take the live value if this request
+    // lands between ticks, so peak can never read below current day P&L.
+    const peak       = Math.max(hybridDay.date === uaeDate() ? hybridDay.peakProfit : 0, dayPnl);
     const armUsd     = bal * (cfg.giveBackArmPct / 100);
 
     res.json({
