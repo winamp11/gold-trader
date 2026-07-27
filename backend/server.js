@@ -73,13 +73,12 @@ let propHardHalted = null;      // ISO date string when the trailing Max Loss gu
 // ── Hybrid bot day state ──────────────────────────────────────────────────
 // peakProfit drives the give-back rule; stoppedReason latches the day off
 // once the target, give-back or loss limit fires. Reset each session day.
-const hybridDay = { date: null, peakProfit: 0, stoppedReason: null, lastEntryMs: 0 };
+const hybridDay = { date: null, peakProfit: 0, stoppedReason: null };
 
 function resetHybridDay(today) {
   hybridDay.date = today;
   hybridDay.peakProfit = 0;
   hybridDay.stoppedReason = null;
-  hybridDay.lastEntryMs = 0;
 }
 
 // Risk currently deployed = sum of (stop distance x lots x value per lot)
@@ -601,14 +600,26 @@ async function generateSignalIfTradingHours() {
         const riskUsed    = openRiskFor(hyPortfolio.id);
         const riskBudget  = bal * (cfg.maxTotalRiskPct / 100);
         const riskLeft    = Math.max(0, riskBudget - riskUsed);
-        const sinceEntry  = Date.now() - hybridDay.lastEntryMs;
 
         let skip = null;
         if (hybridDay.stoppedReason)                          skip = `stood down: ${hybridDay.stoppedReason}`;
         else if (isHaltedToday(hyPortfolio.id))               skip = 'circuit breaker active';
         else if (openPos.length >= cfg.maxOpenPositions)      skip = `position cap ${openPos.length}/${cfg.maxOpenPositions}`;
-        else if (sinceEntry < cfg.entryIntervalMin * 60000)   skip = `entry throttle — ${Math.ceil((cfg.entryIntervalMin * 60000 - sinceEntry) / 60000)} min to go`;
         else if (riskLeft < 50)                               skip = `risk budget exhausted ($${riskUsed.toFixed(0)}/$${riskBudget.toFixed(0)})`;
+
+        // Entry throttle is read from the DB, not memory: in-memory state resets
+        // to "never traded" on every redeploy, which silently bypassed the gate.
+        if (!skip) {
+          const { rows: lastRows } = await database.pool.query(
+            `SELECT timestamp FROM trades WHERE portfolio_id = $1 ORDER BY timestamp DESC LIMIT 1`,
+            [hyPortfolio.id]
+          );
+          const lastMs = lastRows[0] ? new Date(lastRows[0].timestamp).getTime() : 0;
+          const waited = Date.now() - lastMs;
+          if (lastMs && waited < cfg.entryIntervalMin * 60000) {
+            skip = `entry throttle — ${Math.ceil((cfg.entryIntervalMin * 60000 - waited) / 60000)} min to go`;
+          }
+        }
 
         if (skip) {
           console.log(`⏸️  [HYBRID] no entry — ${skip}`);
@@ -658,7 +669,6 @@ async function generateSignalIfTradingHours() {
                 },
                 signalId, currentPrice, isSignalOwner: false, session: currentSession,
               });
-              hybridDay.lastEntryMs = Date.now();
               console.log(`🔀 [HYBRID] ${hyDecision.direction} stop=${mult.toFixed(2)}×ATR (${stopDist.toFixed(1)}pts) risk=$${riskUsd.toFixed(0)} lots=${lots} target=${targetR.toFixed(1)}R | ${bucketDesc}`);
             }
           } else {
@@ -1814,7 +1824,10 @@ try {
         tag:            t.tag      ?? null,
         reasoning:      t.reasoning ?? null,
         session:        t.session   ?? null,
-        startTime:      new Date(),
+        // Real entry time from the DB, not the restart time — otherwise every
+        // restored position reports the moment of the restart, which breaks
+        // age-based logic (expiry, time exits) and misreports entry spacing.
+        startTime:      t.timestamp ? new Date(t.timestamp) : new Date(),
         entryTriggered: true,
         outcome:        null,
         maxPrice:       t.entry_price,
