@@ -73,12 +73,13 @@ let propHardHalted = null;      // ISO date string when the trailing Max Loss gu
 // ── Hybrid bot day state ──────────────────────────────────────────────────
 // peakProfit drives the give-back rule; stoppedReason latches the day off
 // once the target, give-back or loss limit fires. Reset each session day.
-const hybridDay = { date: null, peakProfit: 0, stoppedReason: null };
+const hybridDay = { date: null, peakProfit: 0, stoppedReason: null, runsBanked: 0 };
 
 function resetHybridDay(today) {
   hybridDay.date = today;
   hybridDay.peakProfit = 0;
   hybridDay.stoppedReason = null;
+  hybridDay.runsBanked = 0;
 }
 
 // Hybrid day guards: update the profit peak and flatten if the daily target,
@@ -104,22 +105,30 @@ async function checkHybridDayGuards(currentPrice) {
     const maxLossUsd = bal * (cfg.dailyMaxLossPct / 100);
     const armUsd     = bal * (cfg.giveBackArmPct / 100);
     const floorUsd   = hybridDay.peakProfit * (1 - cfg.giveBackPct / 100);
+    const hasOpen    = outcomeTracker.getOpenPositionsForPortfolio(p.id).length > 0;
+
+    // Give-back applies PER RUN, not per day: it banks the profit of the
+    // current run, then resets the peak so the bot can start a fresh run.
+    // Only the daily target and the daily max loss end the day.
+    if (hybridDay.peakProfit >= armUsd && dayPnl < floorUsd) {
+      console.log(`🎯 [HYBRID] give-back: peak +$${hybridDay.peakProfit.toFixed(0)} → now +$${dayPnl.toFixed(0)} (floor $${floorUsd.toFixed(0)}) — banking run, continuing to trade`);
+      if (hasOpen) await outcomeTracker.forceClosePortfolio(p.id, currentPrice);
+      hybridDay.peakProfit = dayPnl;   // new run starts from here
+      hybridDay.runsBanked = (hybridDay.runsBanked || 0) + 1;
+      return;
+    }
 
     let flatten = null;
     if (dayPnl >= targetUsd) {
       flatten = `daily target hit (+$${dayPnl.toFixed(0)} ≥ $${targetUsd.toFixed(0)})`;
     } else if (dayPnl <= -maxLossUsd) {
       flatten = `daily max loss hit ($${dayPnl.toFixed(0)} ≤ -$${maxLossUsd.toFixed(0)})`;
-    } else if (hybridDay.peakProfit >= armUsd && dayPnl < floorUsd) {
-      flatten = `give-back rule: peak +$${hybridDay.peakProfit.toFixed(0)} → now +$${dayPnl.toFixed(0)} (floor $${floorUsd.toFixed(0)})`;
     }
 
     if (flatten) {
       hybridDay.stoppedReason = flatten;
-      console.log(`🎯 [HYBRID] ${flatten} — flattening and standing down for the day`);
-      if (outcomeTracker.getOpenPositionsForPortfolio(p.id).length > 0) {
-        await outcomeTracker.forceClosePortfolio(p.id, currentPrice);
-      }
+      console.log(`🛑 [HYBRID] ${flatten} — flattening and standing down for the day`);
+      if (hasOpen) await outcomeTracker.forceClosePortfolio(p.id, currentPrice);
     }
   } catch (err) {
     console.error(`❌ [HYBRID] day-guard check failed: ${err.message}`);
@@ -1510,6 +1519,7 @@ app.get('/api/hybrid/status', async (req, res) => {
       daily_target:     bal * (cfg.dailyProfitTargetPct / 100),
       daily_max_loss:   -(bal * (cfg.dailyMaxLossPct / 100)),
       stopped_reason:   hybridDay.date === uaeDate() ? hybridDay.stoppedReason : null,
+      runs_banked:      hybridDay.date === uaeDate() ? (hybridDay.runsBanked || 0) : 0,
       open_positions:   outcomeTracker.getOpenPositionsForPortfolio(p.id).length,
       risk_used:        openRiskFor(p.id),
       risk_budget:      bal * (cfg.maxTotalRiskPct / 100),
