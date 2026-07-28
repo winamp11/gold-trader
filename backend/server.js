@@ -75,6 +75,27 @@ let propHardHalted = null;      // ISO date string when the trailing Max Loss gu
 // once the target, give-back or loss limit fires. Reset each session day.
 const hybridDay = { date: null, peakProfit: 0, stoppedReason: null, runsBanked: 0 };
 
+// Restart-safe: a redeploy mid-day must not wipe the run peak or a latched
+// stand-down, or the give-back rule and daily limits silently start over.
+async function restoreOrResetHybridDay(today) {
+  try {
+    const raw = await database.getServiceState('hybrid_day');
+    const saved = raw ? JSON.parse(raw) : null;
+    if (saved && saved.date === today) {
+      Object.assign(hybridDay, saved);
+      console.log(`🔄 [HYBRID] day state restored: peak +$${(saved.peakProfit ?? 0).toFixed(0)}, runs banked ${saved.runsBanked ?? 0}${saved.stoppedReason ? `, stood down (${saved.stoppedReason})` : ''}`);
+      return;
+    }
+  } catch { /* fall through to reset */ }
+  resetHybridDay(today);
+  await persistHybridDay();
+}
+
+async function persistHybridDay() {
+  try { await database.setServiceState('hybrid_day', JSON.stringify(hybridDay)); }
+  catch { /* non-fatal */ }
+}
+
 function resetHybridDay(today) {
   hybridDay.date = today;
   hybridDay.peakProfit = 0;
@@ -91,14 +112,14 @@ async function checkHybridDayGuards(currentPrice) {
     if (currentPrice == null || !isTradingHours()) return;
     const p = await database.getPortfolioByName(HYBRID_BOT);
     if (!p) return;
-    if (hybridDay.date !== uaeDate()) resetHybridDay(uaeDate());
+    if (hybridDay.date !== uaeDate()) await restoreOrResetHybridDay(uaeDate());
 
     const cfg       = await getBotConfig(database.pool);
     const dayStart  = circuitBreakerState[p.id]?.dayStartBalance ?? p.current_balance;
     const dayPnl    = (p.current_balance - dayStart) + computeUnrealizedPnl(p.id, currentPrice);
     const bal       = p.starting_balance || 100000;
 
-    if (dayPnl > hybridDay.peakProfit) hybridDay.peakProfit = dayPnl;
+    if (dayPnl > hybridDay.peakProfit) { hybridDay.peakProfit = dayPnl; await persistHybridDay(); }
     if (hybridDay.stoppedReason) return;
 
     const targetUsd  = bal * (cfg.dailyProfitTargetPct / 100);
@@ -115,6 +136,7 @@ async function checkHybridDayGuards(currentPrice) {
       if (hasOpen) await outcomeTracker.forceClosePortfolio(p.id, currentPrice);
       hybridDay.peakProfit = dayPnl;   // new run starts from here
       hybridDay.runsBanked = (hybridDay.runsBanked || 0) + 1;
+      await persistHybridDay();
       return;
     }
 
@@ -127,6 +149,7 @@ async function checkHybridDayGuards(currentPrice) {
 
     if (flatten) {
       hybridDay.stoppedReason = flatten;
+      await persistHybridDay();
       console.log(`🛑 [HYBRID] ${flatten} — flattening and standing down for the day`);
       if (hasOpen) await outcomeTracker.forceClosePortfolio(p.id, currentPrice);
     }
@@ -338,16 +361,29 @@ function computeUnrealizedPnl(portfolioId, price) {
 async function initSessionDay() {
   const today = uaeDate();
   if (currentSessionDate === today) return; // already done for today
-  console.log(`🌅 [SESSION] Initializing session day ${today} — snapshotting day-start balances`);
+
+  // Whether this is genuinely a NEW day, or just a restart within a day that
+  // was already initialized. currentSessionDate is in-memory and resets on
+  // every restart, so without this check a mid-day redeploy re-baselines every
+  // account: the day's P&L display resets to zero AND the circuit-breaker loss
+  // counter forgets losses already taken, allowing a full extra day's loss.
+  let storedDay = null;
+  try { storedDay = await database.getServiceState('session_day'); } catch { /* treat as new */ }
+  const isNewDay = storedDay !== today;
+
+  console.log(isNewDay
+    ? `🌅 [SESSION] New session day ${today} — snapshotting day-start balances`
+    : `🔄 [SESSION] Restart within ${today} — restoring day-start balances from DB`);
+
   const portfolios = await database.getAllPortfolios();
   for (const p of portfolios) {
     // Preserve halt state for today (handles server restart mid-session).
     const haltedToday = p.circuit_breaker_date === today;
-    const dayStartBalance = haltedToday && p.day_start_balance != null
-      ? p.day_start_balance     // keep the balance captured before the breaker fired
-      : p.current_balance;      // new day or fresh start
+    const dayStartBalance = (!isNewDay || haltedToday) && p.day_start_balance != null
+      ? p.day_start_balance     // same day: keep the baseline already captured
+      : p.current_balance;      // genuinely a new day (or no baseline recorded)
 
-    if (!haltedToday) {
+    if (isNewDay && !haltedToday) {
       await database.setDayStartBalance(p.id, dayStartBalance);
       await database.setCircuitBreakerDate(p.id, null);
     }
@@ -357,12 +393,15 @@ async function initSessionDay() {
     // FTMO trailing Max Loss anchor: high water = highest day-boundary balance
     // (or initial capital if higher). Positions are flat overnight, so the
     // day-start balance IS the midnight balance.
-    if (p.name === PROP.name) {
+    if (isNewDay && p.name === PROP.name) {
       const hw = Math.max(p.high_water_balance ?? PROP.initialCapital, p.current_balance);
       if (hw !== p.high_water_balance) await database.setHighWaterBalance(p.id, hw);
     }
   }
   currentSessionDate = today;
+  if (isNewDay) {
+    try { await database.setServiceState('session_day', today); } catch { /* non-fatal */ }
+  }
   console.log(`🌅 [SESSION] Day-start balances: ${portfolios.map(p => `${p.name}=$${(circuitBreakerState[p.id].dayStartBalance).toFixed(2)}`).join(', ')}`);
 }
 
@@ -617,7 +656,7 @@ async function generateSignalIfTradingHours() {
       const hyPortfolio = await database.getPortfolioByName(HYBRID_BOT);
       if (hyPortfolio) {
         const cfg = await getBotConfig(database.pool);
-        if (hybridDay.date !== uaeDate()) resetHybridDay(uaeDate());
+        if (hybridDay.date !== uaeDate()) await restoreOrResetHybridDay(uaeDate());
 
         const openPos = outcomeTracker.getOpenPositionsForPortfolio(hyPortfolio.id);
         const bal     = hyPortfolio.starting_balance || 100000;
