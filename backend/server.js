@@ -379,9 +379,30 @@ async function initSessionDay() {
   for (const p of portfolios) {
     // Preserve halt state for today (handles server restart mid-session).
     const haltedToday = p.circuit_breaker_date === today;
-    const dayStartBalance = (!isNewDay || haltedToday) && p.day_start_balance != null
+    let dayStartBalance = (!isNewDay || haltedToday) && p.day_start_balance != null
       ? p.day_start_balance     // same day: keep the baseline already captured
       : p.current_balance;      // genuinely a new day (or no baseline recorded)
+
+    // Self-heal a baseline corrupted by earlier restarts: the true day start is
+    // current balance minus everything booked today. Derived, not guessed.
+    if (!isNewDay) {
+      try {
+        const { rows } = await database.pool.query(
+          `SELECT COALESCE(realized_pnl, 0) AS realized FROM account_pnl_daily
+           WHERE portfolio_id = $1 AND date = $2`,
+          [p.id, today]
+        );
+        const realizedToday = rows[0] ? Number(rows[0].realized) : 0;
+        const derived = p.current_balance - realizedToday;
+        if (Math.abs(derived - dayStartBalance) > 0.01) {
+          console.log(`🔧 [SESSION] ${p.name} day-start corrected $${dayStartBalance.toFixed(2)} → $${derived.toFixed(2)} (realized today $${realizedToday.toFixed(2)})`);
+          dayStartBalance = derived;
+          await database.setDayStartBalance(p.id, derived);
+        }
+      } catch (err) {
+        console.warn(`⚠️  [SESSION] ${p.name} day-start self-heal skipped: ${err.message}`);
+      }
+    }
 
     if (isNewDay && !haltedToday) {
       await database.setDayStartBalance(p.id, dayStartBalance);
