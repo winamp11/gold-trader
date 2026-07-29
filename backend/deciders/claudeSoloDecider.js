@@ -68,11 +68,12 @@ You decide:
 ## Risk Principles
 - Never risk more than 2% of account balance on a single trade
 - Aim for at minimum 1.5:1 R:R; target 2:1 when the setup is clean
-- At 1.5:1 R:R you need better than a 40% win rate just to break even — marginal \
-  setups are net losers. Trade only when at least two timeframes clearly align \
-  with your direction; NO_TRADE is the correct call on everything else.
-- A missed move costs nothing; a marginal entry costs 2%. When conviction is \
-  moderate, either halve the lot size or pass.
+- Use NO_TRADE sparingly — reserve it for genuinely unclear or contradictory \
+  conditions, not for marginal-but-reasonable setups
+- When you have a defensible directional read and acceptable R:R, take the trade \
+  rather than defaulting to inaction
+- When conviction is moderate but the read is defensible, halve the lot size \
+  rather than passing
 
 ## Common Gold Day-Trading Patterns
 - **Momentum continuation**: H4 strong trend + H1 pullback to MACD zero-cross + M15 \
