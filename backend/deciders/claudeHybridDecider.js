@@ -56,6 +56,12 @@ Never treat a small sample as though it were a large one.
 - Trading window 06:00–21:00 UAE. All positions force-close at 21:00 UAE.
 - A 0.30-point round-trip spread is charged per trade — targets must clear it.
 - ATR(14) per timeframe is provided for volatility-calibrated sizing.
+- The snapshot also gives you positional context: previous day's range, today's \
+  session range so far, and recent H1 structure. Use these to judge WHERE price \
+  sits, not just what the indicators read — e.g. an indicator-clean long right at \
+  the top of today's range or just under yesterday's high is a weaker entry than \
+  the same reading mid-range, since a reversal there costs more than one that has \
+  room to run.
 
 ## Sizing
 - You choose the stop distance as a multiple of H1 ATR, within the bounds given \
@@ -89,6 +95,38 @@ For NO_TRADE set direction, stop_atr_mult, risk_usd and target_r to null.
 reasoning and tag are mandatory.`;
 
 function fmt(n, dp = 2) { return n != null ? Number(n).toFixed(dp) : 'n/a'; }
+
+// Derives a one-line structural summary from the last 5 H1 candles.
+// Same helper used by overlay/solo — duplicated here rather than shared so
+// each decider file stays self-contained (existing project convention).
+function h1StructureSummary(candles) {
+  if (!candles || candles.length < 3) return null;
+  const c = [...candles].reverse();           // chronological, oldest first
+  const n = Math.min(c.length, 5);
+  const r = c.slice(-n);                      // last n candles chronological
+
+  const closes = r.map(x => x.close);
+  const highs  = r.map(x => x.high);
+  const lows   = r.map(x => x.low);
+  const ranges = r.map(x => x.high - x.low);
+
+  const closeDir = closes[n-1] > closes[0] ? 'closes rising'
+                 : closes[n-1] < closes[0] ? 'closes falling'
+                 : 'closes flat';
+
+  const hhLh = highs[n-1] > highs[n-2] ? 'HH' : highs[n-1] < highs[n-2] ? 'LH' : '=H';
+  const hlLl = lows[n-1]  > lows[n-2]  ? 'HL' : lows[n-1]  < lows[n-2]  ? 'LL' : '=L';
+
+  const half    = Math.max(1, Math.floor(n / 2));
+  const avgOld  = ranges.slice(0, half).reduce((s, v) => s + v, 0) / half;
+  const avgNew  = ranges.slice(-half).reduce((s, v) => s + v, 0) / half;
+  const rangeDir = avgNew > avgOld * 1.15 ? 'ranges expanding'
+                 : avgNew < avgOld * 0.85 ? 'ranges contracting'
+                 : 'ranges stable';
+
+  const closesStr = closes.map(v => v.toFixed(1)).join(' ');
+  return `last ${n} closes: ${closesStr} · ${closeDir} · ${hhLh}/${hlLl} · ${rangeDir}`;
+}
 
 function formatRulebook(bucket, cfg, bucketDesc) {
   if (!bucket) {
@@ -160,6 +198,20 @@ function formatMarket(marketData, atr, session, price) {
   if (marketData.dxyBias) {
     lines.push(`  DXY: ${marketData.dxyBias.bias} (gold is inversely correlated)`);
   }
+
+  // Positional/structural context — where is price relative to recent range,
+  // and what has it been doing. Previously missing entirely from this snapshot.
+  if (marketData.prevDayHigh != null && marketData.prevDayLow != null) {
+    lines.push(`  Prev day range: ${fmt(marketData.prevDayLow)} – ${fmt(marketData.prevDayHigh)}`);
+  }
+  if (marketData.sessionRange) {
+    lines.push(`  ${marketData.sessionRange}`);
+  }
+  const structure = h1StructureSummary(marketData.h1Candles);
+  if (structure) {
+    lines.push(`  H1 structure: ${structure}`);
+  }
+
   return lines.join('\n');
 }
 

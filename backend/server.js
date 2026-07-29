@@ -175,6 +175,9 @@ let sessionRangeDate = null;  // UAE date of last range reset
 // ── ADR cache: average daily range over 14 days, recomputed once per day ──
 let adrCache = { date: null, value: null };
 
+// ── Previous-day high/low cache: recomputed once per day ──────────────────
+let prevDayCache = { date: null, high: null, low: null };
+
 // ── Solo decider throttle ─────────────────────────────────────────────────
 // Solo re-evaluates from scratch every cycle, which made it ~70% of LLM spend.
 // Its trades hold for hours, so a 15-minute cadence loses nothing but cost.
@@ -249,6 +252,29 @@ async function getOrFetchAdr() {
     return adr;
   } catch (e) {
     console.error('[ADR] fetch failed:', e.message);
+    return null;
+  }
+}
+
+// Previous (fully-closed) day's high/low. index[0] of a 1day series is
+// today's still-forming candle; index[1] is the last completed day.
+async function getOrFetchPrevDayHighLow() {
+  const today = uaeDate();
+  if (prevDayCache.date === today && prevDayCache.high != null) {
+    return { high: prevDayCache.high, low: prevDayCache.low };
+  }
+  try {
+    const res = await twelveData.fetchTimeSeries('XAU/USD', '1day', 2);
+    const candles = res?.values;
+    if (!candles || candles.length < 2) return null;
+    const high = parseFloat(candles[1].high);
+    const low  = parseFloat(candles[1].low);
+    if (!isFinite(high) || !isFinite(low)) return null;
+    prevDayCache = { date: today, high, low };
+    console.log(`📐 [PREV DAY] ${candles[1].datetime}: H=${high.toFixed(2)} L=${low.toFixed(2)}`);
+    return { high, low };
+  } catch (e) {
+    console.error('[PREV DAY] fetch failed:', e.message);
     return null;
   }
 }
@@ -523,6 +549,9 @@ async function generateSignalIfTradingHours() {
     lastKnownPrice = currentPrice;
     updateSessionRange(currentPrice);
     marketData.sessionRange = getSessionRangeStr(currentPrice);
+    const prevDayHL = await getOrFetchPrevDayHighLow();
+    marketData.prevDayHigh = prevDayHL?.high ?? null;
+    marketData.prevDayLow  = prevDayHL?.low  ?? null;
     console.log(`📍 [CYCLE] Session: ${currentSession ?? 'none'} | Price: $${currentPrice?.toFixed(2)}`);
     if (marketData.atrCaveat) {
       console.log(`⚠️  [CYCLE] ATR caveat active (H1/H4 ratio understated) — prompts will include caveat`);
