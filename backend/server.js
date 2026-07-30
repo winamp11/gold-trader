@@ -73,7 +73,14 @@ let propHardHalted = null;      // ISO date string when the trailing Max Loss gu
 // ── Hybrid bot day state ──────────────────────────────────────────────────
 // peakProfit drives the give-back rule; stoppedReason latches the day off
 // once the target, give-back or loss limit fires. Reset each session day.
-const hybridDay = { date: null, peakProfit: 0, stoppedReason: null, runsBanked: 0 };
+const hybridDay = {
+  date: null, peakProfit: 0, stoppedReason: null, runsBanked: 0,
+  // Context captured at the moment the current run's peak was set —
+  // written to hybrid_run_log when the run ends. Pure logging, read by
+  // nothing else.
+  peakAt: null, peakSession: null, peakPositionCount: null, peakPositionDirections: null,
+  runNumber: 0,
+};
 
 // Restart-safe: a redeploy mid-day must not wipe the run peak or a latched
 // stand-down, or the give-back rule and daily limits silently start over.
@@ -101,6 +108,11 @@ function resetHybridDay(today) {
   hybridDay.peakProfit = 0;
   hybridDay.stoppedReason = null;
   hybridDay.runsBanked = 0;
+  hybridDay.peakAt = null;
+  hybridDay.peakSession = null;
+  hybridDay.peakPositionCount = null;
+  hybridDay.peakPositionDirections = null;
+  hybridDay.runNumber = 0;
 }
 
 // Hybrid day guards: update the profit peak and flatten if the daily target,
@@ -118,8 +130,18 @@ async function checkHybridDayGuards(currentPrice) {
     const dayStart  = circuitBreakerState[p.id]?.dayStartBalance ?? p.current_balance;
     const dayPnl    = (p.current_balance - dayStart) + computeUnrealizedPnl(p.id, currentPrice);
     const bal       = p.starting_balance || 100000;
+    const nowIso    = new Date().toISOString();
+    const session   = getSession(new Date());
 
-    if (dayPnl > hybridDay.peakProfit) { hybridDay.peakProfit = dayPnl; await persistHybridDay(); }
+    if (dayPnl > hybridDay.peakProfit) {
+      hybridDay.peakProfit = dayPnl;
+      hybridDay.peakAt     = nowIso;
+      hybridDay.peakSession = session ?? null;
+      const openNow = outcomeTracker.getOpenPositionsForPortfolio(p.id);
+      hybridDay.peakPositionCount      = openNow.length;
+      hybridDay.peakPositionDirections = openNow.map(t => t.direction).join(',') || null;
+      await persistHybridDay();
+    }
     if (hybridDay.stoppedReason) return;
 
     const targetUsd  = bal * (cfg.dailyProfitTargetPct / 100);
@@ -128,28 +150,50 @@ async function checkHybridDayGuards(currentPrice) {
     const floorUsd   = hybridDay.peakProfit * (1 - cfg.giveBackPct / 100);
     const hasOpen    = outcomeTracker.getOpenPositionsForPortfolio(p.id).length > 0;
 
+    // Log the completed run's peak/end context. Pure research data — nothing
+    // downstream reads this table to make a decision.
+    const logRun = async (endReason) => {
+      try {
+        hybridDay.runNumber = (hybridDay.runNumber || 0) + 1;
+        await database.saveHybridRunLog({
+          date: uaeDate(), runNumber: hybridDay.runNumber,
+          peakProfit: hybridDay.peakProfit, peakAt: hybridDay.peakAt, peakSession: hybridDay.peakSession,
+          peakPositionCount: hybridDay.peakPositionCount, peakPositionDirections: hybridDay.peakPositionDirections,
+          endReason, endPnl: dayPnl, endAt: nowIso, endSession: session ?? null,
+        });
+      } catch (err) {
+        console.error(`⚠️  [HYBRID] run-log write failed (non-fatal): ${err.message}`);
+      }
+    };
+
     // Give-back applies PER RUN, not per day: it banks the profit of the
     // current run, then resets the peak so the bot can start a fresh run.
     // Only the daily target and the daily max loss end the day.
     if (hybridDay.peakProfit >= armUsd && dayPnl < floorUsd) {
       console.log(`🎯 [HYBRID] give-back: peak +$${hybridDay.peakProfit.toFixed(0)} → now +$${dayPnl.toFixed(0)} (floor $${floorUsd.toFixed(0)}) — banking run, continuing to trade`);
+      await logRun('give_back');
       if (hasOpen) await outcomeTracker.forceClosePortfolio(p.id, currentPrice);
       hybridDay.peakProfit = dayPnl;   // new run starts from here
+      hybridDay.peakAt = nowIso; hybridDay.peakSession = session ?? null;
+      hybridDay.peakPositionCount = null; hybridDay.peakPositionDirections = null;
       hybridDay.runsBanked = (hybridDay.runsBanked || 0) + 1;
       await persistHybridDay();
       return;
     }
 
-    let flatten = null;
+    let flatten = null, flattenReason = null;
     if (dayPnl >= targetUsd) {
       flatten = `daily target hit (+$${dayPnl.toFixed(0)} ≥ $${targetUsd.toFixed(0)})`;
+      flattenReason = 'daily_target';
     } else if (dayPnl <= -maxLossUsd) {
       flatten = `daily max loss hit ($${dayPnl.toFixed(0)} ≤ -$${maxLossUsd.toFixed(0)})`;
+      flattenReason = 'daily_max_loss';
     }
 
     if (flatten) {
       hybridDay.stoppedReason = flatten;
       await persistHybridDay();
+      await logRun(flattenReason);
       console.log(`🛑 [HYBRID] ${flatten} — flattening and standing down for the day`);
       if (hasOpen) await outcomeTracker.forceClosePortfolio(p.id, currentPrice);
     }

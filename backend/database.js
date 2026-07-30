@@ -439,6 +439,29 @@ class DatabaseService {
       )
     `);
 
+    // Hybrid run log: raw record of each accounting run's peak and how it
+    // ended (give-back bank, daily target, or daily max loss). Written live
+    // by server.js the moment a run ends. Pure research data — nothing reads
+    // this to make a trading decision; it exists so the analyst can later
+    // check whether peak timing correlates with session/time-of-day.
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS hybrid_run_log (
+        id                        SERIAL PRIMARY KEY,
+        date                      TEXT NOT NULL,
+        run_number                INTEGER NOT NULL,
+        peak_profit               DOUBLE PRECISION NOT NULL,
+        peak_at                   TEXT NOT NULL,
+        peak_session              TEXT,
+        peak_position_count       INTEGER,
+        peak_position_directions  TEXT,
+        end_reason                TEXT NOT NULL,
+        end_pnl                   DOUBLE PRECISION NOT NULL,
+        end_at                    TEXT NOT NULL,
+        end_session               TEXT,
+        created_at                TEXT NOT NULL DEFAULT TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+      )
+    `);
+
     // Forward rulebook: market behavior by condition bucket across ALL cycles
     // (traded or not), aggregated from the forward-outcome labels. This is the
     // selection-bias-free companion to the per-account rulebooks. Rebuilt on
@@ -985,6 +1008,22 @@ class DatabaseService {
       'UPDATE portfolios SET high_water_balance = $1 WHERE id = $2',
       [balance, portfolioId]
     );
+  }
+
+  async saveHybridRunLog({
+    date, runNumber, peakProfit, peakAt, peakSession,
+    peakPositionCount, peakPositionDirections,
+    endReason, endPnl, endAt, endSession,
+  }) {
+    await this.pool.query(`
+      INSERT INTO hybrid_run_log
+        (date, run_number, peak_profit, peak_at, peak_session,
+         peak_position_count, peak_position_directions,
+         end_reason, end_pnl, end_at, end_session)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+    `, [date, runNumber, peakProfit, peakAt, peakSession,
+        peakPositionCount, peakPositionDirections,
+        endReason, endPnl, endAt, endSession]);
   }
 
   async saveVetoShadow({ portfolioId, direction, entry, stop, target, tag = null, reasoning = null }) {
