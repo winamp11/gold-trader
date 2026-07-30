@@ -868,10 +868,10 @@ async function generateSignalIfTradingHours() {
   }
 }
 
-// ── Window-close sweep — fires once at the 20:30 UAE edge ─────────────────
+// ── Window-close sweep — fires once at the 21:00 UAE edge ─────────────────
 async function runWindowClose() {
   console.log('\n🔔 [WINDOW CLOSE] ─────────────────────────────────────────');
-  console.log('🔔 [WINDOW CLOSE] Trading window ended (20:30 UAE) — force-closing all positions');
+  console.log('🔔 [WINDOW CLOSE] Trading window ended (21:00 UAE) — force-closing all positions');
 
   // Try to get a fresh final mark price; fall back to the last poller tick
   let price = lastKnownPrice;
@@ -909,7 +909,7 @@ function startPricePoller() {
   setInterval(async () => {
     const nowInHours = isTradingHours();
 
-    // Detect the 20:30 window-close edge: was trading, now not
+    // Detect the 21:00 window-close edge: was trading, now not
     if (wasInTradingHours && !nowInHours) {
       wasInTradingHours = false;
       await runWindowClose();
