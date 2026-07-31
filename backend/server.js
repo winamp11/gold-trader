@@ -765,8 +765,19 @@ async function generateSignalIfTradingHours() {
         const riskBudget  = bal * (cfg.maxTotalRiskPct / 100);
         const riskLeft    = Math.max(0, riskBudget - riskUsed);
 
+        // Day/time entry blocks — market data/context still flow every cycle
+        // regardless (the shared signal pipeline runs for all accounts); only
+        // the entry decision (and its LLM call) is skipped here.
+        const uaeNow  = new Date(Date.now() + 4 * 3600000);
+        const uaeDow  = uaeNow.getUTCDay();   // 0=Sun ... 1=Mon ... 5=Fri ... 6=Sat
+        const uaeHour = uaeNow.getUTCHours();
+        const inMondayBlock = uaeDow === 1 && uaeHour >= cfg.mondayBlockStartHour && uaeHour < cfg.mondayBlockEndHour;
+        const inFridayBlock = uaeDow === 5 && uaeHour >= cfg.fridayBlockStartHour && uaeHour < cfg.fridayBlockEndHour;
+
         let skip = null;
-        if (hybridDay.stoppedReason)                          skip = `stood down: ${hybridDay.stoppedReason}`;
+        if (inMondayBlock)                                    skip = `Monday block (${cfg.mondayBlockStartHour}:00-${cfg.mondayBlockEndHour}:00 UAE) — indicators still settling after the weekend`;
+        else if (inFridayBlock)                               skip = `Friday block (${cfg.fridayBlockStartHour}:00-${cfg.fridayBlockEndHour}:00 UAE) — confirmed weak window, 25% WR historically`;
+        else if (hybridDay.stoppedReason)                     skip = `stood down: ${hybridDay.stoppedReason}`;
         else if (isHaltedToday(hyPortfolio.id))               skip = 'circuit breaker active';
         else if (openPos.length >= cfg.maxOpenPositions)      skip = `position cap ${openPos.length}/${cfg.maxOpenPositions}`;
         else if (riskLeft < 50)                               skip = `risk budget exhausted ($${riskUsed.toFixed(0)}/$${riskBudget.toFixed(0)})`;

@@ -41,6 +41,22 @@ export const CONFIG_SCHEMA = [
   // ── Forward-rulebook context gates ─────────────────────────────────────
   { key: 'rulebookMinSamples',   label: 'Rulebook: min samples',    unit: '',    def: 100,  min: 10,  max: 2000, step: 10, group: 'Rulebook',
     help: 'A condition bucket is shown to the model as evidence only above this sample count.' },
+
+  // ── Day/time entry blocks (UAE hours, hard cutoffs) ─────────────────────
+  // No new entries in these windows; market data/context keeps flowing as
+  // normal, only entry execution is gated. Backed by trade-history analysis:
+  // Friday 06:00-11:00 is a persistent negative-expectancy window (25% WR,
+  // -$958 avg/trade, 5 of 6 weeks negative). Monday 06:00-09:00 is a
+  // precautionary hygiene block (indicators still settling after the
+  // weekend gap) rather than a data-backed one.
+  { key: 'mondayBlockStartHour', label: 'Monday block start', unit: 'UAE hr', def: 6,  min: 0, max: 23, step: 1, group: 'Time blocks',
+    help: 'No new hybrid entries from this hour on Mondays.' },
+  { key: 'mondayBlockEndHour',   label: 'Monday block end',   unit: 'UAE hr', def: 9,  min: 0, max: 23, step: 1, group: 'Time blocks',
+    help: 'Monday block lifts at this hour.' },
+  { key: 'fridayBlockStartHour', label: 'Friday block start', unit: 'UAE hr', def: 6,  min: 0, max: 23, step: 1, group: 'Time blocks',
+    help: 'No new hybrid entries from this hour on Fridays.' },
+  { key: 'fridayBlockEndHour',   label: 'Friday block end',   unit: 'UAE hr', def: 11, min: 0, max: 23, step: 1, group: 'Time blocks',
+    help: 'Friday block lifts at this hour.' },
 ];
 
 export const DEFAULTS = Object.fromEntries(CONFIG_SCHEMA.map(f => [f.key, f.def]));
