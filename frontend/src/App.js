@@ -688,11 +688,16 @@ function HybridPanel({ status, schema, onConfigSaved, positions, trades, tradeHa
           <Gauge label="Day P&L" value={usd0(status.day_pnl)}
             detail={`target ${usd0(status.daily_target)} · halt ${usd0(status.daily_max_loss)}`}
             tone={status.day_pnl >= 0 ? 'ok' : status.day_pnl <= status.daily_max_loss * 0.7 ? 'bad' : 'warn'} />
-          <Gauge label="Run peak" value={usd0(status.peak_profit)}
-            detail={status.give_back_armed
-              ? `banks at ${usd0(status.give_back_floor)}${status.runs_banked ? ` · ${status.runs_banked} banked` : ''}`
-              : 'give-back not armed yet'}
-            tone={status.give_back_armed ? 'warn' : 'ok'} />
+          <Gauge label="Series peak"
+            value={status.series_active ? usd0(status.series_peak) : '—'}
+            detail={
+              !status.series_active
+                ? `flat${status.runs_banked ? ` · ${status.runs_banked} banked today` : ''}`
+                : status.give_back_armed
+                  ? `banks at ${usd0(status.give_back_floor)}${status.runs_banked ? ` · ${status.runs_banked} banked` : ''}`
+                  : 'give-back not armed yet'
+            }
+            tone={status.series_active && status.give_back_armed ? 'warn' : 'ok'} />
           <Gauge label="Risk deployed"
             value={`$${status.risk_used.toFixed(0)}`}
             detail={`of $${status.risk_budget.toFixed(0)} budget`}

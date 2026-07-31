@@ -73,13 +73,22 @@ let propHardHalted = null;      // ISO date string when the trailing Max Loss gu
 // ── Hybrid bot day state ──────────────────────────────────────────────────
 // peakProfit drives the give-back rule; stoppedReason latches the day off
 // once the target, give-back or loss limit fires. Reset each session day.
+// Give-back operates PER SERIES (one contiguous stretch of open positions,
+// from flat to flat), not per day. A series that already closed at a loss
+// must not drag down the give-back baseline for an unrelated series that
+// opens later — they can even be opposite directions (a losing LONG stack
+// followed by a fresh SHORT stack), so netting them into one day-level
+// number was hiding real, currently-open profit from ever being protected.
 const hybridDay = {
-  date: null, peakProfit: 0, stoppedReason: null, runsBanked: 0,
-  // Context captured at the moment the current run's peak was set —
-  // written to hybrid_run_log when the run ends. Pure logging, read by
-  // nothing else.
-  peakAt: null, peakSession: null, peakPositionCount: null, peakPositionDirections: null,
-  runNumber: 0,
+  date: null, stoppedReason: null, runsBanked: 0, runNumber: 0,
+  // Balance snapshot at the moment the current series began (first entry
+  // after being flat). Null when no series is active (account is flat).
+  seriesStartBalance: null,
+  // Peak of THIS series' P&L (realized-within-series + unrealized), and the
+  // context captured at that peak — written to hybrid_run_log when the
+  // series ends. Pure logging, read by nothing else.
+  seriesPeak: 0, seriesPeakAt: null, seriesPeakSession: null,
+  seriesPeakPositionCount: null, seriesPeakPositionDirections: null,
 };
 
 // Restart-safe: a redeploy mid-day must not wipe the run peak or a latched
@@ -90,7 +99,7 @@ async function restoreOrResetHybridDay(today) {
     const saved = raw ? JSON.parse(raw) : null;
     if (saved && saved.date === today) {
       Object.assign(hybridDay, saved);
-      console.log(`🔄 [HYBRID] day state restored: peak +$${(saved.peakProfit ?? 0).toFixed(0)}, runs banked ${saved.runsBanked ?? 0}${saved.stoppedReason ? `, stood down (${saved.stoppedReason})` : ''}`);
+      console.log(`🔄 [HYBRID] day state restored: series peak +$${(saved.seriesPeak ?? 0).toFixed(0)}, runs banked ${saved.runsBanked ?? 0}${saved.stoppedReason ? `, stood down (${saved.stoppedReason})` : ''}`);
       return;
     }
   } catch { /* fall through to reset */ }
@@ -105,14 +114,21 @@ async function persistHybridDay() {
 
 function resetHybridDay(today) {
   hybridDay.date = today;
-  hybridDay.peakProfit = 0;
   hybridDay.stoppedReason = null;
   hybridDay.runsBanked = 0;
-  hybridDay.peakAt = null;
-  hybridDay.peakSession = null;
-  hybridDay.peakPositionCount = null;
-  hybridDay.peakPositionDirections = null;
   hybridDay.runNumber = 0;
+  resetHybridSeries();
+}
+
+// Ends the current series' tracking (called when it banks, gets swept up in
+// a daily halt, or simply closes out via normal stop/target hits).
+function resetHybridSeries() {
+  hybridDay.seriesStartBalance = null;
+  hybridDay.seriesPeak = 0;
+  hybridDay.seriesPeakAt = null;
+  hybridDay.seriesPeakSession = null;
+  hybridDay.seriesPeakPositionCount = null;
+  hybridDay.seriesPeakPositionDirections = null;
 }
 
 // Hybrid day guards: update the profit peak and flatten if the daily target,
@@ -126,60 +142,86 @@ async function checkHybridDayGuards(currentPrice) {
     if (!p) return;
     if (hybridDay.date !== uaeDate()) await restoreOrResetHybridDay(uaeDate());
 
-    const cfg       = await getBotConfig(database.pool);
-    const dayStart  = circuitBreakerState[p.id]?.dayStartBalance ?? p.current_balance;
-    const dayPnl    = (p.current_balance - dayStart) + computeUnrealizedPnl(p.id, currentPrice);
-    const bal       = p.starting_balance || 100000;
-    const nowIso    = new Date().toISOString();
-    const session   = getSession(new Date());
+    const cfg        = await getBotConfig(database.pool);
+    const dayStart   = circuitBreakerState[p.id]?.dayStartBalance ?? p.current_balance;
+    const unrealized = computeUnrealizedPnl(p.id, currentPrice);
+    const dayPnl     = (p.current_balance - dayStart) + unrealized;
+    const bal        = p.starting_balance || 100000;
+    const nowIso     = new Date().toISOString();
+    const session    = getSession(new Date());
+    const openNow    = outcomeTracker.getOpenPositionsForPortfolio(p.id);
+    const hasOpen    = openNow.length > 0;
 
-    if (dayPnl > hybridDay.peakProfit) {
-      hybridDay.peakProfit = dayPnl;
-      hybridDay.peakAt     = nowIso;
-      hybridDay.peakSession = session ?? null;
-      const openNow = outcomeTracker.getOpenPositionsForPortfolio(p.id);
-      hybridDay.peakPositionCount      = openNow.length;
-      hybridDay.peakPositionDirections = openNow.map(t => t.direction).join(',') || null;
-      await persistHybridDay();
-    }
-    if (hybridDay.stoppedReason) return;
-
-    const targetUsd  = bal * (cfg.dailyProfitTargetPct / 100);
-    const maxLossUsd = bal * (cfg.dailyMaxLossPct / 100);
-    const armUsd     = bal * (cfg.giveBackArmPct / 100);
-    const floorUsd   = hybridDay.peakProfit * (1 - cfg.giveBackPct / 100);
-    const hasOpen    = outcomeTracker.getOpenPositionsForPortfolio(p.id).length > 0;
-
-    // Log the completed run's peak/end context. Pure research data — nothing
+    // Log a completed series' peak/end context. Pure research data — nothing
     // downstream reads this table to make a decision.
-    const logRun = async (endReason) => {
+    const logSeries = async (endReason, endPnl) => {
+      if (hybridDay.seriesStartBalance == null) return;   // nothing to log
       try {
         hybridDay.runNumber = (hybridDay.runNumber || 0) + 1;
         await database.saveHybridRunLog({
           date: uaeDate(), runNumber: hybridDay.runNumber,
-          peakProfit: hybridDay.peakProfit, peakAt: hybridDay.peakAt, peakSession: hybridDay.peakSession,
-          peakPositionCount: hybridDay.peakPositionCount, peakPositionDirections: hybridDay.peakPositionDirections,
-          endReason, endPnl: dayPnl, endAt: nowIso, endSession: session ?? null,
+          peakProfit: hybridDay.seriesPeak, peakAt: hybridDay.seriesPeakAt, peakSession: hybridDay.seriesPeakSession,
+          peakPositionCount: hybridDay.seriesPeakPositionCount, peakPositionDirections: hybridDay.seriesPeakPositionDirections,
+          endReason, endPnl, endAt: nowIso, endSession: session ?? null,
         });
       } catch (err) {
         console.error(`⚠️  [HYBRID] run-log write failed (non-fatal): ${err.message}`);
       }
     };
 
-    // Give-back applies PER RUN, not per day: it banks the profit of the
-    // current run, then resets the peak so the bot can start a fresh run.
-    // Only the daily target and the daily max loss end the day.
-    if (hybridDay.peakProfit >= armUsd && dayPnl < floorUsd) {
-      console.log(`🎯 [HYBRID] give-back: peak +$${hybridDay.peakProfit.toFixed(0)} → now +$${dayPnl.toFixed(0)} (floor $${floorUsd.toFixed(0)}) — banking run, continuing to trade`);
-      await logRun('give_back');
-      if (hasOpen) await outcomeTracker.forceClosePortfolio(p.id, currentPrice);
-      hybridDay.peakProfit = dayPnl;   // new run starts from here
-      hybridDay.peakAt = nowIso; hybridDay.peakSession = session ?? null;
-      hybridDay.peakPositionCount = null; hybridDay.peakPositionDirections = null;
-      hybridDay.runsBanked = (hybridDay.runsBanked || 0) + 1;
-      await persistHybridDay();
-      return;
+    if (!hasOpen) {
+      // Went flat: if a series was active, it just ended on its own (normal
+      // stop/target hits), not via give-back or a daily halt below. Log it
+      // and clear series state so the next entry starts a fresh baseline.
+      if (hybridDay.seriesStartBalance != null) {
+        const endedSeriesPnl = (p.current_balance - hybridDay.seriesStartBalance);
+        await logSeries('positions_closed', endedSeriesPnl);
+        resetHybridSeries();
+        await persistHybridDay();
+      }
+    } else {
+      // Defensive fallback: a series is open but has no baseline (should only
+      // happen if the entry-side hook was somehow bypassed). Start it now.
+      if (hybridDay.seriesStartBalance == null) {
+        hybridDay.seriesStartBalance = p.current_balance;
+        await persistHybridDay();
+      }
+
+      const seriesPnl = (p.current_balance - hybridDay.seriesStartBalance) + unrealized;
+      if (seriesPnl > hybridDay.seriesPeak) {
+        hybridDay.seriesPeak            = seriesPnl;
+        hybridDay.seriesPeakAt          = nowIso;
+        hybridDay.seriesPeakSession     = session ?? null;
+        hybridDay.seriesPeakPositionCount      = openNow.length;
+        hybridDay.seriesPeakPositionDirections = openNow.map(t => t.direction).join(',') || null;
+        await persistHybridDay();
+      }
+
+      if (!hybridDay.stoppedReason) {
+        const armUsd   = bal * (cfg.giveBackArmPct / 100);
+        const floorUsd = hybridDay.seriesPeak * (1 - cfg.giveBackPct / 100);
+
+        // Give-back applies PER SERIES, not per day: it banks the profit of
+        // THIS series (independent of what any earlier, already-closed
+        // series did — including an opposite-direction one), then clears
+        // series state so the bot starts a fresh baseline on its next entry.
+        // Only the daily target and the daily max loss end the day.
+        if (hybridDay.seriesPeak >= armUsd && seriesPnl < floorUsd) {
+          console.log(`🎯 [HYBRID] give-back: series peak +$${hybridDay.seriesPeak.toFixed(0)} → now +$${seriesPnl.toFixed(0)} (floor $${floorUsd.toFixed(0)}) — banking series, continuing to trade`);
+          await logSeries('give_back', seriesPnl);
+          await outcomeTracker.forceClosePortfolio(p.id, currentPrice);
+          resetHybridSeries();
+          hybridDay.runsBanked = (hybridDay.runsBanked || 0) + 1;
+          await persistHybridDay();
+          return;
+        }
+      }
     }
+
+    if (hybridDay.stoppedReason) return;
+
+    const targetUsd  = bal * (cfg.dailyProfitTargetPct / 100);
+    const maxLossUsd = bal * (cfg.dailyMaxLossPct / 100);
 
     let flatten = null, flattenReason = null;
     if (dayPnl >= targetUsd) {
@@ -193,7 +235,12 @@ async function checkHybridDayGuards(currentPrice) {
     if (flatten) {
       hybridDay.stoppedReason = flatten;
       await persistHybridDay();
-      await logRun(flattenReason);
+      if (hasOpen) {
+        const seriesPnlNow = (p.current_balance - hybridDay.seriesStartBalance) + unrealized;
+        await logSeries(flattenReason, seriesPnlNow);
+        resetHybridSeries();
+        await persistHybridDay();
+      }
       console.log(`🛑 [HYBRID] ${flatten} — flattening and standing down for the day`);
       if (hasOpen) await outcomeTracker.forceClosePortfolio(p.id, currentPrice);
     }
@@ -830,6 +877,20 @@ async function generateSignalIfTradingHours() {
             } else {
               const lots = Math.max(0.01, Math.min(Math.floor((riskUsd / (stopDist * VALUE_PER_LOT)) * 100) / 100, 1.0));
               const isLong = hyDecision.direction === 'LONG';
+
+              // Starting a new series: this trade opens from flat, so its
+              // give-back baseline must be independent of whatever the last
+              // (already-closed) series did — including an opposite-direction
+              // one. Precise balance snapshot, taken before this trade's own
+              // P&L can affect it.
+              if (openPos.length === 0) {
+                hybridDay.seriesStartBalance = hyPortfolio.current_balance;
+                hybridDay.seriesPeak = 0;
+                hybridDay.seriesPeakAt = null; hybridDay.seriesPeakSession = null;
+                hybridDay.seriesPeakPositionCount = null; hybridDay.seriesPeakPositionDirections = null;
+                await persistHybridDay();
+              }
+
               await openPosition({
                 portfolio: hyPortfolio,
                 decision: {
@@ -1648,22 +1709,31 @@ app.get('/api/hybrid/status', async (req, res) => {
     const unrealized = lastKnownPrice ? computeUnrealizedPnl(p.id, lastKnownPrice) : 0;
     const dayPnl     = (p.current_balance - dayStart) + unrealized;
     const bal        = p.starting_balance || 100000;
-    // Guards sample the peak every minute; take the live value if this request
-    // lands between ticks, so peak can never read below current day P&L.
-    const peak       = Math.max(hybridDay.date === uaeDate() ? hybridDay.peakProfit : 0, dayPnl);
+    const isToday    = hybridDay.date === uaeDate();
+    const seriesActive = isToday && hybridDay.seriesStartBalance != null;
+
+    // Give-back is per-series now: an earlier, already-closed series (even an
+    // opposite-direction one) no longer drags on whether the CURRENT series
+    // is protected. Guards sample the peak every minute; take the live value
+    // if this request lands between ticks, so peak can't read stale-low.
+    const seriesPnl  = seriesActive ? (p.current_balance - hybridDay.seriesStartBalance) + unrealized : null;
+    const seriesPeak = seriesActive ? Math.max(hybridDay.seriesPeak, seriesPnl) : null;
     const armUsd     = bal * (cfg.giveBackArmPct / 100);
+    const armed      = seriesActive && seriesPeak >= armUsd;
 
     res.json({
       balance:          p.current_balance,
       starting_balance: bal,
       day_pnl:          dayPnl,
-      peak_profit:      peak,
-      give_back_armed:  peak >= armUsd,
-      give_back_floor:  peak >= armUsd ? peak * (1 - cfg.giveBackPct / 100) : null,
+      series_active:    seriesActive,
+      series_pnl:       seriesPnl,
+      series_peak:      seriesPeak,
+      give_back_armed:  armed,
+      give_back_floor:  armed ? seriesPeak * (1 - cfg.giveBackPct / 100) : null,
       daily_target:     bal * (cfg.dailyProfitTargetPct / 100),
       daily_max_loss:   -(bal * (cfg.dailyMaxLossPct / 100)),
-      stopped_reason:   hybridDay.date === uaeDate() ? hybridDay.stoppedReason : null,
-      runs_banked:      hybridDay.date === uaeDate() ? (hybridDay.runsBanked || 0) : 0,
+      stopped_reason:   isToday ? hybridDay.stoppedReason : null,
+      runs_banked:      isToday ? (hybridDay.runsBanked || 0) : 0,
       open_positions:   outcomeTracker.getOpenPositionsForPortfolio(p.id).length,
       risk_used:        openRiskFor(p.id),
       risk_budget:      bal * (cfg.maxTotalRiskPct / 100),
