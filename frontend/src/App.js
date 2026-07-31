@@ -687,7 +687,7 @@ function HybridSettings({ schema, config, onSaved }) {
   );
 }
 
-function HybridPanel({ status, schema, onConfigSaved, positions, trades, tradeHasMore, onLoadMoreTrades }) {
+function HybridPanel({ status, account, schema, onConfigSaved, positions, trades, tradeHasMore, onLoadMoreTrades }) {
   const [showSettings, setShowSettings] = useState(false);
   if (!status) return null;
 
@@ -718,6 +718,15 @@ function HybridPanel({ status, schema, onConfigSaved, positions, trades, tradeHa
         <div className="panel-headline__balance">
           ${status.balance.toLocaleString('en-US', { maximumFractionDigits: 2 })}
         </div>
+
+        {account && (
+          <div className="panel-headline__row2">
+            <span className="panel-headline__stats">
+              {account.closed_trades || 0} trades
+              {account.win_rate != null ? ` · ${account.win_rate}% win` : ''}
+            </span>
+          </div>
+        )}
 
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, padding: '4px 0 2px' }}>
           <Gauge label="Day P&L" value={usd0(status.day_pnl)}
@@ -885,6 +894,7 @@ export default function App() {
   const mech    = accounts?.find(a => a.name === 'mechanical');
   const overlay = accounts?.find(a => a.name === 'claude_overlay');
   const solo    = accounts?.find(a => a.name === 'claude_solo');
+  const hybridAcct = accounts?.find(a => a.name === 'claude_hybrid');
   const sessionNow  = sessionLabel(new Date().toISOString());
   const isTradingNow = snapshot?.tradingHours ?? false;
 
@@ -947,6 +957,7 @@ export default function App() {
 
         <HybridPanel
           status={hybridStatus}
+          account={hybridAcct}
           schema={hybridSchema}
           positions={positions}
           trades={trades.claude_hybrid}
