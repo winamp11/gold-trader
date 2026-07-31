@@ -13,6 +13,7 @@ const C = {
   mech:    '#4d9de0',
   overlay: '#f0a030',
   solo:    '#48bb78',
+  hybrid:  '#38bdf8',
   win:     '#22c55e',
   loss:    '#ef4444',
   veto:    '#a78bfa',
@@ -80,6 +81,7 @@ function accountColor(name) {
   if (name === 'mechanical')     return C.mech;
   if (name === 'claude_overlay') return C.overlay;
   if (name === 'claude_solo')    return C.solo;
+  if (name === 'claude_hybrid')  return C.hybrid;
   return '#888';
 }
 
@@ -87,6 +89,7 @@ function accountLabel(name) {
   if (name === 'mechanical')     return 'Mechanical';
   if (name === 'claude_overlay') return 'Overlay';
   if (name === 'claude_solo')    return 'Solo';
+  if (name === 'claude_hybrid')  return 'Hybrid';
   return name;
 }
 
@@ -375,13 +378,44 @@ const CustomTooltip = ({ active, payload, label }) => {
   );
 };
 
-function EquityChart({ equity }) {
-  const data = toChartData(equity);
-  if (!data.length) return <div className="chart-empty">No equity data yet</div>;
+const EQUITY_LINE_KEYS = ['mechanical', 'claude_overlay', 'claude_solo', 'claude_hybrid'];
 
-  const allB = data.flatMap(r =>
-    ['mechanical', 'claude_overlay', 'claude_solo'].map(k => r[k]).filter(Boolean)
+function firstOfMonthStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
+}
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function EquityRangePicker({ range, onChange }) {
+  const setThisMonth = () => onChange({ start: firstOfMonthStr(), end: todayStr() });
+  const setAll       = () => onChange({ start: '', end: '' });
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+      <input
+        type="date" value={range.start} onChange={e => onChange({ ...range, start: e.target.value })}
+        style={{ fontFamily: 'Space Mono, monospace', fontSize: 10, background: 'var(--bg3, #1a2230)', color: 'var(--text, #cbd5e1)', border: '1px solid var(--border2, #2a3444)', borderRadius: 3, padding: '3px 5px' }}
+      />
+      <span style={{ color: '#4b6070', fontSize: 10 }}>to</span>
+      <input
+        type="date" value={range.end} onChange={e => onChange({ ...range, end: e.target.value })}
+        style={{ fontFamily: 'Space Mono, monospace', fontSize: 10, background: 'var(--bg3, #1a2230)', color: 'var(--text, #cbd5e1)', border: '1px solid var(--border2, #2a3444)', borderRadius: 3, padding: '3px 5px' }}
+      />
+      <button className="topbar__btn" onClick={setThisMonth} style={{ fontSize: 9, padding: '3px 7px' }}>This month</button>
+      <button className="topbar__btn" onClick={setAll} style={{ fontSize: 9, padding: '3px 7px' }}>All</button>
+    </div>
   );
+}
+
+function EquityChart({ equity, range }) {
+  let data = toChartData(equity);
+  if (range?.start) data = data.filter(r => r.t >= range.start);
+  if (range?.end)   data = data.filter(r => r.t <= range.end);
+  if (!data.length) return <div className="chart-empty">No equity data in this range</div>;
+
+  const allB = data.flatMap(r => EQUITY_LINE_KEYS.map(k => r[k]).filter(Boolean));
   const lo  = Math.min(...allB);
   const hi  = Math.max(...allB);
   const pad = Math.max(500, (hi - lo) * 0.1) || 1000;
@@ -409,6 +443,7 @@ function EquityChart({ equity }) {
         <Line dataKey="mechanical"     stroke={C.mech}    strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.mech    }} connectNulls />
         <Line dataKey="claude_overlay" stroke={C.overlay} strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.overlay }} connectNulls />
         <Line dataKey="claude_solo"    stroke={C.solo}    strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.solo    }} connectNulls />
+        <Line dataKey="claude_hybrid"  stroke={C.hybrid}  strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.hybrid  }} connectNulls />
       </LineChart>
     </ResponsiveContainer>
   );
@@ -735,6 +770,7 @@ export default function App() {
   const [hybridStatus, setHybridStatus] = useState(null);
   const [hybridSchema, setHybridSchema] = useState(null);
   const [equity,      setEquity]      = useState(null);
+  const [dateRange,   setDateRange]   = useState(() => ({ start: firstOfMonthStr(), end: todayStr() }));
   const [positions,   setPositions]   = useState([]);
   const [snapshot,    setSnapshot]    = useState(null);
   const [missed,      setMissed]      = useState([]);
@@ -880,7 +916,8 @@ export default function App() {
 
       <main className="main">
         <div className="chart-card">
-          <EquityChart equity={equity} />
+          <EquityRangePicker range={dateRange} onChange={setDateRange} />
+          <EquityChart equity={equity} range={dateRange} />
         </div>
 
         <AccountPanel
