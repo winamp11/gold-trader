@@ -20,7 +20,7 @@ import { runForwardLabeling } from './forwardLabeler.js';
 import { runHybridMaturation } from './hybridMaturation.js';
 import { computeBranchAnalytics } from './hybridAnalytics.js';
 import { CONFIG_SCHEMA, getBotConfig, saveBotConfig, HYBRID_BOT } from './botConfig.js';
-import { classifyRulebookQualification, classifyOverlayStatus, classifyBranch } from './hybridBranchClassifier.js';
+import { classifyRulebookQualification, classifyOverlayStatus, classifyBranch, clampRiskUsd } from './hybridBranchClassifier.js';
 
 dotenv.config();
 
@@ -921,7 +921,7 @@ async function generateSignalIfTradingHours() {
             const h1Atr    = atr?.h1;
             const mult     = Math.min(cfg.atrMultMax, Math.max(cfg.atrMultMin, Number(hyDecision.stop_atr_mult)));
             const stopDist = h1Atr ? h1Atr * mult : null;
-            const riskUsd  = Math.min(Number(hyDecision.risk_usd), riskLeft, bal * (cfg.maxRiskPerTradePct / 100));
+            const riskUsd  = clampRiskUsd(hyDecision.risk_usd, riskLeft, bal * (cfg.maxRiskPerTradePct / 100));
             const targetR  = Math.max(1.5, Number(hyDecision.target_r));
 
             if (!stopDist || stopDist <= 0 || riskUsd < 50) {

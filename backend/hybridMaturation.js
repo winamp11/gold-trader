@@ -22,7 +22,7 @@ const CHUNK_MS = 3 * 24 * HOUR_MS;
 // (the 21:00 UAE close for that decision's day — positions don't hold
 // overnight in this system, real or hypothetical). Also reports the
 // excursion-based MFE/MAE over the same window, for R-multiple math.
-function resolveHypothetical(candles, direction, entry, stop, target, fromMs, capMs) {
+export function resolveHypothetical(candles, direction, entry, stop, target, fromMs, capMs) {
   const isLong = direction === 'LONG';
   let outcome = 'NEITHER', exitPrice = null, exitAtMs = null;
 

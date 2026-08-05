@@ -687,7 +687,101 @@ function HybridSettings({ schema, config, onSaved }) {
   );
 }
 
-function HybridPanel({ status, account, schema, onConfigSaved, positions, trades, tradeHasMore, onLoadMoreTrades }) {
+const BRANCH_LABELS = {
+  agreement: 'Agreement',
+  rulebook_only_overlay_silent: 'Rulebook only · overlay silent',
+  rulebook_only_overlay_opposed: 'Rulebook only · overlay opposed',
+  overlay_only: 'Overlay only',
+  strong_contradiction: 'Strong contradiction',
+  no_support: 'No support',
+};
+const BRANCH_ORDER = Object.keys(BRANCH_LABELS);
+
+function bpNum(n, dp = 0) { return n == null || !isFinite(n) ? '—' : n.toFixed(dp); }
+function bpUsd(n) {
+  if (n == null || !isFinite(n)) return '—';
+  return `${n < 0 ? '-' : '+'}$${Math.abs(n).toFixed(0)}`;
+}
+function bpPct(n) { return n == null ? '—' : `${(n * 100).toFixed(0)}%`; }
+
+function BranchPerformance({ dateRange }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const params = new URLSearchParams();
+    if (dateRange?.start) params.set('start', dateRange.start);
+    if (dateRange?.end)   params.set('end', dateRange.end);
+    fetch(`${API}/api/hybrid/branch-analytics?${params.toString()}`)
+      .then(r => r.json())
+      .then(d => { if (!cancelled) { setData(d); setError(null); } })
+      .catch(() => { if (!cancelled) setError('failed to load'); });
+    return () => { cancelled = true; };
+  }, [dateRange?.start, dateRange?.end]);
+
+  if (error) return <div className="section-empty">{error}</div>;
+  if (!data) return <div className="section-empty">Loading…</div>;
+
+  const rows = BRANCH_ORDER.map(b => ({ branch: b, ...data.branches[b] })).filter(r => r.n_evaluations > 0);
+  if (!rows.length) return <div className="section-empty">No hybrid decisions in this range yet.</div>;
+
+  return (
+    <div style={{ overflowX: 'auto', padding: '4px 12px 10px' }}>
+      <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--text3)', marginBottom: 6 }}>
+        counterfactual horizon: {data.horizon} · {data.total_evaluations} total evaluations in range
+      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'var(--mono)', fontSize: 10 }}>
+        <thead>
+          <tr style={{ color: 'var(--text3)', textAlign: 'right' }}>
+            <th style={{ textAlign: 'left', padding: '3px 6px' }}>Branch</th>
+            <th style={{ padding: '3px 6px' }}>Evals</th>
+            <th style={{ padding: '3px 6px' }}>Trades</th>
+            <th style={{ padding: '3px 6px' }}>WR</th>
+            <th style={{ padding: '3px 6px' }}>Net P&L</th>
+            <th style={{ padding: '3px 6px' }}>Avg P&L</th>
+            <th style={{ padding: '3px 6px' }}>Avg R</th>
+            <th style={{ padding: '3px 6px' }}>PF</th>
+            <th style={{ padding: '3px 6px' }}>Max DD</th>
+            <th style={{ padding: '3px 6px' }}>Avg MFE/MAE</th>
+            <th style={{ padding: '3px 6px' }}>NO_TRADE</th>
+            <th style={{ padding: '3px 6px' }}>Avoided (RB/OV)</th>
+            <th style={{ padding: '3px 6px' }}>Missed (RB/OV)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(r => (
+            <tr key={r.branch} style={{ borderTop: '1px solid var(--border)' }}>
+              <td style={{ padding: '3px 6px', color: 'var(--text2)' }}>{BRANCH_LABELS[r.branch]}</td>
+              <td style={{ padding: '3px 6px', textAlign: 'right' }}>{r.n_evaluations}</td>
+              <td style={{ padding: '3px 6px', textAlign: 'right' }}>{r.n_trades}</td>
+              <td style={{ padding: '3px 6px', textAlign: 'right' }}>{bpPct(r.win_rate)}</td>
+              <td style={{ padding: '3px 6px', textAlign: 'right', color: (r.net_pnl ?? 0) >= 0 ? 'var(--pos)' : 'var(--neg)' }}>{bpUsd(r.net_pnl)}</td>
+              <td style={{ padding: '3px 6px', textAlign: 'right' }}>{bpUsd(r.avg_pnl)}</td>
+              <td style={{ padding: '3px 6px', textAlign: 'right' }}>{r.avg_r == null ? '—' : `${r.avg_r.toFixed(2)}R`}</td>
+              <td style={{ padding: '3px 6px', textAlign: 'right' }}>{r.profit_factor == null ? '—' : r.profit_factor === Infinity ? '∞' : r.profit_factor.toFixed(2)}</td>
+              <td style={{ padding: '3px 6px', textAlign: 'right' }}>{bpUsd(-Math.abs(r.max_drawdown || 0))}</td>
+              <td style={{ padding: '3px 6px', textAlign: 'right' }}>{bpNum(r.avg_mfe, 1)}/{bpNum(r.avg_mae, 1)}</td>
+              <td style={{ padding: '3px 6px', textAlign: 'right' }}>{r.n_no_trade}</td>
+              <td style={{ padding: '3px 6px', textAlign: 'right', color: 'var(--pos)' }}>
+                {bpUsd(r.counterfactual.rulebook.profit_avoided)}/{bpUsd(r.counterfactual.overlay.profit_avoided)}
+              </td>
+              <td style={{ padding: '3px 6px', textAlign: 'right', color: 'var(--neg)' }}>
+                {bpUsd(r.counterfactual.rulebook.profit_missed)}/{bpUsd(r.counterfactual.overlay.profit_missed)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--text3)', marginTop: 6 }}>
+        Avoided/Missed are counterfactual only (RB = rulebook direction not taken, OV = overlay direction not taken) —
+        never real money, never fed back into a decision.
+      </div>
+    </div>
+  );
+}
+
+function HybridPanel({ status, account, schema, onConfigSaved, positions, trades, tradeHasMore, onLoadMoreTrades, dateRange }) {
   const [showSettings, setShowSettings] = useState(false);
   if (!status) return null;
 
@@ -761,6 +855,10 @@ function HybridPanel({ status, account, schema, onConfigSaved, positions, trades
 
       <CollapsibleSection label="History" count={(trades || []).length}>
         <HistorySection trades={trades || []} hasMore={tradeHasMore} onLoadMore={onLoadMoreTrades} />
+      </CollapsibleSection>
+
+      <CollapsibleSection label="Branch performance">
+        <BranchPerformance dateRange={dateRange} />
       </CollapsibleSection>
 
       {showSettings && schema && (
@@ -964,6 +1062,7 @@ export default function App() {
           tradeHasMore={tradeHasMore.claude_hybrid}
           onLoadMoreTrades={() => loadMoreTrades('claude_hybrid')}
           onConfigSaved={cfg => setHybridStatus(s => s ? { ...s, config: cfg } : s)}
+          dateRange={dateRange}
         />
 
         <MarketPanel snapshot={snapshot} missed={missed} />

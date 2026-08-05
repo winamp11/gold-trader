@@ -60,6 +60,14 @@ export function classifyOverlayStatus(overlayDecision, rulebookDirection, mechDe
   return { status: 'silent', oppositionType: null, opposingTrade: false };
 }
 
+// Same risk-cap math the executor already applied inline — named and
+// exported so the caps themselves are directly testable. Enforces: never
+// more than what was requested, never more than what's left in the shared
+// risk budget, never more than the per-trade ceiling.
+export function clampRiskUsd(requestedUsd, riskLeftUsd, perTradeCapUsd) {
+  return Math.min(Number(requestedUsd) || 0, riskLeftUsd, perTradeCapUsd);
+}
+
 // The six stable branch names, plus whether the LLM needs to be called at
 // all. strong_contradiction, no_support, and rulebook_only_overlay_opposed
 // are deterministic NO_TRADE rules per spec, not judgment calls — none of
