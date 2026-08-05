@@ -462,6 +462,82 @@ class DatabaseService {
       )
     `);
 
+    // Hybrid decision journal — every branch evaluation (not just executed
+    // trades). Pure observability: nothing here is ever fed back into a
+    // future decision (that would recreate the post-hoc-labelling feedback
+    // loop this bot was deliberately built without). Counterfactual geometry
+    // is frozen at decision time (no look-ahead); outcomes are matured later
+    // by hybridMaturation.js from historical candles, never from live info.
+    //
+    // All columns beyond the identity fields are nullable by design, so a
+    // row inserted before some later column existed still reads/aggregates
+    // cleanly (see /api/hybrid/branch-analytics's COALESCE-style handling).
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS hybrid_decisions (
+        id                    SERIAL PRIMARY KEY,
+        signal_id             INTEGER REFERENCES signals(id),
+        cycle_ts              TEXT NOT NULL,
+        decision_branch       TEXT NOT NULL,
+        final_action          TEXT NOT NULL,   -- LONG | SHORT | NO_TRADE
+        final_risk_usd        DOUBLE PRECISION,
+        final_risk_pct        DOUBLE PRECISION,
+        final_lots            DOUBLE PRECISION,
+        trade_id              INTEGER REFERENCES trades(id),
+        final_reasoning       TEXT,
+        veto_or_reduction_reason TEXT,
+
+        mech_action           TEXT,
+        mech_direction        TEXT,
+        mech_tag              TEXT,
+
+        overlay_action        TEXT,
+        overlay_direction     TEXT,
+        overlay_status        TEXT,   -- supportive | silent | weakly_opposed | strongly_opposed
+        overlay_opposition_type TEXT, -- execution_risk | directional | null
+        overlay_confidence    TEXT,
+        overlay_reasoning     TEXT,
+        overlay_tag           TEXT,
+
+        rulebook_direction    TEXT,
+        rulebook_session      TEXT,
+        rulebook_adx_bucket   TEXT,
+        rulebook_rsi_bucket   TEXT,
+        rulebook_n_total      INTEGER,
+        rulebook_avg_1h       DOUBLE PRECISION,
+        rulebook_avg_4h       DOUBLE PRECISION,
+        rulebook_avg_eod      DOUBLE PRECISION,
+        rulebook_pct_up_4h    DOUBLE PRECISION,
+        rulebook_avg_max_up_4h   DOUBLE PRECISION,
+        rulebook_avg_max_down_4h DOUBLE PRECISION,
+        rulebook_confidence   TEXT,
+        signals_agreed        BOOLEAN,
+
+        -- Counterfactual geometry, frozen at decision time (no look-ahead).
+        -- "rulebook" track = the rulebook's supported direction (used when it
+        -- wasn't taken); "overlay" track = overlay's proposed direction (used
+        -- when it wasn't taken). Either may be null if that source had nothing
+        -- to counterfactual (e.g. agreement branch with a real trade taken).
+        cf_rulebook_direction TEXT,
+        cf_rulebook_entry     DOUBLE PRECISION,
+        cf_rulebook_stop      DOUBLE PRECISION,
+        cf_rulebook_target    DOUBLE PRECISION,
+        cf_rulebook_risk_usd  DOUBLE PRECISION,
+        cf_rulebook_lots      DOUBLE PRECISION,
+        cf_rulebook_outcome   TEXT,   -- JSON: {h1:{...},h4:{...},eod:{...},matured_at}
+
+        cf_overlay_direction  TEXT,
+        cf_overlay_entry      DOUBLE PRECISION,
+        cf_overlay_stop       DOUBLE PRECISION,
+        cf_overlay_target     DOUBLE PRECISION,
+        cf_overlay_lots       DOUBLE PRECISION,
+        cf_overlay_outcome    TEXT,   -- JSON: {h1:{...},h4:{...},eod:{...},matured_at}
+
+        created_at            TEXT NOT NULL DEFAULT TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+      )
+    `);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_hybrid_decisions_branch ON hybrid_decisions(decision_branch)`);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_hybrid_decisions_cycle_ts ON hybrid_decisions(cycle_ts)`);
+
     // Forward rulebook: market behavior by condition bucket across ALL cycles
     // (traded or not), aggregated from the forward-outcome labels. This is the
     // selection-bias-free companion to the per-account rulebooks. Rebuilt on
@@ -1024,6 +1100,60 @@ class DatabaseService {
     `, [date, runNumber, peakProfit, peakAt, peakSession,
         peakPositionCount, peakPositionDirections,
         endReason, endPnl, endAt, endSession]);
+  }
+
+  // ── Hybrid decision journal ────────────────────────────────────────────
+
+  async saveHybridDecision(d) {
+    const r = await this.pool.query(`
+      INSERT INTO hybrid_decisions (
+        signal_id, cycle_ts, decision_branch, final_action, final_risk_usd, final_risk_pct,
+        final_lots, trade_id, final_reasoning, veto_or_reduction_reason,
+        mech_action, mech_direction, mech_tag,
+        overlay_action, overlay_direction, overlay_status, overlay_opposition_type,
+        overlay_confidence, overlay_reasoning, overlay_tag,
+        rulebook_direction, rulebook_session, rulebook_adx_bucket, rulebook_rsi_bucket,
+        rulebook_n_total, rulebook_avg_1h, rulebook_avg_4h, rulebook_avg_eod, rulebook_pct_up_4h,
+        rulebook_avg_max_up_4h, rulebook_avg_max_down_4h, rulebook_confidence, signals_agreed,
+        cf_rulebook_direction, cf_rulebook_entry, cf_rulebook_stop, cf_rulebook_target,
+        cf_rulebook_risk_usd, cf_rulebook_lots,
+        cf_overlay_direction, cf_overlay_entry, cf_overlay_stop, cf_overlay_target, cf_overlay_lots
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+        $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,
+        $34,$35,$36,$37,$38,$39,
+        $40,$41,$42,$43,$44
+      ) RETURNING id
+    `, [
+      d.signalId ?? null, d.cycleTs, d.decisionBranch, d.finalAction, d.finalRiskUsd ?? null, d.finalRiskPct ?? null,
+      d.finalLots ?? null, d.tradeId ?? null, d.finalReasoning ?? null, d.vetoOrReductionReason ?? null,
+      d.mechAction ?? null, d.mechDirection ?? null, d.mechTag ?? null,
+      d.overlayAction ?? null, d.overlayDirection ?? null, d.overlayStatus ?? null, d.overlayOppositionType ?? null,
+      d.overlayConfidence ?? null, d.overlayReasoning ?? null, d.overlayTag ?? null,
+      d.rulebookDirection ?? null, d.rulebookSession ?? null, d.rulebookAdxBucket ?? null, d.rulebookRsiBucket ?? null,
+      d.rulebookNTotal ?? null, d.rulebookAvg1h ?? null, d.rulebookAvg4h ?? null, d.rulebookAvgEod ?? null, d.rulebookPctUp4h ?? null,
+      d.rulebookAvgMaxUp4h ?? null, d.rulebookAvgMaxDown4h ?? null, d.rulebookConfidence ?? null, d.signalsAgreed ?? null,
+      d.cfRulebookDirection ?? null, d.cfRulebookEntry ?? null, d.cfRulebookStop ?? null, d.cfRulebookTarget ?? null,
+      d.cfRulebookRiskUsd ?? null, d.cfRulebookLots ?? null,
+      d.cfOverlayDirection ?? null, d.cfOverlayEntry ?? null, d.cfOverlayStop ?? null, d.cfOverlayTarget ?? null, d.cfOverlayLots ?? null,
+    ]);
+    return r.rows[0].id;
+  }
+
+  async getUnmaturedHybridDecisions(limit = 500) {
+    const { rows } = await this.pool.query(`
+      SELECT * FROM hybrid_decisions
+      WHERE (cf_rulebook_direction IS NOT NULL AND cf_rulebook_outcome IS NULL)
+         OR (cf_overlay_direction  IS NOT NULL AND cf_overlay_outcome  IS NULL)
+      ORDER BY cycle_ts ASC
+      LIMIT $1
+    `, [limit]);
+    return rows;
+  }
+
+  async setHybridDecisionCounterfactualOutcome(id, field, outcomeJson) {
+    const col = field === 'rulebook' ? 'cf_rulebook_outcome' : 'cf_overlay_outcome';
+    await this.pool.query(`UPDATE hybrid_decisions SET ${col} = $1 WHERE id = $2`, [outcomeJson, id]);
   }
 
   async saveVetoShadow({ portfolioId, direction, entry, stop, target, tag = null, reasoning = null }) {

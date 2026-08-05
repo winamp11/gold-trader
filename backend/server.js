@@ -18,6 +18,7 @@ import { TAG_TAXONOMY } from './tagTaxonomy.js';
 import { runAnalysis, formatRulebookPrompt, adxBucket, rsiBucket } from './analyst.js';
 import { runForwardLabeling } from './forwardLabeler.js';
 import { CONFIG_SCHEMA, getBotConfig, saveBotConfig, HYBRID_BOT } from './botConfig.js';
+import { classifyRulebookQualification, classifyOverlayStatus, classifyBranch } from './hybridBranchClassifier.js';
 
 dotenv.config();
 
@@ -259,6 +260,31 @@ function openRiskFor(portfolioId) {
   return total;
 }
 
+// Default hypothetical geometry for a "rulebook acting alone" counterfactual
+// — used only when no real trade was placed in that direction, so there is
+// no model-chosen sizing to draw from. Fixed at decision time (current price
+// and ATR only, no future information), and identical across every
+// rulebook-only counterfactual so branch comparisons stay apples-to-apples:
+// 1.5x H1 ATR stop, 1.5R target, 0.30% of balance risked (the midpoint of
+// this bot's own 0.25-0.40% rulebook-only-silent risk tier).
+const CF_DEFAULT_ATR_MULT  = 1.5;
+const CF_DEFAULT_TARGET_R  = 1.5;
+const CF_DEFAULT_RISK_PCT  = 0.30;
+
+function computeDefaultCounterfactualGeometry(direction, currentPrice, h1Atr, balance) {
+  if (!h1Atr || !currentPrice || !direction) return null;
+  const stopDist = h1Atr * CF_DEFAULT_ATR_MULT;
+  const riskUsd  = balance * (CF_DEFAULT_RISK_PCT / 100);
+  const lots     = Math.max(0.01, Math.min(Math.floor((riskUsd / (stopDist * VALUE_PER_LOT)) * 100) / 100, 1.0));
+  const isLong   = direction === 'LONG';
+  return {
+    direction, entry: currentPrice,
+    stop:   isLong ? currentPrice - stopDist : currentPrice + stopDist,
+    target: isLong ? currentPrice + stopDist * CF_DEFAULT_TARGET_R : currentPrice - stopDist * CF_DEFAULT_TARGET_R,
+    riskUsd, lots,
+  };
+}
+
 // ── Session range (tracked from 06:00 UAE open, reset daily) ──────────────
 let sessionHigh      = null;
 let sessionLow       = null;
@@ -413,6 +439,7 @@ async function openPosition({ portfolio, decision, signalId, currentPrice, isSig
     timeExitHours:  decision.timeExitHours ?? null
   });
   console.log(`🟢 [OPEN] ${portfolio.name} | ${decision.direction} entry=${decision.entry?.toFixed(2)} stop=${decision.stop?.toFixed(2)} target=${decision.target?.toFixed(2)} lots=${decision.lots}${decision.timeExitHours ? ` timeExit=${decision.timeExitHours}h` : ''}`);
+  return tradeId;
 }
 
 // ── Helper: open a veto shadow for one portfolio ───────────────────────────
@@ -855,18 +882,40 @@ async function generateSignalIfTradingHours() {
             `SELECT * FROM forward_rulebook WHERE session = $1 AND adx_bucket = $2 AND rsi_bucket = $3`,
             [sess, adxB, rsiB]
           );
+          const bucket = bRows[0] ?? null;
 
-          const hyDecision = await claudeHybridDecide({
-            marketData, atr, portfolio: hyPortfolio, session: currentSession, price: currentPrice,
-            overlayDecision, bucket: bRows[0] ?? null, bucketDesc, cfg,
-            openPositions: openPos, riskUsed,
-            // No journal by design: the forward rulebook is this bot's only
-            // learning input, so there is nothing to feed back.
-          });
+          // ── Deterministic branch classification (no LLM self-labelling) ──
+          const { qualified: rulebookQualified, direction: rulebookDirection } = classifyRulebookQualification(bucket, cfg);
+          const { status: overlayStatus, oppositionType: overlayOppositionType, opposingTrade: overlayOpposingTrade } =
+            classifyOverlayStatus(overlayDecision, rulebookDirection, mechDecision);
+          const { branch, llmNeeded } = classifyBranch({ rulebookQualified, overlayStatus, overlayOpposingTrade });
 
+          let hyDecision;
+          let vetoOrReductionReason = null;
+          if (llmNeeded) {
+            hyDecision = await claudeHybridDecide({
+              marketData, atr, portfolio: hyPortfolio, session: currentSession, price: currentPrice,
+              overlayDecision, bucket, bucketDesc, cfg, branch,
+              openPositions: openPos, riskUsed,
+              // No journal fed back by design: the forward rulebook is this
+              // bot's only learning input. hybrid_decisions below is pure
+              // observability, never re-read into a future prompt.
+            });
+          } else {
+            // Deterministic NO_TRADE rules per spec — no token spent.
+            const reasons = {
+              rulebook_only_overlay_opposed: `rulebook favors ${rulebookDirection} but overlay ${overlayStatus === 'strongly_opposed' ? 'strongly' : 'weakly'} opposed (${overlayOppositionType ?? 'directional'}) — opposition is not overridden`,
+              strong_contradiction:          `rulebook favors ${rulebookDirection}, overlay proposed the opposite direction with its own real trade — genuine ambiguity`,
+              no_support:                    `neither the rulebook nor overlay supports a trade this cycle`,
+            };
+            vetoOrReductionReason = reasons[branch] ?? 'deterministic no-trade rule';
+            hyDecision = { action: 'NO_TRADE', direction: null, reasoning: vetoOrReductionReason };
+            console.log(`⏸️  [HYBRID] ${branch} — ${vetoOrReductionReason}`);
+          }
+
+          // ── Execute (if any) ────────────────────────────────────────────
+          let finalRiskUsd = null, finalRiskPct = null, finalLots = null, tradeId = null;
           if (hyDecision.action === 'TRADE') {
-            // Model expressed intent; prices and lots are computed here so it
-            // never has to do arithmetic, and every value is clamped.
             const h1Atr    = atr?.h1;
             const mult     = Math.min(cfg.atrMultMax, Math.max(cfg.atrMultMin, Number(hyDecision.stop_atr_mult)));
             const stopDist = h1Atr ? h1Atr * mult : null;
@@ -875,6 +924,8 @@ async function generateSignalIfTradingHours() {
 
             if (!stopDist || stopDist <= 0 || riskUsd < 50) {
               console.log(`⏸️  [HYBRID] entry rejected — stopDist=${stopDist} riskUsd=${riskUsd?.toFixed?.(0)}`);
+              hyDecision.action = 'NO_TRADE';   // reflected in the journal below
+              vetoOrReductionReason = 'invalid geometry or risk below minimum';
             } else {
               const lots = Math.max(0.01, Math.min(Math.floor((riskUsd / (stopDist * VALUE_PER_LOT)) * 100) / 100, 1.0));
               const isLong = hyDecision.direction === 'LONG';
@@ -892,7 +943,7 @@ async function generateSignalIfTradingHours() {
                 await persistHybridDay();
               }
 
-              await openPosition({
+              tradeId = await openPosition({
                 portfolio: hyPortfolio,
                 decision: {
                   action: 'TRADE',
@@ -902,14 +953,63 @@ async function generateSignalIfTradingHours() {
                   target: isLong ? currentPrice + stopDist * targetR : currentPrice - stopDist * targetR,
                   lots,
                   reasoning: hyDecision.reasoning,
-                  tag: hyDecision.tag,
+                  tag: `${branch}_${hyDecision.direction.toLowerCase()}`,
                 },
                 signalId, currentPrice, isSignalOwner: false, session: currentSession,
               });
-              console.log(`🔀 [HYBRID] ${hyDecision.direction} stop=${mult.toFixed(2)}×ATR (${stopDist.toFixed(1)}pts) risk=$${riskUsd.toFixed(0)} lots=${lots} target=${targetR.toFixed(1)}R | ${bucketDesc}`);
+              finalRiskUsd = riskUsd; finalRiskPct = (riskUsd / bal) * 100; finalLots = lots;
+              console.log(`🔀 [HYBRID] ${hyDecision.direction} stop=${mult.toFixed(2)}×ATR (${stopDist.toFixed(1)}pts) risk=$${riskUsd.toFixed(0)} lots=${lots} target=${targetR.toFixed(1)}R | ${branch} | ${bucketDesc}`);
             }
-          } else {
-            console.log(`⏸️  [HYBRID] NO_TRADE — ${hyDecision.tag}`);
+          }
+
+          // ── Counterfactual geometry, frozen now (no look-ahead) ──────────
+          // Only computed for a direction that was NOT actually taken —
+          // there's nothing hypothetical about a trade that really happened.
+          const finalDirection = hyDecision.action === 'TRADE' ? hyDecision.direction : null;
+          let cfRulebook = null;
+          if (rulebookQualified && rulebookDirection && (finalDirection !== rulebookDirection)) {
+            const g = computeDefaultCounterfactualGeometry(rulebookDirection, currentPrice, atr?.h1, bal);
+            if (g) cfRulebook = g;
+          }
+          let cfOverlay = null;
+          if (overlayDecision?.action === 'TRADE' && overlayDecision.direction && finalDirection !== overlayDecision.direction) {
+            cfOverlay = {
+              direction: overlayDecision.direction, entry: overlayDecision.entry,
+              stop: overlayDecision.stop, target: overlayDecision.target, lots: overlayDecision.lots,
+            };
+          }
+
+          // ── Journal every evaluation that reached this point ─────────────
+          // Pure observability — nothing here is ever read back into a future
+          // decision. Logged regardless of branch or outcome.
+          try {
+            await database.saveHybridDecision({
+              signalId, cycleTs: new Date().toISOString(), decisionBranch: branch,
+              finalAction: hyDecision.action === 'TRADE' ? finalDirection : 'NO_TRADE',
+              finalRiskUsd, finalRiskPct, finalLots, tradeId,
+              finalReasoning: hyDecision.reasoning ?? null, vetoOrReductionReason,
+              mechAction: mechDecision?.action ?? null, mechDirection: mechDecision?.direction ?? null, mechTag: mechDecision?.tag ?? null,
+              overlayAction: overlayDecision?.action ?? null, overlayDirection: overlayDecision?.direction ?? null,
+              overlayStatus, overlayOppositionType, overlayConfidence: overlayDecision?.action === 'VETO' ? 'high' : null,
+              overlayReasoning: overlayDecision?.reasoning ?? null, overlayTag: overlayDecision?.tag ?? null,
+              rulebookDirection, rulebookSession: sess, rulebookAdxBucket: adxB, rulebookRsiBucket: rsiB,
+              rulebookNTotal: bucket?.n_total ?? null, rulebookAvg1h: bucket?.avg_fwd_1h ?? null,
+              rulebookAvg4h: bucket?.avg_fwd_4h ?? null, rulebookAvgEod: bucket?.avg_fwd_eod ?? null,
+              rulebookPctUp4h: bucket?.pct_up_4h ?? null, rulebookAvgMaxUp4h: bucket?.avg_max_up_4h ?? null,
+              rulebookAvgMaxDown4h: bucket?.avg_max_down_4h ?? null, rulebookConfidence: bucket?.sample_confidence ?? null,
+              signalsAgreed: rulebookQualified && overlayStatus === 'supportive',
+              cfRulebookDirection: cfRulebook?.direction ?? null, cfRulebookEntry: cfRulebook?.entry ?? null,
+              cfRulebookStop: cfRulebook?.stop ?? null, cfRulebookTarget: cfRulebook?.target ?? null,
+              cfRulebookRiskUsd: cfRulebook?.riskUsd ?? null, cfRulebookLots: cfRulebook?.lots ?? null,
+              cfOverlayDirection: cfOverlay?.direction ?? null, cfOverlayEntry: cfOverlay?.entry ?? null,
+              cfOverlayStop: cfOverlay?.stop ?? null, cfOverlayTarget: cfOverlay?.target ?? null, cfOverlayLots: cfOverlay?.lots ?? null,
+            });
+          } catch (journalErr) {
+            console.error(`⚠️  [HYBRID] decision journal write failed (non-fatal): ${journalErr.message}`);
+          }
+
+          if (hyDecision.action !== 'TRADE') {
+            console.log(`⏸️  [HYBRID] NO_TRADE — branch=${branch}`);
           }
         }
       }

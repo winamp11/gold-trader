@@ -35,21 +35,29 @@ EVERY 5-minute cycle in history, traded or not, so they carry no selection bias 
 and cannot be distorted by anyone's labelling. Read them as: "when conditions \
 looked like this, here is what price actually did over the following 4 hours."
 
-## How to weigh them
+## You are already told which situation this is
 
-- BOTH AGREE (overlay's direction matches the rulebook's drift, with a decent \
-  sample) — strongest case. Trade it, and size toward the upper end of your budget.
-- RULEBOOK STRONG, OVERLAY SILENT OR OPPOSED — the statistics describe what the \
-  market does; a single judgment call does not override a large sample. You may \
-  trade the rulebook direction, but size conservatively.
-- OVERLAY CONFIDENT, RULEBOOK THIN OR ABSENT (low sample, or no qualified bucket) \
-  — you may follow overlay, but treat it as a lower-conviction trade and size down.
-- THEY CONTRADICT AND BOTH ARE STRONG — this is genuine ambiguity. NO_TRADE is \
-  the correct answer. You are not paid to have an opinion every cycle.
-- NEITHER SUPPORTS A TRADE — NO_TRADE.
+The system has already classified how these two sources relate this cycle — \
+you are NOT deciding that. The DECISION BRANCH line in your prompt tells you \
+which of these three situations you are in (the other three possible \
+situations are resolved automatically without ever calling you):
 
-Sample size governs confidence. A bucket with n=200 is evidence; n=30 is a hint. \
-Never treat a small sample as though it were a large one.
+- **agreement** — overlay's direction matches the rulebook's, both meaningful. \
+  Strongest case. Trade it, size toward the upper end of your risk budget.
+- **rulebook_only_overlay_silent** — the rulebook has a qualified, directional \
+  edge and overlay has nothing to say either way. A single missing opinion does \
+  not override a large sample, but you are acting alone here — size \
+  conservatively. Target risk 0.25–0.40% of the account (still bounded by the \
+  budget shown below; use the low end on a thinner/newer bucket, the high end \
+  only when the sample is large and the excursion data is clean).
+- **overlay_only** — overlay is confident but the rulebook bucket is thin or \
+  unqualified. Follow overlay, but treat it as lower-conviction than agreement \
+  — size down from what overlay itself would use.
+
+Sample size still governs how much weight the rulebook side gets within \
+whichever branch you're in. A bucket with n=200 is evidence; n=30 (rare here, \
+since branch classification already required n above the qualification floor) \
+is still a hint, not proof.
 
 ## Instrument and session
 - XAU/USD spot gold. 1 lot = 100 oz = USD 100 P&L per $1 move per lot.
@@ -86,13 +94,14 @@ Respond with a single valid JSON object. No markdown, no text outside the JSON.
   "stop_atr_mult": <number — stop distance as a multiple of H1 ATR, or null>,
   "risk_usd": <number — dollars to risk on this position, or null>,
   "target_r": <number — target distance as a multiple of the stop distance, min 1.5, or null>,
-  "reasoning": "<1-3 sentences naming which evidence drove the decision>",
-  "tag": "<snake_case label, e.g. both_agree_long, rulebook_only_short, contradiction_pass>"
+  "reasoning": "<1-3 sentences naming which evidence drove the decision>"
 }
 
 For TRADE all numeric fields must be present and positive.
 For NO_TRADE set direction, stop_atr_mult, risk_usd and target_r to null.
-reasoning and tag are mandatory.`;
+reasoning is mandatory. Do not include a "tag" field — the decision branch \
+(agreement / rulebook_only_overlay_silent / overlay_only) already identifies \
+this decision; the system labels the trade from that, not from anything you write.`;
 
 function fmt(n, dp = 2) { return n != null ? Number(n).toFixed(dp) : 'n/a'; }
 
@@ -219,10 +228,12 @@ function formatMarket(marketData, atr, session, price) {
 
 export async function decide({
   marketData, atr, portfolio, session, price,
-  overlayDecision, bucket, bucketDesc, cfg,
+  overlayDecision, bucket, bucketDesc, cfg, branch,
   openPositions = [], riskUsed = 0,
 }) {
   const userContent = [
+    `DECISION BRANCH: ${branch}`,
+    '',
     formatMarket(marketData, atr, session, price),
     '',
     formatRulebook(bucket, cfg, bucketDesc),
@@ -231,7 +242,7 @@ export async function decide({
     '',
     formatPositions(openPositions, cfg, riskUsed, portfolio.current_balance),
     '',
-    `Weigh the two sources of evidence above. Trade, add to your position, or pass?`,
+    `Given the branch above, size and place this trade (or add to your position). Do not re-litigate which branch this is.`,
   ].join('\n');
 
   return await callDecider({ systemPrompt: SYSTEM, userContent, deciderName: 'hybrid', validator: validateIntent });
