@@ -25,7 +25,11 @@ const CHUNK_MS      = 3 * 24 * HOUR_MS;   // 3 days of M1 ≈ 4300 candles < 500
 const MAX_GAP_MS    = 3 * HOUR_MS;        // stale-candle tolerance for point lookups
 
 // Epoch of 21:00 UAE (17:00 UTC) on the UAE day containing ts.
-function uaeDayEndMs(tsMs) {
+// Exported: hybridMaturation.js shares this exact candle-fetch/lookup
+// machinery so hybrid's counterfactual maturation uses the same
+// look-ahead-bias-free mechanism as the signals forward labeler, rather
+// than a second, potentially inconsistent implementation.
+export function uaeDayEndMs(tsMs) {
   const uae = new Date(tsMs + UAE_OFFSET_MS);
   const dayStartUtcMs = Date.UTC(uae.getUTCFullYear(), uae.getUTCMonth(), uae.getUTCDate()) - UAE_OFFSET_MS;
   return dayStartUtcMs + 21 * HOUR_MS;
@@ -36,7 +40,7 @@ function fmtUtc(ms) {
 }
 
 // One date-range M1 fetch. Returns candles as {t, high, low, close} (any order).
-async function fetchM1Range(startMs, endMs) {
+export async function fetchM1Range(startMs, endMs) {
   const url = `${BASE_URL}/time_series?apikey=${API_KEY}&symbol=${encodeURIComponent('XAU/USD')}` +
     `&interval=1min&outputsize=5000&timezone=UTC` +
     `&start_date=${encodeURIComponent(fmtUtc(startMs))}&end_date=${encodeURIComponent(fmtUtc(endMs))}`;
@@ -52,7 +56,7 @@ async function fetchM1Range(startMs, endMs) {
 }
 
 // Close of the last candle at/before ts, or null if the nearest is > MAX_GAP_MS stale.
-function priceAt(candles, tsMs) {
+export function priceAt(candles, tsMs) {
   let lo = 0, hi = candles.length - 1, best = -1;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
@@ -64,7 +68,7 @@ function priceAt(candles, tsMs) {
 }
 
 // Extremes over candles with fromMs < t <= toMs.
-function excursions(candles, fromMs, toMs) {
+export function excursions(candles, fromMs, toMs) {
   let hi = null, lo = null;
   for (const c of candles) {
     if (c.t <= fromMs || c.t > toMs) continue;

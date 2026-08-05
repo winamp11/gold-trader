@@ -17,6 +17,8 @@ import { VALUE_PER_LOT } from './contractSpec.js';
 import { TAG_TAXONOMY } from './tagTaxonomy.js';
 import { runAnalysis, formatRulebookPrompt, adxBucket, rsiBucket } from './analyst.js';
 import { runForwardLabeling } from './forwardLabeler.js';
+import { runHybridMaturation } from './hybridMaturation.js';
+import { computeBranchAnalytics } from './hybridAnalytics.js';
 import { CONFIG_SCHEMA, getBotConfig, saveBotConfig, HYBRID_BOT } from './botConfig.js';
 import { classifyRulebookQualification, classifyOverlayStatus, classifyBranch } from './hybridBranchClassifier.js';
 
@@ -1141,6 +1143,8 @@ function startForwardLabeler() {
   console.log('🏷️  Starting forward labeler (hourly)...');
   setTimeout(() => runForwardLabeling(database.pool), 2 * 60 * 1000);
   setInterval(() => runForwardLabeling(database.pool), 60 * 60 * 1000);
+  setTimeout(() => runHybridMaturation(database.pool), 3 * 60 * 1000);
+  setInterval(() => runHybridMaturation(database.pool), 60 * 60 * 1000);
 }
 
 // ── REST API ───────────────────────────────────────────────────────────────
@@ -1610,6 +1614,49 @@ app.post('/api/labeler/run', async (req, res) => {
     const maxApiCalls = Math.min(parseInt(req.query.max_calls) || 6, 20);
     const result = await runForwardLabeling(database.pool, { maxApiCalls });
     res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Manual hybrid counterfactual maturation trigger, same shape as above.
+app.post('/api/hybrid/maturation/run', async (req, res) => {
+  try {
+    const maxApiCalls = Math.min(parseInt(req.query.max_calls) || 6, 20);
+    const result = await runHybridMaturation(database.pool, { maxApiCalls });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Per-branch decision analytics — win rate, P&L, R, profit factor, drawdown,
+// MFE/MAE, and counterfactual profit avoided/missed by each veto/no-trade
+// branch. ?start=&end= as YYYY-MM-DD, same convention as the equity chart's
+// date-range picker; omit either for all history. ?horizon=h1|h4|eod
+// (default eod) selects which counterfactual checkpoint is measured.
+app.get('/api/hybrid/branch-analytics', async (req, res) => {
+  try {
+    const params = [];
+    let dateFilter = '';
+    if (req.query.start) { params.push(req.query.start + 'T00:00:00Z'); dateFilter += ` AND hd.cycle_ts >= $${params.length}`; }
+    if (req.query.end)   { params.push(req.query.end   + 'T23:59:59Z'); dateFilter += ` AND hd.cycle_ts <= $${params.length}`; }
+    const horizon = ['h1', 'h4', 'eod'].includes(req.query.horizon) ? req.query.horizon : 'eod';
+
+    const { rows } = await database.pool.query(`
+      SELECT hd.*, t.direction, t.entry_price, t.stop_loss, t.take_profit,
+             t.pnl, t.max_price_during, t.min_price_during, t.exit_reason
+      FROM hybrid_decisions hd
+      LEFT JOIN trades t ON t.id = hd.trade_id
+      WHERE 1=1 ${dateFilter}
+      ORDER BY hd.cycle_ts ASC
+    `, params);
+
+    res.json({
+      horizon,
+      total_evaluations: rows.length,
+      branches: computeBranchAnalytics(rows, horizon),
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
