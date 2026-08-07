@@ -1702,6 +1702,18 @@ app.get('/api/hybrid/admin/cf-cleanup', async (req, res) => {
          AND cycle_ts < $1`,
       [CF_CLEANUP_CUTOFF]
     );
+    if (req.query.mode === 'diag') {
+      const { rows: allCf } = await database.pool.query(
+        `SELECT trade_id IS NULL AS no_trade, cycle_ts < $1 AS before_cutoff, COUNT(*)::int AS n,
+                MIN(cycle_ts) AS min_ts, MAX(cycle_ts) AS max_ts
+         FROM hybrid_decisions
+         WHERE (cf_rulebook_direction IS NOT NULL OR cf_overlay_direction IS NOT NULL)
+         GROUP BY 1, 2 ORDER BY 1, 2`,
+        [CF_CLEANUP_CUTOFF]
+      );
+      const { rows: totalRows } = await database.pool.query(`SELECT COUNT(*)::int AS n, MIN(cycle_ts) AS min_ts, MAX(cycle_ts) AS max_ts FROM hybrid_decisions`);
+      return res.json({ mode: 'diag', total_hybrid_decisions: totalRows[0], cf_breakdown: allCf, cutoff: CF_CLEANUP_CUTOFF });
+    }
     if (req.query.mode !== 'delete') {
       return res.json({ mode: 'dry_run', would_delete: rows.length, cutoff: CF_CLEANUP_CUTOFF });
     }
