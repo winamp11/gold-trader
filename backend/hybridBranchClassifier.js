@@ -37,10 +37,15 @@ export function classifyOverlayStatus(overlayDecision, rulebookDirection, mechDe
   const action    = overlayDecision?.action ?? 'NO_TRADE';
   const direction = overlayDecision?.direction ?? null;
 
-  if (action === 'TRADE' && direction && rulebookDirection && direction === rulebookDirection) {
-    return { status: 'supportive', oppositionType: null, opposingTrade: false };
-  }
-  if (action === 'TRADE' && direction && rulebookDirection && direction !== rulebookDirection) {
+  if (action === 'TRADE' && direction) {
+    // No rulebook direction to compare against (unqualified/absent bucket)
+    // means there is nothing to agree or disagree WITH — a real overlay
+    // trade proposal is unconditionally supportive in that case, feeding the
+    // overlay_only branch. Only when a rulebook direction actually exists
+    // does direction agreement/disagreement mean anything.
+    if (!rulebookDirection || direction === rulebookDirection) {
+      return { status: 'supportive', oppositionType: null, opposingTrade: false };
+    }
     // A genuine, priced, opposite-direction conviction — the strongest form
     // of disagreement there is, and the one case with two real trade ideas
     // pointing opposite ways.

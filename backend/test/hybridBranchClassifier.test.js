@@ -43,6 +43,18 @@ describe('classifyOverlayStatus', () => {
     const r = classifyOverlayStatus({ action: 'TRADE', direction: 'LONG' }, 'LONG', null);
     assert.equal(r.status, 'supportive');
   });
+  test('REGRESSION: supportive when the rulebook has no qualified direction at all (overlay_only case)', () => {
+    // Bug found in production: this exact case (rulebookDirection === null,
+    // overlay proposes a real trade) was silently falling through to
+    // 'silent' because the old supportive-check required a rulebook
+    // direction to exist before it could ever fire -- making overlay_only
+    // structurally unreachable, since it's specifically the branch where
+    // the rulebook DOESN'T qualify. 195/195 live evaluations landed in
+    // no_support before this was caught.
+    const r = classifyOverlayStatus({ action: 'TRADE', direction: 'SHORT' }, null, null);
+    assert.equal(r.status, 'supportive');
+    assert.equal(r.opposingTrade, false);
+  });
   test('silent: overlay has no proposal at all', () => {
     const r = classifyOverlayStatus({ action: 'NO_TRADE', tag: 'overlay_no_proposal' }, 'LONG', null);
     assert.equal(r.status, 'silent');
@@ -71,6 +83,32 @@ describe('classifyOverlayStatus', () => {
     const r = classifyOverlayStatus({ action: 'TRADE', direction: 'SHORT' }, 'LONG', null);
     assert.equal(r.status, 'strongly_opposed');
     assert.equal(r.opposingTrade, true);
+  });
+});
+
+describe('end-to-end: classifyOverlayStatus -> classifyBranch chained together', () => {
+  // The branch-level tests below pass overlayStatus directly, which is what
+  // let the production bug slip through unit tests: classifyBranch alone
+  // was always correct, but the two functions disagreed about what
+  // "supportive with no rulebook direction" meant. These tests run the real
+  // pipeline the executor actually calls, end to end.
+  test('overlay_only is reachable when the rulebook is unqualified and overlay proposes a real trade', () => {
+    const { qualified, direction: rulebookDirection } = classifyRulebookQualification(thinBucket, CFG);
+    const overlay = classifyOverlayStatus({ action: 'TRADE', direction: 'LONG' }, rulebookDirection, null);
+    const { branch } = classifyBranch({ rulebookQualified: qualified, overlayStatus: overlay.status, overlayOpposingTrade: overlay.opposingTrade });
+    assert.equal(branch, 'overlay_only');
+  });
+  test('agreement is reachable when the rulebook qualifies and overlay agrees', () => {
+    const { qualified, direction: rulebookDirection } = classifyRulebookQualification(qualifiedLongBucket, CFG);
+    const overlay = classifyOverlayStatus({ action: 'TRADE', direction: 'LONG' }, rulebookDirection, null);
+    const { branch } = classifyBranch({ rulebookQualified: qualified, overlayStatus: overlay.status, overlayOpposingTrade: overlay.opposingTrade });
+    assert.equal(branch, 'agreement');
+  });
+  test('rulebook_only_overlay_silent is reachable when the rulebook qualifies and overlay has nothing', () => {
+    const { qualified, direction: rulebookDirection } = classifyRulebookQualification(qualifiedShortBucket, CFG);
+    const overlay = classifyOverlayStatus({ action: 'NO_TRADE', tag: 'overlay_no_proposal' }, rulebookDirection, null);
+    const { branch } = classifyBranch({ rulebookQualified: qualified, overlayStatus: overlay.status, overlayOpposingTrade: overlay.opposingTrade });
+    assert.equal(branch, 'rulebook_only_overlay_silent');
   });
 });
 
