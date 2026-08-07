@@ -1683,6 +1683,41 @@ app.get('/api/hybrid/branch-analytics', async (req, res) => {
   }
 });
 
+// TEMPORARY one-off cleanup: remove hybrid_decisions rows contaminated by the
+// counterfactual over-sampling bug (fixed in 37f6870) -- captured every
+// cycle instead of throttled, so a single held losing position got counted
+// as a dozen independent "trades" in counterfactual profit_avoided/missed.
+// Scoped tightly: only rows with NO real trade attached (trade_id IS NULL)
+// and a captured counterfactual, from before the throttle fix went live.
+// Remove this endpoint after use -- it's not meant to be a permanent API.
+const CF_CLEANUP_TOKEN = '634e757b029ba404e29d91afa656ba9131ac9c8b';
+const CF_CLEANUP_CUTOFF = '2026-08-07T09:25:00Z';
+app.get('/api/hybrid/admin/cf-cleanup', async (req, res) => {
+  try {
+    if (req.query.token !== CF_CLEANUP_TOKEN) return res.status(403).json({ error: 'forbidden' });
+    const { rows } = await database.pool.query(
+      `SELECT id FROM hybrid_decisions
+       WHERE trade_id IS NULL
+         AND (cf_rulebook_direction IS NOT NULL OR cf_overlay_direction IS NOT NULL)
+         AND cycle_ts < $1`,
+      [CF_CLEANUP_CUTOFF]
+    );
+    if (req.query.mode !== 'delete') {
+      return res.json({ mode: 'dry_run', would_delete: rows.length, cutoff: CF_CLEANUP_CUTOFF });
+    }
+    const { rowCount } = await database.pool.query(
+      `DELETE FROM hybrid_decisions
+       WHERE trade_id IS NULL
+         AND (cf_rulebook_direction IS NOT NULL OR cf_overlay_direction IS NOT NULL)
+         AND cycle_ts < $1`,
+      [CF_CLEANUP_CUTOFF]
+    );
+    res.json({ mode: 'delete', deleted: rowCount, cutoff: CF_CLEANUP_CUTOFF });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // FTMO prop-sim account status: all four rule gauges in one payload.
 app.get('/api/prop/status', async (req, res) => {
   try {
