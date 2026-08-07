@@ -967,14 +967,35 @@ async function generateSignalIfTradingHours() {
           // ── Counterfactual geometry, frozen now (no look-ahead) ──────────
           // Only computed for a direction that was NOT actually taken —
           // there's nothing hypothetical about a trade that really happened.
+          //
+          // Throttled the same way real entries are (entryIntervalMin): while
+          // overlay/the rulebook keep proposing essentially the same held
+          // idea cycle after cycle, capturing a fresh counterfactual every 5
+          // minutes turns one real position into a dozen correlated,
+          // non-independent "trades" in the analytics -- a single losing
+          // hold gets sampled repeatedly while a quick winner gets sampled
+          // once, silently biasing profit_avoided/profit_missed. (Found live:
+          // 80 matured overlay counterfactuals, 80 losses, summing to
+          // -$132k, while overlay's real trades over the same window were
+          // 8W/6L net +$9.8k -- the same handful of held positions, resampled.)
           const finalDirection = hyDecision.action === 'TRADE' ? hyDecision.direction : null;
+          const cfThrottleMs = cfg.entryIntervalMin * 60000;
+          const { rows: lastCf } = await database.pool.query(
+            `SELECT MAX(CASE WHEN cf_rulebook_direction IS NOT NULL THEN cycle_ts END) AS last_rb,
+                    MAX(CASE WHEN cf_overlay_direction  IS NOT NULL THEN cycle_ts END) AS last_ov
+             FROM hybrid_decisions WHERE cycle_ts > $1`,
+            [new Date(Date.now() - cfThrottleMs).toISOString()]
+          );
+          const cfRulebookRecent = !!lastCf[0]?.last_rb;
+          const cfOverlayRecent  = !!lastCf[0]?.last_ov;
+
           let cfRulebook = null;
-          if (rulebookQualified && rulebookDirection && (finalDirection !== rulebookDirection)) {
+          if (!cfRulebookRecent && rulebookQualified && rulebookDirection && (finalDirection !== rulebookDirection)) {
             const g = computeDefaultCounterfactualGeometry(rulebookDirection, currentPrice, atr?.h1, bal);
             if (g) cfRulebook = g;
           }
           let cfOverlay = null;
-          if (overlayDecision?.action === 'TRADE' && overlayDecision.direction && finalDirection !== overlayDecision.direction) {
+          if (!cfOverlayRecent && overlayDecision?.action === 'TRADE' && overlayDecision.direction && finalDirection !== overlayDecision.direction) {
             cfOverlay = {
               direction: overlayDecision.direction, entry: overlayDecision.entry,
               stop: overlayDecision.stop, target: overlayDecision.target, lots: overlayDecision.lots,
