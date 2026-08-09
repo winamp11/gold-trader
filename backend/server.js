@@ -1874,9 +1874,14 @@ app.get('/api/hybrid/status', async (req, res) => {
     if (!p) return res.status(404).json({ error: 'claude_hybrid portfolio not found' });
     const cfg = await getBotConfig(database.pool);
 
-    const dayStart   = circuitBreakerState[p.id]?.dayStartBalance ?? p.day_start_balance ?? p.current_balance;
+    // Same source as AccountPanel's "today" figure for the other three
+    // accounts (account_pnl_daily, keyed by date) -- reads 0 with no special
+    // handling on a day nothing closed, instead of carrying forward the last
+    // trading day's balance delta under a "today" label.
+    const today      = new Date().toISOString().split('T')[0];
+    const realized   = await database.getDailyRealizedPnl(p.id, today);
     const unrealized = lastKnownPrice ? computeUnrealizedPnl(p.id, lastKnownPrice) : 0;
-    const dayPnl     = (p.current_balance - dayStart) + unrealized;
+    const dayPnl     = realized + unrealized;
     const bal        = p.starting_balance || 100000;
     const isToday    = hybridDay.date === uaeDate();
     const seriesActive = isToday && hybridDay.seriesStartBalance != null;

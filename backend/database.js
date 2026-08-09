@@ -1408,6 +1408,18 @@ class DatabaseService {
     `, [date, portfolioId, pnlDelta, isWin ? 1 : 0, isWin ? 0 : 1]);
   }
 
+  // Realized P&L booked for one portfolio on one date. Defaults to 0 when no
+  // trade closed that day (weekends, holidays) -- same source AccountPanel
+  // already reads for mechanical/overlay/solo, so "today" naturally reads
+  // flat on non-trading days with no day-boundary bookkeeping required.
+  async getDailyRealizedPnl(portfolioId, date) {
+    const { rows } = await this.pool.query(
+      `SELECT realized_pnl FROM account_pnl_daily WHERE portfolio_id = $1 AND date = $2`,
+      [portfolioId, date]
+    );
+    return rows[0] ? Number(rows[0].realized_pnl) : 0;
+  }
+
   // ── Composite queries used by specific endpoints ───────────────────────────
 
   async getJournalEntries(limit = 20, portfolioId = null, offset = 0) {
