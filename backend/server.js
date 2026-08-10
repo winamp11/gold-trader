@@ -306,6 +306,13 @@ let prevDayCache = { date: null, high: null, low: null };
 const SOLO_INTERVAL_MS = (parseInt(process.env.SOLO_INTERVAL_MIN) || 15) * 60 * 1000;
 let lastSoloCallMs = 0;
 
+// Disabled 2026-08-09: two months live (61 trades) showed a flat 0.80
+// profit factor in both the first and second half, no improvement trend,
+// and no signal distinct from mechanical/overlay's shared RSI/MACD family
+// -- not worth the token spend right now. Decider file, portfolio balance,
+// and trade history are untouched. Flip back to true to resume.
+const SOLO_ENABLED = false;
+
 function updateSessionRange(price) {
   const today = uaeDate();
   let changed = false;
@@ -795,11 +802,13 @@ async function generateSignalIfTradingHours() {
 
     // ── Claude Solo decider ───────────────────────────────────────────────
     let soloDecision;
-    const soloDueMs = SOLO_INTERVAL_MS - (Date.now() - lastSoloCallMs);
-    if (isHaltedToday(soloPortfolio.id)) {
+    if (!SOLO_ENABLED) {
+      soloDecision = { action: 'NO_TRADE', direction: null, entry: null, stop: null, target: null, lots: null, reasoning: 'solo disabled', tag: 'solo_disabled' };
+    } else if (isHaltedToday(soloPortfolio.id)) {
       console.log(`🛑 [SOLO] Circuit breaker active — skipping Claude call this cycle`);
       soloDecision = { action: 'NO_TRADE', direction: null, entry: null, stop: null, target: null, lots: null, reasoning: 'circuit breaker halt', tag: 'circuit_breaker_halt' };
-    } else if (soloDueMs > 0) {
+    } else if (SOLO_INTERVAL_MS - (Date.now() - lastSoloCallMs) > 0) {
+      const soloDueMs = SOLO_INTERVAL_MS - (Date.now() - lastSoloCallMs);
       console.log(`⏭️  [SOLO] throttled — next evaluation in ${Math.ceil(soloDueMs / 60000)} min (every ${SOLO_INTERVAL_MS / 60000} min)`);
       soloDecision = { action: 'NO_TRADE', direction: null, entry: null, stop: null, target: null, lots: null, reasoning: `throttled — solo evaluates every ${SOLO_INTERVAL_MS / 60000} min`, tag: 'solo_throttled' };
     } else {
