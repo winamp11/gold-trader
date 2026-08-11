@@ -13,3 +13,16 @@ export const VALUE_PER_LOT = 100; // USD P&L per $1 price move per 1.0 standard 
 // Charged at position close: cost = SPREAD_POINTS × VALUE_PER_LOT × lots.
 // Applied to veto shadows too, so counterfactual P&L stays comparable.
 export const SPREAD_POINTS = 0.30;
+
+// Broker-style lot constraints, used by risk-based position sizing (the
+// mechanical_prime/mechanical_session risk engine). Same numbers already
+// used ad hoc in signalEngine.js and server.js, centralized here as the
+// named constants the risk spec calls for ("minimum lot, maximum lot, lot
+// step"). This is a paper-trading system with no live broker connection —
+// these are the contract's own effective granularity (VALUE_PER_LOT = $100
+// per full point per standard lot), not a real broker feed.
+export const MIN_LOT   = 0.01;
+export const MAX_LOT   = 1.0;
+export const LOT_STEP  = 0.01;
+export const TICK_SIZE = 0.01;                       // smallest price increment, USD
+export const TICK_VALUE = TICK_SIZE * VALUE_PER_LOT;  // USD P&L per tick per 1.0 standard lot

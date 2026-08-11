@@ -3,7 +3,12 @@
 
 // Dubai is UTC+4, no daylight saving time.
 // Add 4 h to UTC epoch to read hours/minutes as UAE local time.
-function uaeTime(ts) {
+// Exported (previously module-private) so callers needing UAE minutes/
+// weekday -- e.g. the mechanical_prime/mechanical_session entry-window
+// gate -- reuse this single canonical offset instead of adding yet another
+// copy of the same +4h arithmetic (already duplicated a few times in this
+// codebase; not fixing the existing ones here, just not adding a new one).
+export function uaeTime(ts) {
   const uaeDate = new Date((ts ? new Date(ts) : new Date()).getTime() + 4 * 60 * 60 * 1000);
   return {
     mins:    uaeDate.getUTCHours() * 60 + uaeDate.getUTCMinutes(),

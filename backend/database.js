@@ -139,6 +139,17 @@ class DatabaseService {
       ON CONFLICT (name) DO NOTHING
     `);
 
+    // mechanical_prime / mechanical_session: same Mechanical signal as the
+    // unchanged `mechanical` control, filtered to a historically-strong
+    // entry window and sized by the deterministic risk engine in
+    // mechanicalRiskEngine.js (see server.js). Not a second strategy.
+    await this.pool.query(`
+      INSERT INTO portfolios (name, starting_balance, current_balance) VALUES
+        ('mechanical_prime',   100000, 100000),
+        ('mechanical_session', 100000, 100000)
+      ON CONFLICT (name) DO NOTHING
+    `);
+
     // Highest balance recorded at any day boundary — anchor for FTMO's
     // trailing Maximum Loss rule (limit = high water − 10% of initial).
     await this.pool.query(`ALTER TABLE portfolios ADD COLUMN IF NOT EXISTS high_water_balance DOUBLE PRECISION`);
@@ -537,6 +548,82 @@ class DatabaseService {
     `);
     await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_hybrid_decisions_branch ON hybrid_decisions(decision_branch)`);
     await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_hybrid_decisions_cycle_ts ON hybrid_decisions(cycle_ts)`);
+
+    // mechanical_variant_decisions — INSERT-ONLY, immutable decision journal
+    // for mechanical_prime/mechanical_session. One row per account per
+    // Mechanical TRADE signal (RED cycles need no gating, mirroring
+    // mechanical's own executor). Rows are never UPDATEd: a trade's real
+    // outcome lives in `trades` (linked via trade_id, known synchronously
+    // from openPosition() so no later write-back is needed); any later
+    // counterfactual result for a rejected signal is Phase 2 work and will
+    // live in its own table linked by decision id, never as a column
+    // mutated here — this preserves exactly what the bot knew and decided
+    // at the moment it decided it.
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS mechanical_variant_decisions (
+        id                     SERIAL PRIMARY KEY,
+        account                TEXT NOT NULL,          -- mechanical_prime | mechanical_session
+        signal_id              INTEGER REFERENCES signals(id),
+        cycle_ts_utc           TEXT NOT NULL,
+        cycle_ts_uae           TEXT NOT NULL,
+        uae_weekday            SMALLINT NOT NULL,       -- 0=Sun .. 6=Sat
+        uae_hour               SMALLINT NOT NULL,
+
+        -- The shared Mechanical signal, unmodified -- identical across
+        -- mechanical/mechanical_prime/mechanical_session for the same
+        -- signal_id. This is what "signal-for-signal comparable" means.
+        direction              TEXT NOT NULL,           -- LONG | SHORT
+        signal_entry           DOUBLE PRECISION NOT NULL,
+        signal_stop            DOUBLE PRECISION NOT NULL, -- Mechanical's raw proposed stop, pre-ATR-clamp
+        signal_target           DOUBLE PRECISION NOT NULL, -- unchanged by this account, ever
+        mech_tag                TEXT,
+        mech_reasoning           TEXT,
+
+        -- Indicator snapshot at decision time, denormalized (not joined via
+        -- signal_id) so this row is a genuinely self-contained, immutable
+        -- record of what the bot knew, independent of the signals table.
+        h4_rsi                 DOUBLE PRECISION,
+        h1_rsi                 DOUBLE PRECISION,
+        h4_macd_hist            DOUBLE PRECISION,
+        h1_macd_hist            DOUBLE PRECISION,
+        h4_adx                 DOUBLE PRECISION,
+        h1_adx                  DOUBLE PRECISION,
+        h1_atr                  DOUBLE PRECISION,
+        h4_atr                  DOUBLE PRECISION,
+
+        -- This account's own risk-engine adjustment to the stop (spec: TP
+        -- is never touched; only the stop is clamped to an ATR safety band).
+        clamped_stop             DOUBLE PRECISION,
+        atr_mult_applied          DOUBLE PRECISION,
+
+        -- Full pipeline state at the moment this decision was evaluated.
+        session_permitted         BOOLEAN NOT NULL,
+        risk_state_before          TEXT NOT NULL,        -- NORMAL | CAUTION | DEFENSIVE | PAUSED
+        risk_state_after           TEXT NOT NULL,        -- reflects an evidence-based PAUSED->DEFENSIVE transition observed THIS cycle, if any
+        state_transition_reason     TEXT,                -- non-null iff risk_state_before <> risk_state_after, or a daily guard tripped this cycle
+        allowed_risk_pct            DOUBLE PRECISION NOT NULL,
+        equity                     DOUBLE PRECISION NOT NULL,
+        day_start_equity            DOUBLE PRECISION NOT NULL,
+        day_pnl                    DOUBLE PRECISION NOT NULL,
+        open_risk_pct_before         DOUBLE PRECISION NOT NULL,
+        open_position_count          SMALLINT NOT NULL,
+        consecutive_losses           SMALLINT NOT NULL,
+
+        -- Outcome of the pipeline for this signal, this account, this cycle.
+        final_action               TEXT NOT NULL,        -- EXECUTE | REDUCE | REJECT
+        reason_code                TEXT,                 -- populated for REJECT always, for REDUCE when open-risk headroom clamped size
+        lots                       DOUBLE PRECISION,      -- actual size if EXECUTE/REDUCE, else null
+        risk_usd                   DOUBLE PRECISION,
+        theoretical_1pct_lots        DOUBLE PRECISION NOT NULL, -- same signal, flat 1% risk -- input to Phase 2's POSITION_SIZING_VALUE
+        trade_id                   INTEGER REFERENCES trades(id),
+
+        created_at                 TEXT NOT NULL DEFAULT TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+      )
+    `);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_mvd_account_ts     ON mechanical_variant_decisions(account, cycle_ts_utc)`);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_mvd_action         ON mechanical_variant_decisions(account, final_action)`);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_mvd_weekday_hour   ON mechanical_variant_decisions(account, uae_weekday, uae_hour)`);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_mvd_signal         ON mechanical_variant_decisions(signal_id)`);
 
     // Forward rulebook: market behavior by condition bucket across ALL cycles
     // (traded or not), aggregated from the forward-outcome labels. This is the
@@ -1136,6 +1223,41 @@ class DatabaseService {
       d.cfRulebookDirection ?? null, d.cfRulebookEntry ?? null, d.cfRulebookStop ?? null, d.cfRulebookTarget ?? null,
       d.cfRulebookRiskUsd ?? null, d.cfRulebookLots ?? null,
       d.cfOverlayDirection ?? null, d.cfOverlayEntry ?? null, d.cfOverlayStop ?? null, d.cfOverlayTarget ?? null, d.cfOverlayLots ?? null,
+    ]);
+    return r.rows[0].id;
+  }
+
+  // ── Mechanical-variant decision journal (mechanical_prime/mechanical_session) ──
+  // INSERT-ONLY by design -- see the table comment. No update method exists
+  // on purpose; a row's trade_id is known synchronously at insert time
+  // (openPosition() returns the new trade id), so there is never a reason
+  // to write back to a row after it's created.
+
+  async saveMechanicalVariantDecision(d) {
+    const r = await this.pool.query(`
+      INSERT INTO mechanical_variant_decisions (
+        account, signal_id, cycle_ts_utc, cycle_ts_uae, uae_weekday, uae_hour,
+        direction, signal_entry, signal_stop, signal_target, mech_tag, mech_reasoning,
+        h4_rsi, h1_rsi, h4_macd_hist, h1_macd_hist, h4_adx, h1_adx, h1_atr, h4_atr,
+        clamped_stop, atr_mult_applied,
+        session_permitted, risk_state_before, risk_state_after, state_transition_reason,
+        allowed_risk_pct, equity, day_start_equity, day_pnl,
+        open_risk_pct_before, open_position_count, consecutive_losses,
+        final_action, reason_code, lots, risk_usd, theoretical_1pct_lots, trade_id
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+        $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38
+      ) RETURNING id
+    `, [
+      d.account, d.signalId ?? null, d.cycleTsUtc, d.cycleTsUae, d.uaeWeekday, d.uaeHour,
+      d.direction, d.signalEntry, d.signalStop, d.signalTarget, d.mechTag ?? null, d.mechReasoning ?? null,
+      d.h4Rsi ?? null, d.h1Rsi ?? null, d.h4MacdHist ?? null, d.h1MacdHist ?? null,
+      d.h4Adx ?? null, d.h1Adx ?? null, d.h1Atr ?? null, d.h4Atr ?? null,
+      d.clampedStop ?? null, d.atrMultApplied ?? null,
+      d.sessionPermitted, d.riskStateBefore, d.riskStateAfter, d.stateTransitionReason ?? null,
+      d.allowedRiskPct, d.equity, d.dayStartEquity, d.dayPnl,
+      d.openRiskPctBefore, d.openPositionCount, d.consecutiveLosses,
+      d.finalAction, d.reasonCode ?? null, d.lots ?? null, d.riskUsd ?? null, d.theoretical1pctLots, d.tradeId ?? null,
     ]);
     return r.rows[0].id;
   }

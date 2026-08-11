@@ -5,7 +5,7 @@ import dotenv from 'dotenv';
 import twelveData from './twelveData.js';
 import database from './database.js';
 import outcomeTracker from './outcomeTracker.js';
-import { isTradingHours, getNextTradingTime, getSession } from './tradingHours.js';
+import { isTradingHours, getNextTradingTime, getSession, uaeTime } from './tradingHours.js';
 
 import { decide as mechanicalDecide }    from './deciders/mechanicalDecider.js';
 import { decide as claudeOverlayDecide } from './deciders/claudeOverlayDecider.js';
@@ -19,7 +19,18 @@ import { runAnalysis, formatRulebookPrompt, adxBucket, rsiBucket } from './analy
 import { runForwardLabeling } from './forwardLabeler.js';
 import { runHybridMaturation } from './hybridMaturation.js';
 import { computeBranchAnalytics } from './hybridAnalytics.js';
-import { CONFIG_SCHEMA, getBotConfig, saveBotConfig, HYBRID_BOT } from './botConfig.js';
+import {
+  CONFIG_SCHEMA, getBotConfig, saveBotConfig, HYBRID_BOT,
+  MECHANICAL_PRIME_BOT, MECHANICAL_SESSION_BOT, MECHANICAL_PRIME_SCHEMA, MECHANICAL_SESSION_SCHEMA,
+} from './botConfig.js';
+import {
+  RISK_STATE_PCT,
+  isWithinEntryWindow, isMaxPositionsReached, calculateLotsForRisk, clampToOpenRiskHeadroom, clampStopToAtrBand,
+  evaluateDailyGuards, checkRecoveryEvidence, applyEvidenceBasedRecovery,
+} from './mechanicalRiskEngine.js';
+import {
+  MECH_VARIANT_ACCOUNTS, mechVariantState, ensureMechVariantDay, persistMechVariantState,
+} from './mechanicalVariantState.js';
 import { classifyRulebookQualification, classifyOverlayStatus, classifyBranch, clampRiskUsd } from './hybridBranchClassifier.js';
 
 dotenv.config();
@@ -83,6 +94,41 @@ let propHardHalted = null;      // ISO date string when the trailing Max Loss gu
 // opens later — they can even be opposite directions (a losing LONG stack
 // followed by a fresh SHORT stack), so netting them into one day-level
 // number was hiding real, currently-open profit from ever being protected.
+// mechanical_prime/mechanical_session risk-engine state lives in
+// mechanicalVariantState.js (not here) so outcomeTracker.js can also update
+// it on trade close without a circular import between it and server.js.
+
+// Last N Mechanical evaluation cycles, newest first, for the PAUSED ->
+// DEFENSIVE recovery-evidence check. Account-agnostic (it's a property of
+// the shared signal history, not either account's own trade sequence), so
+// this is queried fresh rather than buffered per account.
+async function fetchRecentSignalsForRecovery(limit = 12) {
+  const { rows } = await database.pool.query(`
+    SELECT signal, direction, h1_rsi_at_signal, h1_macd_hist_at_signal, h1_adx_at_signal, h1_atr_at_signal
+    FROM signals ORDER BY id DESC LIMIT $1
+  `, [limit]);
+  return rows.map(r => ({
+    isGreen:    r.signal === 'GREEN',
+    direction:  r.direction,
+    h1Rsi:      r.h1_rsi_at_signal,
+    h1MacdHist: r.h1_macd_hist_at_signal,
+    h1Adx:      r.h1_adx_at_signal,
+    h1Atr:      r.h1_atr_at_signal,
+  }));
+}
+
+// Sum of |entry-stop| × lots × VALUE_PER_LOT across one portfolio's own
+// open GREEN positions — same math computeUnrealizedPnl uses, but for
+// initial risk rather than live P&L.
+function computeOpenRiskUsd(portfolioId) {
+  let total = 0;
+  for (const t of outcomeTracker.activeTracking.values()) {
+    if (t.portfolioId !== portfolioId || t.type !== 'GREEN') continue;
+    total += Math.abs(t.entryPrice - t.stopLoss) * (t.lots || 0.01) * VALUE_PER_LOT;
+  }
+  return total;
+}
+
 const hybridDay = {
   date: null, stoppedReason: null, runsBanked: 0, runNumber: 0,
   // Balance snapshot at the moment the current series began (first entry
@@ -451,6 +497,148 @@ async function openPosition({ portfolio, decision, signalId, currentPrice, isSig
   return tradeId;
 }
 
+// ── Helper: evaluate one mechanical_prime/mechanical_session cycle ────────
+// Consumes the SAME mechDecision object mechanical itself already got this
+// cycle -- never a second mechanicalDecide() call, never a second copy of
+// the RSI/MACD/ADX/ATR entry logic. Every path through this function ends
+// in exactly one INSERT into mechanical_variant_decisions (never an
+// UPDATE), whether the signal was executed, reduced, or rejected. No AI
+// component is in this call path at all -- it is pure deterministic gating
+// over mechanicalRiskEngine.js's pure functions.
+async function evaluateMechanicalVariant({ account, portfolio, cfg, mechDecision, marketData, signalId, currentPrice, currentSession }) {
+  if (mechDecision.action !== 'TRADE') return; // RED cycles need no gating, mirrors mechanical's own executor
+
+  const today  = uaeDate();
+  const equity = portfolio.current_balance;
+  await ensureMechVariantDay(account, today, equity);
+  const state = mechVariantState[account];
+
+  const { mins: uaeMinutes, day: uaeWeekday, uaeDate: uaeDateObj } = uaeTime();
+  const uaeHour = uaeDateObj.getUTCHours();
+  const nowUtc  = new Date();
+
+  const riskStateBefore = state.riskState;
+
+  // Daily guards recomputed fresh from live equity every cycle -- pure,
+  // monotonic for the day (never un-trips once tripped).
+  const guard = evaluateDailyGuards({
+    dayStartEquity: state.dayStartEquity, currentEquity: equity, dayPeakEquity: state.dayPeakEquity,
+    givebackArmed: state.givebackArmed, givebackLocked: state.givebackLocked, dailyMaxLossHit: state.dailyMaxLossHit,
+    dailyMaxLossPct: cfg.dailyMaxLossPct, dailyProfitTargetPct: cfg.dailyProfitTargetPct, giveBackPct: cfg.giveBackPct,
+  });
+  state.dayPeakEquity = guard.dayPeakEquity;
+  state.givebackArmed = guard.givebackArmed;
+  state.givebackLocked = guard.givebackLocked;
+  state.dailyMaxLossHit = guard.dailyMaxLossHit;
+  let stateTransitionReason = guard.event;
+
+  // Evidence-gated PAUSED -> DEFENSIVE check. Deterministic numerical
+  // conditions only -- see mechanicalRiskEngine.checkRecoveryEvidence.
+  if (state.riskState === 'PAUSED') {
+    const recent = await fetchRecentSignalsForRecovery(12);
+    const evidence = checkRecoveryEvidence(recent);
+    const recovery = applyEvidenceBasedRecovery({ currentState: state.riskState, eligible: evidence.eligible });
+    if (recovery.transitioned) {
+      console.log(`🔓 [${account}] RISK_RESUME: ${evidence.reasons.join(', ')}`);
+      state.riskState = recovery.newState;
+      stateTransitionReason = stateTransitionReason ?? `${recovery.reason}(${evidence.reasons.join('+')})`;
+    }
+  }
+  if (stateTransitionReason) await persistMechVariantState(account);
+
+  const riskStateAfter  = state.riskState;
+  const allowedRiskPct  = RISK_STATE_PCT[riskStateAfter];
+  const sessionPermitted = isWithinEntryWindow(uaeMinutes, cfg.entryWindowStartHour, cfg.entryWindowEndHour);
+  const openPositions    = outcomeTracker.getOpenPositionsForPortfolio(portfolio.id);
+  const openRiskUsdBefore = computeOpenRiskUsd(portfolio.id);
+  const openRiskPctBefore = equity > 0 ? (openRiskUsdBefore / equity) * 100 : 0;
+  const theoretical = calculateLotsForRisk({ equity, riskPct: 1.00, entry: mechDecision.entry, stop: mechDecision.stop });
+
+  const base = {
+    account, signalId, cycleTsUtc: nowUtc.toISOString(), cycleTsUae: uaeDateObj.toISOString(),
+    uaeWeekday, uaeHour,
+    direction: mechDecision.direction, signalEntry: mechDecision.entry, signalStop: mechDecision.stop, signalTarget: mechDecision.target,
+    mechTag: mechDecision.tag ?? null, mechReasoning: mechDecision.reasoning ?? null,
+    h4Rsi: marketData.h4?.rsi ?? null, h1Rsi: marketData.h1?.rsi ?? null,
+    h4MacdHist: marketData.h4?.macd_hist ?? null, h1MacdHist: marketData.h1?.macd_hist ?? null,
+    h4Adx: marketData.h4?.adx ?? null, h1Adx: marketData.h1?.adx ?? null,
+    h1Atr: marketData.h1?.atr ?? null, h4Atr: marketData.h4?.atr ?? null,
+    sessionPermitted, riskStateBefore, riskStateAfter, stateTransitionReason,
+    allowedRiskPct, equity, dayStartEquity: state.dayStartEquity, dayPnl: guard.dayPnl,
+    openRiskPctBefore, openPositionCount: openPositions.length, consecutiveLosses: state.consecutiveLosses,
+    theoretical1pctLots: theoretical.lots,
+  };
+
+  const reject = (reasonCode, extra = {}) => database.saveMechanicalVariantDecision({
+    ...base, clampedStop: extra.clampedStop ?? null, atrMultApplied: extra.atrMultApplied ?? null,
+    finalAction: 'REJECT', reasonCode, lots: null, riskUsd: null, tradeId: null,
+  });
+
+  // ── Mandatory pipeline, in order, no bypass ──────────────────────────
+  if (!sessionPermitted) {
+    return reject(account === MECHANICAL_PRIME_BOT ? 'OUTSIDE_PRIME_WINDOW' : 'OUTSIDE_SESSION_WINDOW');
+  }
+  if (riskStateAfter === 'PAUSED') {
+    return reject('LOSS_CLUSTER_PAUSE');
+  }
+  if (state.dailyMaxLossHit) {
+    return reject('DAILY_MAX_LOSS');
+  }
+  if (state.givebackLocked) {
+    return reject('DAILY_GIVEBACK_LOCK');
+  }
+  if (isMaxPositionsReached(openPositions.length, cfg.maxOpenPositions)) {
+    return reject('MAX_POSITIONS');
+  }
+
+  const clamp = clampStopToAtrBand({
+    direction: mechDecision.direction, entry: mechDecision.entry, rawStop: mechDecision.stop,
+    h1Atr: marketData.h1?.atr, atrMultMin: cfg.atrMultMin, atrMultMax: cfg.atrMultMax,
+  });
+  if (!clamp) {
+    return reject('INVALID_STOP');
+  }
+
+  const requested = calculateLotsForRisk({ equity, riskPct: allowedRiskPct, entry: mechDecision.entry, stop: clamp.stop });
+  if (requested.lots <= 0) {
+    return reject('POSITION_TOO_SMALL', { clampedStop: clamp.stop, atrMultApplied: clamp.atrMultApplied });
+  }
+
+  const headroom = clampToOpenRiskHeadroom({
+    requestedRiskUsd: requested.riskUsd, existingOpenRiskUsd: openRiskUsdBefore, equity, maxTotalRiskPct: cfg.maxTotalRiskPct,
+  });
+  if (headroom.allowedRiskUsd <= 0) {
+    return reject('MAX_OPEN_RISK', { clampedStop: clamp.stop, atrMultApplied: clamp.atrMultApplied });
+  }
+
+  let finalLots = requested.lots, finalRiskUsd = requested.riskUsd, finalAction = 'EXECUTE';
+  if (headroom.reduced) {
+    const headroomPct = (headroom.allowedRiskUsd / equity) * 100;
+    const reduced = calculateLotsForRisk({ equity, riskPct: headroomPct, entry: mechDecision.entry, stop: clamp.stop });
+    if (reduced.lots <= 0) {
+      return reject('MAX_OPEN_RISK', { clampedStop: clamp.stop, atrMultApplied: clamp.atrMultApplied });
+    }
+    finalLots = reduced.lots; finalRiskUsd = reduced.riskUsd; finalAction = 'REDUCE';
+  }
+
+  if (!(finalLots > 0) || !(clamp.distance > 0)) {
+    return reject('INVALID_STOP', { clampedStop: clamp.stop, atrMultApplied: clamp.atrMultApplied });
+  }
+
+  const decision = {
+    action: 'TRADE', direction: mechDecision.direction, entry: mechDecision.entry,
+    stop: clamp.stop, target: mechDecision.target, lots: finalLots,
+    reasoning: mechDecision.reasoning, tag: account,
+  };
+  const tradeId = await openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
+
+  return database.saveMechanicalVariantDecision({
+    ...base, clampedStop: clamp.stop, atrMultApplied: clamp.atrMultApplied,
+    finalAction, reasonCode: finalAction === 'REDUCE' ? 'MAX_OPEN_RISK' : null,
+    lots: finalLots, riskUsd: finalRiskUsd, tradeId,
+  });
+}
+
 // ── Helper: open a veto shadow for one portfolio ───────────────────────────
 async function openVetoShadow({ portfolio, decision, currentPrice, session = null }) {
   const shadowId = await database.saveVetoShadow({
@@ -765,6 +953,26 @@ async function generateSignalIfTradingHours() {
         outcome:       null,
         maxPrice:      currentPrice,
         minPrice:      currentPrice
+      });
+    }
+
+    // ── mechanical_prime / mechanical_session ─────────────────────────────
+    // Consume the SAME mechDecision computed above -- no second signal call,
+    // no duplicated indicator logic. mechanical itself is completely
+    // unmodified above this point. Gated first by the same generic -10%
+    // circuit breaker every other account already has (checkCircuitBreakers
+    // iterates all portfolios automatically), then by the full deterministic
+    // pipeline in evaluateMechanicalVariant.
+    for (const account of MECH_VARIANT_ACCOUNTS) {
+      const portfolio = await database.getPortfolioByName(account);
+      if (isHaltedToday(portfolio.id)) {
+        console.log(`🛑 [${account}] Circuit breaker active — skipping this cycle`);
+        continue;
+      }
+      const schema = account === MECHANICAL_PRIME_BOT ? MECHANICAL_PRIME_SCHEMA : MECHANICAL_SESSION_SCHEMA;
+      const cfg = await getBotConfig(database.pool, account, schema);
+      await evaluateMechanicalVariant({
+        account, portfolio, cfg, mechDecision, marketData, signalId, currentPrice, currentSession,
       });
     }
 
@@ -1929,9 +2137,19 @@ app.get('/api/hybrid/status', async (req, res) => {
 
 // ── Bot config — live-editable parameters, no redeploy needed ────────────
 // Schema drives the settings form; every write is clamped server-side.
+// bot -> schema lookup. Unknown/omitted ?bot= falls back to hybrid, so every
+// pre-existing caller (no query param) is byte-identical to before.
+function schemaForBot(botName) {
+  if (botName === MECHANICAL_PRIME_BOT)   return MECHANICAL_PRIME_SCHEMA;
+  if (botName === MECHANICAL_SESSION_BOT) return MECHANICAL_SESSION_SCHEMA;
+  return CONFIG_SCHEMA;
+}
+
 app.get('/api/bot-config', async (req, res) => {
   try {
-    res.json({ bot: HYBRID_BOT, schema: CONFIG_SCHEMA, config: await getBotConfig(database.pool) });
+    const bot = req.query.bot || HYBRID_BOT;
+    const schema = schemaForBot(bot);
+    res.json({ bot, schema, config: await getBotConfig(database.pool, bot, schema) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1939,8 +2157,10 @@ app.get('/api/bot-config', async (req, res) => {
 
 app.put('/api/bot-config', async (req, res) => {
   try {
-    const saved = await saveBotConfig(database.pool, req.body?.config ?? req.body ?? {});
-    console.log(`⚙️  [HYBRID] config updated: ${JSON.stringify(saved)}`);
+    const bot = req.query.bot || HYBRID_BOT;
+    const schema = schemaForBot(bot);
+    const saved = await saveBotConfig(database.pool, req.body?.config ?? req.body ?? {}, bot, schema);
+    console.log(`⚙️  [${bot}] config updated: ${JSON.stringify(saved)}`);
     res.json({ saved: true, config: saved });
   } catch (err) {
     res.status(500).json({ error: err.message });

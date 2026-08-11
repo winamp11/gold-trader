@@ -9,6 +9,8 @@
 // Values are read fresh each cycle, so edits take effect without a redeploy.
 
 export const HYBRID_BOT = 'claude_hybrid';
+export const MECHANICAL_PRIME_BOT   = 'mechanical_prime';
+export const MECHANICAL_SESSION_BOT = 'mechanical_session';
 
 // group is used by the UI to section the form.
 export const CONFIG_SCHEMA = [
@@ -60,35 +62,43 @@ export const CONFIG_SCHEMA = [
 ];
 
 export const DEFAULTS = Object.fromEntries(CONFIG_SCHEMA.map(f => [f.key, f.def]));
+export function defaultsFor(schema) { return Object.fromEntries(schema.map(f => [f.key, f.def])); }
 
-// Clamp + coerce an arbitrary object into a valid config. Unknown keys are
-// dropped; missing or non-finite values fall back to the default.
-export function sanitizeConfig(raw = {}) {
+// Clamp + coerce an arbitrary object into a valid config against a given
+// schema (defaults to hybrid's, so every pre-existing call site is
+// byte-identical). Unknown keys are dropped; missing or non-finite values
+// fall back to the default.
+export function sanitizeConfig(raw = {}, schema = CONFIG_SCHEMA) {
   const out = {};
-  for (const f of CONFIG_SCHEMA) {
+  for (const f of schema) {
     const n = Number(raw?.[f.key]);
     out[f.key] = Number.isFinite(n) ? Math.min(f.max, Math.max(f.min, n)) : f.def;
   }
-  // Invariants that span fields
-  if (out.atrMultMin > out.atrMultMax) {
+  // Invariants that span fields (only applied when the schema declares them).
+  if (out.atrMultMin != null && out.atrMultMax != null && out.atrMultMin > out.atrMultMax) {
     const t = out.atrMultMin; out.atrMultMin = out.atrMultMax; out.atrMultMax = t;
   }
-  out.maxRiskPerTradePct = Math.min(out.maxRiskPerTradePct, out.maxTotalRiskPct);
+  if (out.maxRiskPerTradePct != null && out.maxTotalRiskPct != null) {
+    out.maxRiskPerTradePct = Math.min(out.maxRiskPerTradePct, out.maxTotalRiskPct);
+  }
+  if (out.entryWindowStartHour != null && out.entryWindowEndHour != null && out.entryWindowStartHour >= out.entryWindowEndHour) {
+    out.entryWindowEndHour = out.entryWindowStartHour + 1; // never let the window collapse/invert
+  }
   return out;
 }
 
-export async function getBotConfig(pool, botName = HYBRID_BOT) {
+export async function getBotConfig(pool, botName = HYBRID_BOT, schema = CONFIG_SCHEMA) {
   try {
     const r = await pool.query('SELECT config FROM bot_config WHERE bot_name = $1', [botName]);
-    if (!r.rows[0]) return { ...DEFAULTS };
-    return sanitizeConfig(JSON.parse(r.rows[0].config));
+    if (!r.rows[0]) return defaultsFor(schema);
+    return sanitizeConfig(JSON.parse(r.rows[0].config), schema);
   } catch {
-    return { ...DEFAULTS };   // unreadable row must never block trading
+    return defaultsFor(schema);   // unreadable row must never block trading
   }
 }
 
-export async function saveBotConfig(pool, config, botName = HYBRID_BOT) {
-  const clean = sanitizeConfig(config);
+export async function saveBotConfig(pool, config, botName = HYBRID_BOT, schema = CONFIG_SCHEMA) {
+  const clean = sanitizeConfig(config, schema);
   await pool.query(`
     INSERT INTO bot_config (bot_name, config, updated_at)
     VALUES ($1, $2, $3)
@@ -96,3 +106,48 @@ export async function saveBotConfig(pool, config, botName = HYBRID_BOT) {
   `, [botName, JSON.stringify(clean), new Date().toISOString()]);
   return clean;
 }
+
+// ── mechanical_prime / mechanical_session ────────────────────────────────
+// Same risk envelope for both -- only the entry window differs -- so the
+// shared fields are built once and reused, matching the "one engine, two
+// configs" principle the risk math itself follows. The risk-STATE
+// percentages (NORMAL 1.00% / CAUTION 0.50% / DEFENSIVE 0.25% / PAUSED 0%)
+// are deliberately NOT here: they live as named constants in
+// mechanicalRiskEngine.js, not in a live-editable dashboard field, so
+// nothing can quietly turn the loss-cluster throttle into a suggestion.
+function variantRiskFields() {
+  return [
+    { key: 'maxRiskPerTradePct',   label: 'Max risk per trade',    unit: '%', def: 1.00, min: 0.1, max: 2,  step: 0.05, group: 'Risk',
+      help: 'Ceiling for any single position at NORMAL risk state, before the loss-cluster throttle or open-risk headroom clamp.' },
+    { key: 'maxTotalRiskPct',      label: 'Max total open risk',   unit: '%', def: 3.00, min: 0.5, max: 10, step: 0.1,  group: 'Risk',
+      help: 'Combined risk across all open positions for this account.' },
+    { key: 'maxOpenPositions',     label: 'Max open positions',    unit: '',  def: 3,    min: 1,   max: 5,  step: 1,    group: 'Risk',
+      help: 'Hard cap on simultaneous open positions.' },
+    { key: 'dailyMaxLossPct',      label: 'Daily max loss',        unit: '%', def: 3.0,  min: 0.5, max: 10, step: 0.1,  group: 'Risk',
+      help: 'Stop opening new trades for the rest of the UAE day at this daily loss.' },
+    { key: 'dailyProfitTargetPct', label: 'Give-back arms above',  unit: '%', def: 2.5,  min: 0.5, max: 20, step: 0.1,  group: 'Give-back',
+      help: 'Profit-protection mode activates once daily equity first reaches this.' },
+    { key: 'giveBackPct',          label: 'Give-back lock trigger', unit: '%', def: 30,  min: 5,   max: 90, step: 1,    group: 'Give-back',
+      help: 'Lock out new trades for the day once equity gives back this much of the day\'s peak profit.' },
+    { key: 'atrMultMin',           label: 'Stop: min ATR multiple', unit: '×', def: 0.75, min: 0.25, max: 5, step: 0.05, group: 'Entries',
+      help: 'Lower safety clamp on Mechanical\'s proposed stop distance. Target is never touched.' },
+    { key: 'atrMultMax',           label: 'Stop: max ATR multiple', unit: '×', def: 3.0,  min: 0.5,  max: 10, step: 0.05, group: 'Entries',
+      help: 'Upper safety clamp on Mechanical\'s proposed stop distance. Target is never touched.' },
+  ];
+}
+
+export const MECHANICAL_PRIME_SCHEMA = [
+  { key: 'entryWindowStartHour', label: 'Entry window start', unit: 'UAE hr', def: 15, min: 0, max: 23, step: 1, group: 'Entry window',
+    help: 'No NEW mechanical_prime entries before this hour. Existing positions still manage normally.' },
+  { key: 'entryWindowEndHour',   label: 'Entry window end',   unit: 'UAE hr', def: 18, min: 1, max: 24, step: 1, group: 'Entry window',
+    help: 'No NEW mechanical_prime entries at/after this hour.' },
+  ...variantRiskFields(),
+];
+
+export const MECHANICAL_SESSION_SCHEMA = [
+  { key: 'entryWindowStartHour', label: 'Entry window start', unit: 'UAE hr', def: 9,  min: 0, max: 23, step: 1, group: 'Entry window',
+    help: 'No NEW mechanical_session entries before this hour. Existing positions still manage normally.' },
+  { key: 'entryWindowEndHour',   label: 'Entry window end',   unit: 'UAE hr', def: 21, min: 1, max: 24, step: 1, group: 'Entry window',
+    help: 'No NEW mechanical_session entries at/after this hour.' },
+  ...variantRiskFields(),
+];
