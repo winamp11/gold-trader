@@ -19,6 +19,9 @@ import { runAnalysis, formatRulebookPrompt, adxBucket, rsiBucket } from './analy
 import { runForwardLabeling } from './forwardLabeler.js';
 import { runHybridMaturation } from './hybridMaturation.js';
 import { computeBranchAnalytics } from './hybridAnalytics.js';
+import { runMechanicalVariantMaturation } from './mechanicalVariantMaturation.js';
+import { computeComparisonMetrics, computeTimeBuckets, computeAttributionMetrics } from './mechanicalVariantAnalytics.js';
+import { getM1CacheMetrics, cleanupOldM1Candles } from './m1CandleCache.js';
 import {
   CONFIG_SCHEMA, getBotConfig, saveBotConfig, HYBRID_BOT,
   MECHANICAL_PRIME_BOT, MECHANICAL_SESSION_BOT, MECHANICAL_PRIME_SCHEMA, MECHANICAL_SESSION_SCHEMA,
@@ -1377,12 +1380,29 @@ function startDailyReflector() {
 }
 
 // ── Forward labeler cron — hourly, plus one pass shortly after boot ───────
+// All three maturation jobs are staggered a minute apart at boot purely so
+// their first-ever log lines don't interleave; they no longer race for API
+// calls regardless of timing since m1CandleCache.js's budget/in-flight-dedup
+// is shared and per-symbol, not per-job.
 function startForwardLabeler() {
   console.log('🏷️  Starting forward labeler (hourly)...');
   setTimeout(() => runForwardLabeling(database.pool), 2 * 60 * 1000);
   setInterval(() => runForwardLabeling(database.pool), 60 * 60 * 1000);
   setTimeout(() => runHybridMaturation(database.pool), 3 * 60 * 1000);
   setInterval(() => runHybridMaturation(database.pool), 60 * 60 * 1000);
+  setTimeout(() => runMechanicalVariantMaturation(database.pool), 4 * 60 * 1000);
+  setInterval(() => runMechanicalVariantMaturation(database.pool), 60 * 60 * 1000);
+}
+
+// ── M1 candle cache retention — once per UAE day ──────────────────────────
+function startM1CacheRetention() {
+  let lastRunDate = null;
+  setInterval(async () => {
+    const today = uaeDate();
+    if (lastRunDate === today) return;
+    lastRunDate = today;
+    await cleanupOldM1Candles('XAU/USD');
+  }, 60 * 1000);
 }
 
 // ── REST API ───────────────────────────────────────────────────────────────
@@ -1846,7 +1866,10 @@ app.post('/api/autochartist/patterns', async (req, res) => {
 // ── Analyst endpoints ─────────────────────────────────────────────────────
 
 // Manual labeler trigger — used for backfilling history. Call repeatedly
-// until remaining=0; each run is capped at ?max_calls M1 fetches (default 6).
+// until remaining=0. ?max_calls is accepted for backward compatibility but
+// no longer does anything — the M1 fetch budget is shared across all three
+// maturation jobs in m1CandleCache.js now, not assigned per caller. See
+// GET /api/m1-cache/metrics for the real, shared call count.
 app.post('/api/labeler/run', async (req, res) => {
   try {
     const maxApiCalls = Math.min(parseInt(req.query.max_calls) || 6, 20);
@@ -1857,7 +1880,8 @@ app.post('/api/labeler/run', async (req, res) => {
   }
 });
 
-// Manual hybrid counterfactual maturation trigger, same shape as above.
+// Manual hybrid counterfactual maturation trigger, same shape as above
+// (?max_calls likewise accepted but unused — see the comment above).
 app.post('/api/hybrid/maturation/run', async (req, res) => {
   try {
     const maxApiCalls = Math.min(parseInt(req.query.max_calls) || 6, 20);
@@ -1895,6 +1919,133 @@ app.get('/api/hybrid/branch-analytics', async (req, res) => {
       total_evaluations: rows.length,
       branches: computeBranchAnalytics(rows, horizon),
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Manual mechanical-variant maturation trigger. No ?max_calls param anymore
+// -- the API budget is shared/internal to m1CandleCache.js now, not
+// assigned per caller. Call repeatedly until remaining=0.
+app.post('/api/mechanical-variants/maturation/run', async (req, res) => {
+  try {
+    const result = await runMechanicalVariantMaturation(database.pool);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Snapshot of the shared M1 candle cache — requests served from cache vs.
+// requiring a Twelve Data fetch, real API calls made, candles inserted,
+// budget-exhausted misses, broken down per consumer (forward_labeler /
+// hybrid_maturation / mechanical_variant_maturation). This is what lets you
+// confirm the third maturation job did not add a third job's worth of usage.
+app.get('/api/m1-cache/metrics', (req, res) => {
+  res.json(getM1CacheMetrics());
+});
+
+// Mechanical / mechanical_prime / mechanical_session comparison — equity,
+// P&L, WR, PF, expectancy, drawdown, streaks per account; time-bucket
+// breakdowns (hour/3h-window/weekday/weekday×window) from real trade
+// history; the five value-attribution metrics for prime/session (mechanical
+// itself has no decision journal, so no attribution metrics — nothing to
+// attribute value to). ?start=&end= as YYYY-MM-DD, same convention as the
+// equity chart and hybrid's branch-analytics; omit either for all history.
+app.get('/api/mechanical-variants/comparison', async (req, res) => {
+  try {
+    const params = [];
+    let dateFilter = '';
+    if (req.query.start) { params.push(req.query.start + 'T00:00:00Z'); dateFilter += ` AND t.timestamp >= $${params.length}`; }
+    if (req.query.end)   { params.push(req.query.end   + 'T23:59:59Z'); dateFilter += ` AND t.timestamp <= $${params.length}`; }
+
+    const ACCOUNTS = ['mechanical', 'mechanical_prime', 'mechanical_session'];
+    const accounts = {};
+
+    for (const name of ACCOUNTS) {
+      const portfolio = await database.getPortfolioByName(name);
+      if (!portfolio) continue;
+
+      const { rows: trades } = await database.pool.query(`
+        SELECT t.pnl, t.timestamp, t.exit_timestamp, t.entry_price, t.stop_loss, t.lot_size
+        FROM trades t
+        WHERE t.portfolio_id = $${params.length + 1} AND t.exit_reason IS NOT NULL ${dateFilter}
+        ORDER BY t.timestamp ASC
+      `, [...params, portfolio.id]);
+
+      const entry = {
+        account: name,
+        starting_balance: portfolio.starting_balance,
+        comparison: computeComparisonMetrics(trades, portfolio.starting_balance),
+        time_buckets: computeTimeBuckets(trades),
+      };
+
+      if (name !== 'mechanical') {
+        const decParams = [name];
+        let decDateFilter = '';
+        if (req.query.start) { decParams.push(req.query.start + 'T00:00:00Z'); decDateFilter += ` AND d.cycle_ts_utc >= $${decParams.length}`; }
+        if (req.query.end)   { decParams.push(req.query.end   + 'T23:59:59Z'); decDateFilter += ` AND d.cycle_ts_utc <= $${decParams.length}`; }
+        const { rows: decisions } = await database.pool.query(`
+          SELECT d.reason_code, d.final_action, d.lots, d.theoretical_1pct_lots,
+                 o.eod_pnl, o.eod_outcome, o.matured_at,
+                 t.pnl AS trade_pnl
+          FROM mechanical_variant_decisions d
+          LEFT JOIN mechanical_variant_decision_outcomes o ON o.decision_id = d.id
+          LEFT JOIN trades t ON t.id = d.trade_id
+          WHERE d.account = $1 ${decDateFilter}
+        `, decParams);
+        entry.attribution = computeAttributionMetrics(decisions);
+        entry.total_evaluations = decisions.length;
+      }
+
+      accounts[name] = entry;
+    }
+
+    res.json({ accounts });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Live risk-state snapshot for mechanical_prime/mechanical_session — the
+// compact gauge-row equivalent of /api/hybrid/status, not a full account
+// panel. Reflects mechVariantState directly (in-memory, restart-safe via
+// service_state) rather than recomputing from the decision journal.
+app.get('/api/mechanical-variants/status', async (req, res) => {
+  try {
+    const out = {};
+    for (const account of MECH_VARIANT_ACCOUNTS) {
+      const portfolio = await database.getPortfolioByName(account);
+      if (!portfolio) continue;
+      const schema = account === MECHANICAL_PRIME_BOT ? MECHANICAL_PRIME_SCHEMA : MECHANICAL_SESSION_SCHEMA;
+      const cfg = await getBotConfig(database.pool, account, schema);
+      const state = mechVariantState[account];
+      const openRiskUsd = computeOpenRiskUsd(portfolio.id);
+      const equity = portfolio.current_balance;
+      const peakProfit = state.dayStartEquity != null ? (state.dayPeakEquity ?? state.dayStartEquity) - state.dayStartEquity : null;
+      const givebackFloor = state.givebackArmed && peakProfit != null
+        ? state.dayStartEquity + peakProfit * (1 - cfg.giveBackPct / 100)
+        : null;
+      out[account] = {
+        balance: equity,
+        day_start_equity: state.dayStartEquity,
+        day_pnl: state.dayStartEquity != null ? equity - state.dayStartEquity : null,
+        risk_state: state.riskState,
+        allowed_risk_pct: RISK_STATE_PCT[state.riskState],
+        consecutive_losses: state.consecutiveLosses,
+        open_positions: outcomeTracker.getOpenPositionsForPortfolio(portfolio.id).length,
+        open_risk_usd: openRiskUsd,
+        open_risk_pct: equity > 0 ? (openRiskUsd / equity) * 100 : 0,
+        risk_budget_pct: cfg.maxTotalRiskPct,
+        daily_max_loss_hit: state.dailyMaxLossHit,
+        daily_max_loss_pct: cfg.dailyMaxLossPct,
+        giveback_armed: state.givebackArmed,
+        giveback_locked: state.givebackLocked,
+        giveback_floor: givebackFloor,
+        entry_window: `${String(cfg.entryWindowStartHour).padStart(2, '0')}:00-${String(cfg.entryWindowEndHour).padStart(2, '0')}:00`,
+      };
+    }
+    res.json(out);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2575,6 +2726,7 @@ app.listen(PORT, () => {
   startBackgroundSignalGeneration();
   startPricePoller();
   startForwardLabeler();
+  startM1CacheRetention();
   startDailyReflector();
 });
 

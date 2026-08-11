@@ -40,6 +40,33 @@ export function getSession(ts) {
   return null;                       // 21:00+ UAE — post-session
 }
 
+// True if any trading-hours minute (Mon-Fri 06:00-21:00 UAE) falls inside
+// [fromMs, toMs). Used by m1CandleCache.js to tell "missing data" apart from
+// "the market was legitimately closed" -- a weekend/off-hours gap should
+// never trigger a Twelve Data fetch attempt. Bounded day-walk (maturation
+// gaps are at most a few days), exact rather than sampled: a false "no
+// trading time here" would silently hide real missing candles, which this
+// project explicitly does not want to risk to save an API call.
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+export function hasTradingWindowInRange(fromMs, toMs) {
+  if (!(toMs > fromMs)) return false;
+  const startUae = uaeTime(fromMs).uaeDate;
+  const endUae   = uaeTime(toMs).uaeDate;
+  let cursor = Date.UTC(startUae.getUTCFullYear(), startUae.getUTCMonth(), startUae.getUTCDate());
+  const lastDay = Date.UTC(endUae.getUTCFullYear(), endUae.getUTCMonth(), endUae.getUTCDate());
+  while (cursor <= lastDay) {
+    const dow = new Date(cursor).getUTCDay(); // cursor is a UAE-local midnight, day-of-week is UAE's
+    if (dow >= 1 && dow <= 5) {
+      const dayStartUtcMs = cursor - 4 * 60 * 60 * 1000; // UAE midnight -> UTC
+      const winStart = dayStartUtcMs + SESSION_START * 60000;
+      const winEnd   = dayStartUtcMs + SESSION_END   * 60000;
+      if (winStart < toMs && winEnd > fromMs) return true; // overlaps the requested range
+    }
+    cursor += MS_PER_DAY;
+  }
+  return false;
+}
+
 export function getNextTradingTime() {
   const { mins, day } = uaeTime();
 

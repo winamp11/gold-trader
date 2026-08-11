@@ -1,21 +1,27 @@
 // hybridMaturation.js — computes hypothetical (counterfactual) outcomes for
 // hybrid_decisions rows, and matures the executed-trade side of the journal.
 //
-// Shares forwardLabeler.js's exact M1-candle-fetch/lookup machinery, so
-// hybrid's counterfactuals use the same look-ahead-bias-free mechanism as
-// the signals forward labeler: outcomes are only ever computed from candles
+// Shares forwardLabeler.js's exact candle-lookup machinery (priceAt/
+// excursions/uaeDayEndMs) and draws M1 candles from the shared cache in
+// m1CandleCache.js, so hybrid's counterfactuals use the same look-ahead-
+// bias-free mechanism as the signals forward labeler and mechanical variant
+// maturation, off the SAME stored candle history — not three independent
+// Twelve Data fetchers. Outcomes are only ever computed from candles
 // timestamped strictly AFTER the decision, never from anything the model
 // could have seen. This never feeds back into a live decision — it exists
 // solely for /api/hybrid/branch-analytics.
 //
+// resolveHypothetical() is generic (no hybrid-specific fields) and is
+// reused as-is by mechanicalVariantMaturation.js — not copy-pasted.
+//
 // runHybridMaturation() never throws — a failed run logs and returns counts.
 
 import database from './database.js';
-import { fetchM1Range, priceAt, excursions, uaeDayEndMs } from './forwardLabeler.js';
+import { priceAt, excursions, uaeDayEndMs } from './forwardLabeler.js';
+import { getM1Candles } from './m1CandleCache.js';
 import { SPREAD_POINTS, VALUE_PER_LOT } from './contractSpec.js';
 
-const HOUR_MS  = 3600000;
-const CHUNK_MS = 3 * 24 * HOUR_MS;
+const HOUR_MS = 3600000;
 
 // Walks candles chronologically from `fromMs` and reports which level a
 // hypothetical position would hit first: stop, target, or neither by capMs
@@ -72,8 +78,11 @@ function buildCounterfactualOutcome({ direction, entry, stop, target, riskUsd, l
   return out;
 }
 
-export async function runHybridMaturation(pool, { maxApiCalls = 6 } = {}) {
-  const result = { matured: 0, noData: 0, apiCalls: 0, remaining: 0 };
+export async function runHybridMaturation(pool, { maxApiCalls } = {}) {
+  // maxApiCalls kept for backward compatibility, no longer used — the
+  // shared budget lives in m1CandleCache.js. See getM1CacheMetrics().
+  void maxApiCalls;
+  const result = { matured: 0, noData: 0, remaining: 0, cacheIncomplete: false };
   try {
     const now = Date.now();
     const rows = await database.getUnmaturedHybridDecisions(1500);
@@ -93,17 +102,13 @@ export async function runHybridMaturation(pool, { maxApiCalls = 6 } = {}) {
       Math.max(...mature.map(r => uaeDayEndMs(new Date(r.cycle_ts).getTime()))) + 10 * 60000
     );
 
-    const byT = new Map();
-    let cursor = spanStart;
-    while (cursor < spanEnd && result.apiCalls < maxApiCalls) {
-      const chunkEnd = Math.min(cursor + CHUNK_MS, spanEnd);
-      const candles  = await fetchM1Range(cursor, chunkEnd);
-      result.apiCalls++;
-      for (const c of candles) byT.set(c.t, c);
-      cursor = chunkEnd;
+    const { candles, complete, reason } = await getM1Candles('XAU/USD', spanStart, spanEnd, { consumer: 'hybrid_maturation' });
+    if (!complete) {
+      result.cacheIncomplete = true;
+      console.warn(`⚠️  [HYBRID MATURATION] M1 cache incomplete this run (${reason}) — maturing only what's actually covered`);
     }
-    const coveredUntil = cursor;
-    const candles = [...byT.values()].sort((a, b) => a.t - b.t);
+    candles.sort((a, b) => a.t - b.t);
+    const coveredUntil = candles.length ? candles[candles.length - 1].t : spanStart;
 
     for (const row of mature) {
       const t = new Date(row.cycle_ts).getTime();
@@ -130,7 +135,7 @@ export async function runHybridMaturation(pool, { maxApiCalls = 6 } = {}) {
     }
 
     if (result.matured > 0 || result.remaining > 0) {
-      console.log(`🏷️  [HYBRID MATURATION] matured=${result.matured} remaining=${result.remaining} apiCalls=${result.apiCalls}`);
+      console.log(`🏷️  [HYBRID MATURATION] matured=${result.matured} remaining=${result.remaining} cacheIncomplete=${result.cacheIncomplete}`);
     }
     return result;
   } catch (err) {

@@ -625,6 +625,54 @@ class DatabaseService {
     await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_mvd_weekday_hour   ON mechanical_variant_decisions(account, uae_weekday, uae_hour)`);
     await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_mvd_signal         ON mechanical_variant_decisions(signal_id)`);
 
+    // mechanical_variant_decision_outcomes — the Phase-2 maturation result for
+    // a mechanical_variant_decisions row. Strictly separate from the decision
+    // itself (never a column added to that table, never an UPDATE to it) so
+    // the immutable "what the bot knew and decided" record and the
+    // later-computed "what actually happened" record can never be conflated.
+    // Unique on decision_id: one decision produces at most one outcome row,
+    // ever -- a decision only becomes eligible for maturation once the EOD
+    // horizon is reachable, at which point h1/h4/eod are all resolved
+    // together in a single pass and written once. Re-running maturation on
+    // an already-matured decision is a no-op (ON CONFLICT DO NOTHING), so a
+    // repeated maturation check can never create a second statistical
+    // observation for the same decision.
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS mechanical_variant_decision_outcomes (
+        id                  SERIAL PRIMARY KEY,
+        decision_id         INTEGER NOT NULL REFERENCES mechanical_variant_decisions(id),
+
+        h1_outcome          TEXT, h1_exit_price DOUBLE PRECISION, h1_pnl DOUBLE PRECISION, h1_r_multiple DOUBLE PRECISION, h1_mfe DOUBLE PRECISION, h1_mae DOUBLE PRECISION,
+        h4_outcome          TEXT, h4_exit_price DOUBLE PRECISION, h4_pnl DOUBLE PRECISION, h4_r_multiple DOUBLE PRECISION, h4_mfe DOUBLE PRECISION, h4_mae DOUBLE PRECISION,
+        eod_outcome         TEXT, eod_exit_price DOUBLE PRECISION, eod_pnl DOUBLE PRECISION, eod_r_multiple DOUBLE PRECISION, eod_mfe DOUBLE PRECISION, eod_mae DOUBLE PRECISION,
+
+        matured_at          TEXT NOT NULL,
+        created_at          TEXT NOT NULL DEFAULT TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+      )
+    `);
+    await this.pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mvdo_decision_id ON mechanical_variant_decision_outcomes(decision_id)`);
+
+    // market_candles_m1 — shared XAU/USD 1-minute candle cache. The ONE
+    // stored copy of historical M1 data, so forwardLabeler/hybridMaturation/
+    // mechanicalVariantMaturation stop independently re-fetching the same
+    // Twelve Data history (see m1CandleCache.js). Unique on (symbol, ts)
+    // makes every insert idempotent -- overlapping fetches can never create
+    // duplicate rows, ON CONFLICT DO NOTHING is always correct here.
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS market_candles_m1 (
+        id         SERIAL PRIMARY KEY,
+        symbol     TEXT NOT NULL,
+        ts         TEXT NOT NULL, -- canonical UTC minute, YYYY-MM-DDTHH:mm:00.000Z
+        open       DOUBLE PRECISION,
+        high       DOUBLE PRECISION NOT NULL,
+        low        DOUBLE PRECISION NOT NULL,
+        close      DOUBLE PRECISION NOT NULL,
+        volume     DOUBLE PRECISION, -- no real volume for spot XAU/USD; kept for other symbols/generality
+        created_at TEXT NOT NULL DEFAULT TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+      )
+    `);
+    await this.pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_market_candles_m1_symbol_ts ON market_candles_m1(symbol, ts)`);
+
     // Forward rulebook: market behavior by condition bucket across ALL cycles
     // (traded or not), aggregated from the forward-outcome labels. This is the
     // selection-bias-free companion to the per-account rulebooks. Rebuilt on
@@ -1260,6 +1308,120 @@ class DatabaseService {
       d.finalAction, d.reasonCode ?? null, d.lots ?? null, d.riskUsd ?? null, d.theoretical1pctLots, d.tradeId ?? null,
     ]);
     return r.rows[0].id;
+  }
+
+  // REJECT rows with no linked outcome yet -- EXECUTE/REDUCE rows already
+  // have real ground truth via trade_id -> trades, so only pure rejections
+  // (no trade ever placed) need a hypothetical resolved from candles.
+  // Maturity (EOD horizon reachable) is checked in JS by the maturation
+  // job, same division of responsibility as getUnmaturedHybridDecisions.
+  async getUnmaturedMechanicalVariantDecisions(limit = 500) {
+    const { rows } = await this.pool.query(`
+      SELECT d.* FROM mechanical_variant_decisions d
+      LEFT JOIN mechanical_variant_decision_outcomes o ON o.decision_id = d.id
+      WHERE o.id IS NULL AND d.final_action = 'REJECT'
+      ORDER BY d.cycle_ts_utc ASC
+      LIMIT $1
+    `, [limit]);
+    return rows;
+  }
+
+  // INSERT-ONLY, idempotent: ON CONFLICT (decision_id) DO NOTHING means a
+  // decision that's somehow matured twice (e.g. a race between two
+  // maturation ticks) still only ever ends up with one outcome row -- no
+  // second statistical observation is ever created for the same decision.
+  async saveMechanicalVariantDecisionOutcome(o) {
+    await this.pool.query(`
+      INSERT INTO mechanical_variant_decision_outcomes (
+        decision_id,
+        h1_outcome, h1_exit_price, h1_pnl, h1_r_multiple, h1_mfe, h1_mae,
+        h4_outcome, h4_exit_price, h4_pnl, h4_r_multiple, h4_mfe, h4_mae,
+        eod_outcome, eod_exit_price, eod_pnl, eod_r_multiple, eod_mfe, eod_mae,
+        matured_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+      ON CONFLICT (decision_id) DO NOTHING
+    `, [
+      o.decisionId,
+      o.h1.outcome, o.h1.exitPrice, o.h1.pnl, o.h1.rMultiple, o.h1.mfe, o.h1.mae,
+      o.h4.outcome, o.h4.exitPrice, o.h4.pnl, o.h4.rMultiple, o.h4.mfe, o.h4.mae,
+      o.eod.outcome, o.eod.exitPrice, o.eod.pnl, o.eod.rMultiple, o.eod.mfe, o.eod.mae,
+      o.maturedAt,
+    ]);
+  }
+
+  // ── market_candles_m1: shared M1 cache (see m1CandleCache.js) ────────────
+
+  async getM1Candles(symbol, startMs, endMs) {
+    const { rows } = await this.pool.query(`
+      SELECT ts, open, high, low, close, volume FROM market_candles_m1
+      WHERE symbol = $1 AND ts >= $2 AND ts <= $3
+      ORDER BY ts ASC
+    `, [symbol, new Date(startMs).toISOString(), new Date(endMs).toISOString()]);
+    return rows.map(r => ({ t: new Date(r.ts).getTime(), open: r.open, high: r.high, low: r.low, close: r.close, volume: r.volume }));
+  }
+
+  // Cheap MIN/MAX(ts) probe the cache layer uses to assess coverage without
+  // pulling every candle back — checks BOTH ends of the requested range so
+  // a gap at the start (not just a missing recent tail) is also caught.
+  async getM1CoverageBounds(symbol, startMs, endMs) {
+    const { rows } = await this.pool.query(`
+      SELECT MIN(ts) AS min_ts, MAX(ts) AS max_ts FROM market_candles_m1
+      WHERE symbol = $1 AND ts >= $2 AND ts <= $3
+    `, [symbol, new Date(startMs).toISOString(), new Date(endMs).toISOString()]);
+    const r = rows[0];
+    return {
+      minTs: r?.min_ts ? new Date(r.min_ts).getTime() : null,
+      maxTs: r?.max_ts ? new Date(r.max_ts).getTime() : null,
+    };
+  }
+
+  // Bulk idempotent insert. candles: [{ts (canonical ISO string), open, high, low, close, volume}].
+  async upsertM1Candles(symbol, candles) {
+    if (!candles || candles.length === 0) return 0;
+    const values = [];
+    const params = [];
+    let i = 1;
+    for (const c of candles) {
+      values.push(`($${i++},$${i++},$${i++},$${i++},$${i++},$${i++})`);
+      params.push(symbol, c.ts, c.open ?? null, c.high, c.low, c.close);
+    }
+    const r = await this.pool.query(`
+      INSERT INTO market_candles_m1 (symbol, ts, open, high, low, close)
+      VALUES ${values.join(',')}
+      ON CONFLICT (symbol, ts) DO NOTHING
+    `, params);
+    return r.rowCount;
+  }
+
+  async deleteM1CandlesBefore(symbol, beforeMs) {
+    const r = await this.pool.query(
+      `DELETE FROM market_candles_m1 WHERE symbol = $1 AND ts < $2`,
+      [symbol, new Date(beforeMs).toISOString()]
+    );
+    return r.rowCount;
+  }
+
+  // Oldest timestamp still needed by ANY pending/retryable maturation
+  // consumer -- signals not yet forward-labeled, hybrid_decisions with a
+  // counterfactual direction but no outcome yet, and mechanical_variant_
+  // decisions with no linked outcome row. The M1 cache's retention floor
+  // must never fall below this, or a later maturation pass would find its
+  // required candles already deleted.
+  async getOldestUnmaturedMaturationTimestamp() {
+    const { rows } = await this.pool.query(`
+      SELECT MIN(ts) AS oldest FROM (
+        SELECT timestamp AS ts FROM signals WHERE fwd_labeled_at IS NULL
+        UNION ALL
+        SELECT cycle_ts AS ts FROM hybrid_decisions
+          WHERE (cf_rulebook_direction IS NOT NULL AND cf_rulebook_outcome IS NULL)
+             OR (cf_overlay_direction  IS NOT NULL AND cf_overlay_outcome  IS NULL)
+        UNION ALL
+        SELECT d.cycle_ts_utc AS ts FROM mechanical_variant_decisions d
+          LEFT JOIN mechanical_variant_decision_outcomes o ON o.decision_id = d.id
+          WHERE o.id IS NULL
+      ) pending
+    `);
+    return rows[0]?.oldest ?? null;
   }
 
   async getUnmaturedHybridDecisions(limit = 500) {
