@@ -384,7 +384,7 @@ const CustomTooltip = ({ active, payload, label }) => {
   );
 };
 
-const EQUITY_LINE_KEYS = ['mechanical', 'claude_overlay', 'claude_solo', 'claude_hybrid', 'mechanical_prime', 'mechanical_session'];
+const EQUITY_LINE_KEYS = ['mechanical', 'claude_overlay', 'claude_hybrid', 'mechanical_prime', 'mechanical_session'];
 
 function firstOfMonthStr() {
   const d = new Date();
@@ -448,7 +448,6 @@ function EquityChart({ equity, range }) {
         />
         <Line dataKey="mechanical"     stroke={C.mech}    strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.mech    }} connectNulls />
         <Line dataKey="claude_overlay" stroke={C.overlay} strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.overlay }} connectNulls />
-        <Line dataKey="claude_solo"    stroke={C.solo}    strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.solo    }} connectNulls />
         <Line dataKey="claude_hybrid"  stroke={C.hybrid}  strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.hybrid  }} connectNulls />
         <Line dataKey="mechanical_prime"   stroke={C.mechPrime}   strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.mechPrime   }} connectNulls />
         <Line dataKey="mechanical_session" stroke={C.mechSession} strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.mechSession }} connectNulls />
@@ -532,8 +531,7 @@ function MarketPanel({ snapshot, missed }) {
   const px   = sig?.marketData?.h1?.price ?? sig?.marketData?.m30?.price;
   const allNoTrade = lcd &&
     lcd.mechanical.action === 'NO_TRADE' &&
-    lcd.overlay.action    === 'NO_TRADE' &&
-    lcd.solo.action       === 'NO_TRADE';
+    lcd.overlay.action    === 'NO_TRADE';
 
   return (
     <div className="market-panel">
@@ -579,7 +577,6 @@ function MarketPanel({ snapshot, missed }) {
           {[
             { key: 'mechanical', label: 'Mechanical', color: C.mech    },
             { key: 'overlay',    label: 'Overlay',    color: C.overlay },
-            { key: 'solo',       label: 'Solo',       color: C.solo    },
           ].map(({ key, label, color }) => {
             const d = lcd[key];
             if (!d) return null;
@@ -1115,25 +1112,25 @@ export default function App() {
   const [error,       setError]       = useState(null);
 
   const [trades, setTrades] = useState({
-    mechanical: [], claude_overlay: [], claude_solo: [], claude_hybrid: [],
+    mechanical: [], claude_overlay: [], claude_hybrid: [],
   });
   const [tradeHasMore, setTradeHasMore] = useState({
-    mechanical: false, claude_overlay: false, claude_solo: false, claude_hybrid: false,
+    mechanical: false, claude_overlay: false, claude_hybrid: false,
   });
   const [tradeOffsets, setTradeOffsets] = useState({
-    mechanical: 0, claude_overlay: 0, claude_solo: 0, claude_hybrid: 0,
+    mechanical: 0, claude_overlay: 0, claude_hybrid: 0,
   });
 
   const [journal, setJournal] = useState({
-    claude_overlay: [], claude_solo: [],
+    claude_overlay: [],
   });
 
   const fetchAll = useCallback(async () => {
     try {
       const [
         accRes, equityRes, posRes, snapRes, missedRes,
-        mechTR, overlayTR, soloTR, hybridTR,
-        overlayJR, soloJR, hybridRes, cfgRes,
+        mechTR, overlayTR, hybridTR,
+        overlayJR, hybridRes, cfgRes,
       ] = await Promise.all([
         fetch(`${API}/api/accounts`),
         fetch(`${API}/api/equity`),
@@ -1142,22 +1139,20 @@ export default function App() {
         fetch(`${API}/api/missed?limit=20`),
         fetch(`${API}/api/trades/recent?account=mechanical&limit=${TRADE_PAGE}`),
         fetch(`${API}/api/trades/recent?account=claude_overlay&limit=${TRADE_PAGE}`),
-        fetch(`${API}/api/trades/recent?account=claude_solo&limit=${TRADE_PAGE}`),
         fetch(`${API}/api/trades/recent?account=claude_hybrid&limit=${TRADE_PAGE}`),
         fetch(`${API}/api/journal?account=claude_overlay&limit=${JOURNAL_LIMIT}`),
-        fetch(`${API}/api/journal?account=claude_solo&limit=${JOURNAL_LIMIT}`),
         fetch(`${API}/api/hybrid/status`),
         fetch(`${API}/api/bot-config`),
       ]);
 
       const [
         accData, equityData, posData, snapData, missedData,
-        mechTD, overlayTD, soloTD, hybridTD,
-        overlayJD, soloJD,
+        mechTD, overlayTD, hybridTD,
+        overlayJD,
       ] = await Promise.all([
         accRes.json(), equityRes.json(), posRes.json(), snapRes.json(), missedRes.json(),
-        mechTR.json(), overlayTR.json(), soloTR.json(), hybridTR.json(),
-        overlayJR.json(), soloJR.json(),
+        mechTR.json(), overlayTR.json(), hybridTR.json(),
+        overlayJR.json(),
       ]);
       setHybridStatus(hybridRes.ok ? await hybridRes.json() : null);
       if (cfgRes.ok) setHybridSchema((await cfgRes.json()).schema);
@@ -1170,20 +1165,17 @@ export default function App() {
 
       const mt = mechTD.trades    || [];
       const ot = overlayTD.trades || [];
-      const st = soloTD.trades    || [];
       const ht = hybridTD.trades  || [];
-      setTrades({ mechanical: mt, claude_overlay: ot, claude_solo: st, claude_hybrid: ht });
-      setTradeOffsets({ mechanical: 0, claude_overlay: 0, claude_solo: 0, claude_hybrid: 0 });
+      setTrades({ mechanical: mt, claude_overlay: ot, claude_hybrid: ht });
+      setTradeOffsets({ mechanical: 0, claude_overlay: 0, claude_hybrid: 0 });
       setTradeHasMore({
         mechanical:     mt.length >= TRADE_PAGE,
         claude_overlay: ot.length >= TRADE_PAGE,
-        claude_solo:    st.length >= TRADE_PAGE,
         claude_hybrid:  ht.length >= TRADE_PAGE,
       });
 
       setJournal({
         claude_overlay: overlayJD.entries || [],
-        claude_solo:    soloJD.entries    || [],
       });
 
       setLastUpdated(new Date());
@@ -1221,7 +1213,6 @@ export default function App() {
 
   const mech    = accounts?.find(a => a.name === 'mechanical');
   const overlay = accounts?.find(a => a.name === 'claude_overlay');
-  const solo    = accounts?.find(a => a.name === 'claude_solo');
   const hybridAcct = accounts?.find(a => a.name === 'claude_hybrid');
   const sessionNow  = sessionLabel(new Date().toISOString());
   const isTradingNow = snapshot?.tradingHours ?? false;
@@ -1274,15 +1265,6 @@ export default function App() {
           journal={journal.claude_overlay}
           onLoadMoreTrades={() => loadMoreTrades('claude_overlay')}
         />
-        <AccountPanel
-          account={solo}
-          positions={positions}
-          trades={trades.claude_solo}
-          tradeHasMore={tradeHasMore.claude_solo}
-          journal={journal.claude_solo}
-          onLoadMoreTrades={() => loadMoreTrades('claude_solo')}
-        />
-
         <HybridPanel
           status={hybridStatus}
           account={hybridAcct}

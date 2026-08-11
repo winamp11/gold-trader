@@ -2051,88 +2051,10 @@ app.get('/api/mechanical-variants/status', async (req, res) => {
   }
 });
 
-// FTMO prop-sim account status: all four rule gauges in one payload.
-app.get('/api/prop/status', async (req, res) => {
-  try {
-    const p = await database.getPortfolioByName(PROP.name);
-    if (!p) return res.status(404).json({ error: 'prop_sim portfolio not found' });
-
-    const state       = circuitBreakerState[p.id];
-    const dayStart    = state?.dayStartBalance ?? p.day_start_balance ?? p.current_balance;
-    const dayPnl      = p.current_balance - dayStart;
-    const highWater   = p.high_water_balance ?? PROP.initialCapital;
-
-    // Best Day rule: best positive day ≤ 50% of the sum of positive days
-    const { rows: days } = await database.pool.query(`
-      SELECT date, realized_pnl FROM account_pnl_daily
-      WHERE portfolio_id = $1 AND realized_pnl > 0
-    `, [p.id]);
-    const positiveDaysProfit = days.reduce((s, d) => s + d.realized_pnl, 0);
-    const bestDay            = days.reduce((m, d) => d.realized_pnl > (m?.realized_pnl ?? 0) ? d : m, null);
-    const bestDayRatio       = positiveDaysProfit > 0 && bestDay ? bestDay.realized_pnl / positiveDaysProfit : null;
-
-    res.json({
-      balance:              p.current_balance,
-      initial_capital:      PROP.initialCapital,
-      profit_target:        PROP.initialCapital * 1.10,
-      target_progress_pct:  ((p.current_balance - PROP.initialCapital) / (PROP.initialCapital * 0.10)) * 100,
-      day_start_balance:    dayStart,
-      day_pnl:              dayPnl,
-      daily_halt_at:        -PROP.dailyLossHalt,
-      daily_budget_left:    PROP.dailyLossHalt + Math.min(dayPnl, 0),
-      high_water:           highWater,
-      trailing_halt_at:     highWater - PROP.totalDrawdownHalt,
-      halted_today:         isHaltedToday(p.id),
-      hard_halted:          propHardHalted,
-      profit_governor_hit:  dayPnl >= PROP.dailyProfitGovernor,
-      best_day:             bestDay ? { date: bestDay.date, pnl: bestDay.realized_pnl } : null,
-      positive_days_profit: positiveDaysProfit,
-      best_day_ratio:       bestDayRatio,
-      best_day_rule_ok:     bestDayRatio == null || bestDayRatio <= 0.5,
-      rules: {
-        risk_per_trade:        PROP.riskPerTrade,
-        max_open_positions:    PROP.maxOpenPositions,
-        daily_loss_halt:       PROP.dailyLossHalt,
-        total_drawdown_halt:   PROP.totalDrawdownHalt,
-        daily_profit_governor: PROP.dailyProfitGovernor,
-      },
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Reset prop_sim as a fresh FTMO challenge: balance, high-water and halts
-// back to initial. Trade history stays in the tables (the old attempt's
-// record); only the account state resets — "buying a new challenge".
-app.post('/api/prop/reset', async (req, res) => {
-  try {
-    const p = await database.getPortfolioByName(PROP.name);
-    if (!p) return res.status(404).json({ error: 'prop_sim portfolio not found' });
-
-    const open = outcomeTracker.getOpenPositionsForPortfolio(p.id);
-    if (open.length > 0 && lastKnownPrice) {
-      await outcomeTracker.forceClosePortfolio(p.id, lastKnownPrice);
-    }
-
-    await database.pool.query(
-      `UPDATE portfolios
-       SET current_balance = $1, high_water_balance = $1, day_start_balance = $1, circuit_breaker_date = NULL
-       WHERE id = $2`,
-      [PROP.initialCapital, p.id]
-    );
-    await database.pool.query(`DELETE FROM service_state WHERE key = 'prop_hard_halt'`);
-    propHardHalted = null;
-    if (circuitBreakerState[p.id]) {
-      circuitBreakerState[p.id] = { halted: false, haltedOnDate: null, dayStartBalance: PROP.initialCapital };
-    }
-
-    console.log(`🔄 [PROP] account reset to $${PROP.initialCapital.toLocaleString()} — fresh challenge`);
-    res.json({ reset: true, balance: PROP.initialCapital, positions_closed: open.length });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+// prop_sim's /api/prop/status and /api/prop/reset endpoints were removed
+// (unused by the frontend since prop_sim was retired from trading) — its
+// portfolio row and trade history remain untouched in the database as the
+// historical record of that experiment; only the API surface is gone.
 
 // ── LLM diagnostics ───────────────────────────────────────────────────────
 // GET  /api/llm/config  — which provider/model is live (free, no API call)
