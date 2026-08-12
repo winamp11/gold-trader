@@ -1294,7 +1294,7 @@ class DatabaseService {
         final_action, reason_code, lots, risk_usd, theoretical_1pct_lots, trade_id
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
-        $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38
+        $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39
       ) RETURNING id
     `, [
       d.account, d.signalId ?? null, d.cycleTsUtc, d.cycleTsUae, d.uaeWeekday, d.uaeHour,

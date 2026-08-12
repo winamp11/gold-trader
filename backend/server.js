@@ -966,17 +966,25 @@ async function generateSignalIfTradingHours() {
     // circuit breaker every other account already has (checkCircuitBreakers
     // iterates all portfolios automatically), then by the full deterministic
     // pipeline in evaluateMechanicalVariant.
+    // Each account's evaluation is isolated in its own try/catch: a failure
+    // evaluating mechanical_prime must never prevent mechanical_session from
+    // getting its turn, and neither may ever be allowed to abort the rest of
+    // this cycle (overlay/solo/hybrid, below) by throwing out of this loop.
     for (const account of MECH_VARIANT_ACCOUNTS) {
-      const portfolio = await database.getPortfolioByName(account);
-      if (isHaltedToday(portfolio.id)) {
-        console.log(`🛑 [${account}] Circuit breaker active — skipping this cycle`);
-        continue;
+      try {
+        const portfolio = await database.getPortfolioByName(account);
+        if (isHaltedToday(portfolio.id)) {
+          console.log(`🛑 [${account}] Circuit breaker active — skipping this cycle`);
+          continue;
+        }
+        const schema = account === MECHANICAL_PRIME_BOT ? MECHANICAL_PRIME_SCHEMA : MECHANICAL_SESSION_SCHEMA;
+        const cfg = await getBotConfig(database.pool, account, schema);
+        await evaluateMechanicalVariant({
+          account, portfolio, cfg, mechDecision, marketData, signalId, currentPrice, currentSession,
+        });
+      } catch (err) {
+        console.error(`❌ [${account}] evaluation failed (non-fatal, rest of cycle continues): ${err.message}`);
       }
-      const schema = account === MECHANICAL_PRIME_BOT ? MECHANICAL_PRIME_SCHEMA : MECHANICAL_SESSION_SCHEMA;
-      const cfg = await getBotConfig(database.pool, account, schema);
-      await evaluateMechanicalVariant({
-        account, portfolio, cfg, mechDecision, marketData, signalId, currentPrice, currentSession,
-      });
     }
 
     // ── Each Claude account queries its OWN open positions only ──────────
