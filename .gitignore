@@ -4,3 +4,8 @@ node_modules/
 *.db-wal
 .env
 frontend/build/
+
+# Never commit the frontend lock: frontend/railway.toml pins the install
+# step to `npm install`, and the mere presence of a lock file makes nixpacks
+# switch to `npm ci`, which then fails on any lock/package.json drift.
+frontend/package-lock.json
