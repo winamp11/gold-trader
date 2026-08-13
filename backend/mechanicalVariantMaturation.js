@@ -85,7 +85,16 @@ export async function runMechanicalVariantMaturation(pool) {
       // The stop the account WOULD have used is the ATR-clamped one; if the
       // clamp itself couldn't run (INVALID_STOP — no ATR reference at the
       // time), there's no valid hypothetical geometry to resolve at all.
-      const stop = row.clamped_stop ?? row.signal_stop;
+      //
+      // No fallback to signal_stop. It used to fall back, which quietly
+      // resolved the counterfactual against Mechanical's raw stop — a trade
+      // this account would never have placed — and fed that into the value
+      // attribution as though it were evidence. Rows genuinely missing the
+      // clamp are skipped instead: no observation is better than a biased
+      // one. Decision rows written before the clamp moved above the
+      // rejection gates have no clamped_stop and are skipped permanently,
+      // which is the honest outcome for data that was never recoverable.
+      const stop = row.clamped_stop;
       if (stop == null || row.signal_entry == null || row.signal_target == null) {
         result.skippedInvalidStop++;
         continue;

@@ -18,6 +18,20 @@ export const RISK_STATES = ['NORMAL', 'CAUTION', 'DEFENSIVE', 'PAUSED'];
 // module exists to remove.
 export const RISK_STATE_PCT = { NORMAL: 1.00, CAUTION: 0.50, DEFENSIVE: 0.25, PAUSED: 0 };
 
+// The configurable per-trade ceiling, applied ON TOP of the risk state's
+// percentage. It can only ever lower risk: a config of 2% does not let a
+// DEFENSIVE account size at 2%, and a config of 0.5% does cap a NORMAL one.
+// Kept as a floor-of-two rather than a replacement so the loss-cluster
+// throttle stays strictly dominant, per RISK_STATE_PCT's rationale above.
+// A missing/invalid config value leaves the state percentage untouched.
+export function applyPerTradeRiskCap(stateRiskPct, maxRiskPerTradePct) {
+  const state = Number(stateRiskPct);
+  if (!isFinite(state) || state <= 0) return 0;
+  const cap = Number(maxRiskPerTradePct);
+  if (!isFinite(cap) || cap <= 0) return state;
+  return Math.min(state, cap);
+}
+
 export const REASON_CODES = [
   'OUTSIDE_PRIME_WINDOW', 'OUTSIDE_SESSION_WINDOW', 'LOSS_CLUSTER_PAUSE',
   'DAILY_MAX_LOSS', 'DAILY_GIVEBACK_LOCK', 'MAX_POSITIONS', 'MAX_OPEN_RISK',

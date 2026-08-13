@@ -27,7 +27,7 @@ import {
   MECHANICAL_PRIME_BOT, MECHANICAL_SESSION_BOT, MECHANICAL_PRIME_SCHEMA, MECHANICAL_SESSION_SCHEMA,
 } from './botConfig.js';
 import {
-  RISK_STATE_PCT,
+  RISK_STATE_PCT, applyPerTradeRiskCap,
   isWithinEntryWindow, isMaxPositionsReached, calculateLotsForRisk, clampToOpenRiskHeadroom, clampStopToAtrBand,
   evaluateDailyGuards, checkRecoveryEvidence, applyEvidenceBasedRecovery,
 } from './mechanicalRiskEngine.js';
@@ -512,7 +512,15 @@ async function evaluateMechanicalVariant({ account, portfolio, cfg, mechDecision
   if (mechDecision.action !== 'TRADE') return; // RED cycles need no gating, mirrors mechanical's own executor
 
   const today  = uaeDate();
-  const equity = portfolio.current_balance;
+  // Mark-to-market equity, not the realized balance. The daily max-loss and
+  // give-back guards exist to stop the account while a bad day is happening;
+  // measuring them off realized balance alone means three open losers do not
+  // register at all until they close, so the -3% guard can only ever fire
+  // after the damage is already booked. hybrid has always marked to market
+  // here (see the dashboard/circuit-breaker paths) -- prime/session were the
+  // outlier. Sizing and the decision journal use the same number, so every
+  // percentage in a decision row shares one basis.
+  const equity = portfolio.current_balance + computeUnrealizedPnl(portfolio.id, currentPrice);
   await ensureMechVariantDay(account, today, equity);
   const state = mechVariantState[account];
 
@@ -550,12 +558,32 @@ async function evaluateMechanicalVariant({ account, portfolio, cfg, mechDecision
   if (stateTransitionReason) await persistMechVariantState(account);
 
   const riskStateAfter  = state.riskState;
-  const allowedRiskPct  = RISK_STATE_PCT[riskStateAfter];
+  // The risk state sets the ceiling; the configurable per-trade cap can only
+  // lower it further. Journalled as the EFFECTIVE percentage actually used
+  // for sizing, not the raw state percentage, so the decision record matches
+  // what was traded.
+  const allowedRiskPct  = applyPerTradeRiskCap(RISK_STATE_PCT[riskStateAfter], cfg.maxRiskPerTradePct);
   const sessionPermitted = isWithinEntryWindow(uaeMinutes, cfg.entryWindowStartHour, cfg.entryWindowEndHour);
   const openPositions    = outcomeTracker.getOpenPositionsForPortfolio(portfolio.id);
   const openRiskUsdBefore = computeOpenRiskUsd(portfolio.id);
   const openRiskPctBefore = equity > 0 ? (openRiskUsdBefore / equity) * 100 : 0;
   const theoretical = calculateLotsForRisk({ equity, riskPct: 1.00, entry: mechDecision.entry, stop: mechDecision.stop });
+
+  // Computed BEFORE the rejection gates, not after. It is a pure function of
+  // the signal and ATR, so running it early has no side effect -- but every
+  // REJECT row now records the geometry this account would actually have
+  // traded. Previously the early gates (window, pause, daily loss, give-back,
+  // max positions) all returned before the clamp ran, leaving clamped_stop
+  // null; maturation then fell back to Mechanical's raw stop. Since
+  // maturation only ever runs on REJECT rows, that meant essentially every
+  // counterfactual was resolved against a stop this account would never have
+  // used, which is exactly the number TIME_FILTER_VALUE and LOSS_CLUSTER_
+  // VALUE are computed from. The INVALID_STOP gate itself stays in its
+  // original position below so reason codes remain comparable with history.
+  const clamp = clampStopToAtrBand({
+    direction: mechDecision.direction, entry: mechDecision.entry, rawStop: mechDecision.stop,
+    h1Atr: marketData.h1?.atr, atrMultMin: cfg.atrMultMin, atrMultMax: cfg.atrMultMax,
+  });
 
   const base = {
     account, signalId, cycleTsUtc: nowUtc.toISOString(), cycleTsUae: uaeDateObj.toISOString(),
@@ -573,7 +601,9 @@ async function evaluateMechanicalVariant({ account, portfolio, cfg, mechDecision
   };
 
   const reject = (reasonCode, extra = {}) => database.saveMechanicalVariantDecision({
-    ...base, clampedStop: extra.clampedStop ?? null, atrMultApplied: extra.atrMultApplied ?? null,
+    ...base,
+    clampedStop: extra.clampedStop ?? clamp?.stop ?? null,
+    atrMultApplied: extra.atrMultApplied ?? clamp?.atrMultApplied ?? null,
     finalAction: 'REJECT', reasonCode, lots: null, riskUsd: null, tradeId: null,
   });
 
@@ -594,10 +624,6 @@ async function evaluateMechanicalVariant({ account, portfolio, cfg, mechDecision
     return reject('MAX_POSITIONS');
   }
 
-  const clamp = clampStopToAtrBand({
-    direction: mechDecision.direction, entry: mechDecision.entry, rawStop: mechDecision.stop,
-    h1Atr: marketData.h1?.atr, atrMultMin: cfg.atrMultMin, atrMultMax: cfg.atrMultMax,
-  });
   if (!clamp) {
     return reject('INVALID_STOP');
   }
@@ -2029,7 +2055,9 @@ app.get('/api/mechanical-variants/status', async (req, res) => {
       const cfg = await getBotConfig(database.pool, account, schema);
       const state = mechVariantState[account];
       const openRiskUsd = computeOpenRiskUsd(portfolio.id);
-      const equity = portfolio.current_balance;
+      // Same mark-to-market basis the guards themselves now use, so the
+      // gauge row cannot disagree with the state it is reporting on.
+      const equity = portfolio.current_balance + computeUnrealizedPnl(portfolio.id, lastKnownPrice);
       const peakProfit = state.dayStartEquity != null ? (state.dayPeakEquity ?? state.dayStartEquity) - state.dayStartEquity : null;
       const givebackFloor = state.givebackArmed && peakProfit != null
         ? state.dayStartEquity + peakProfit * (1 - cfg.giveBackPct / 100)
@@ -2039,7 +2067,7 @@ app.get('/api/mechanical-variants/status', async (req, res) => {
         day_start_equity: state.dayStartEquity,
         day_pnl: state.dayStartEquity != null ? equity - state.dayStartEquity : null,
         risk_state: state.riskState,
-        allowed_risk_pct: RISK_STATE_PCT[state.riskState],
+        allowed_risk_pct: applyPerTradeRiskCap(RISK_STATE_PCT[state.riskState], cfg.maxRiskPerTradePct),
         consecutive_losses: state.consecutiveLosses,
         open_positions: outcomeTracker.getOpenPositionsForPortfolio(portfolio.id).length,
         open_risk_usd: openRiskUsd,

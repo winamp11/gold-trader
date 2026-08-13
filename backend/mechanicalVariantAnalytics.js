@@ -133,7 +133,14 @@ export function computeTimeBuckets(trades) {
 
   for (const t of trades ?? []) {
     if (t.pnl == null) continue;
-    const parts = uaeParts(t.exit_timestamp ?? t.timestamp);
+    // ENTRY time, never exit time. These buckets exist to answer "which
+    // entry hour/window produces good trades" -- the entire premise of
+    // mechanical_prime vs mechanical_session. Bucketing by exit time
+    // attributes a 15:30 entry that closed at 20:00 to the 18-21 window,
+    // which is the opposite of what the comparison is for. Equity-curve
+    // ordering in computeComparisonMetrics still uses exit time, correctly:
+    // P&L realizes when a trade closes, but it is *caused* at entry.
+    const parts = uaeParts(t.timestamp);
     if (!parts) continue;
     const pnl = Number(t.pnl);
     addToBucket(byHour[parts.hour], pnl);

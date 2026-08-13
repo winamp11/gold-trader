@@ -7,7 +7,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  RISK_STATE_PCT,
+  RISK_STATE_PCT, applyPerTradeRiskCap,
   isWithinEntryWindow, isMaxPositionsReached, calculateLotsForRisk,
   clampToOpenRiskHeadroom, clampStopToAtrBand, applyNoWidenRule,
   evaluateDailyGuards, onTradeClosed, applyEvidenceBasedRecovery, checkRecoveryEvidence,
@@ -432,5 +432,32 @@ describe('end-to-end: the SAME Mechanical signal reaches all three accounts, onl
     const theoretical = calculateLotsForRisk({ equity: 100000, riskPct: 1.0, entry: sharedSignal.entry, stop: sharedSignal.stop });
     const actualAtDefensive = calculateLotsForRisk({ equity: 100000, riskPct: RISK_STATE_PCT.DEFENSIVE, entry: sharedSignal.entry, stop: sharedSignal.stop });
     assert.ok(theoretical.lots > actualAtDefensive.lots);
+  });
+});
+
+describe('applyPerTradeRiskCap', () => {
+  test('caps a NORMAL account below the risk-state percentage', () => {
+    assert.equal(applyPerTradeRiskCap(RISK_STATE_PCT.NORMAL, 0.5), 0.5);
+  });
+
+  test('never raises risk above the risk-state percentage', () => {
+    // The whole point of the loss-cluster throttle is that nothing in the
+    // dashboard can undo it. A 2% config must not lift a DEFENSIVE account.
+    assert.equal(applyPerTradeRiskCap(RISK_STATE_PCT.DEFENSIVE, 2.0), 0.25);
+    assert.equal(applyPerTradeRiskCap(RISK_STATE_PCT.CAUTION, 2.0), 0.5);
+  });
+
+  test('PAUSED stays at zero regardless of config', () => {
+    assert.equal(applyPerTradeRiskCap(RISK_STATE_PCT.PAUSED, 2.0), 0);
+  });
+
+  test('a missing or nonsensical cap leaves the state percentage alone', () => {
+    for (const bad of [undefined, null, 0, -1, NaN, 'abc']) {
+      assert.equal(applyPerTradeRiskCap(RISK_STATE_PCT.NORMAL, bad), 1.00, `cap=${String(bad)}`);
+    }
+  });
+
+  test('equal values are a no-op', () => {
+    assert.equal(applyPerTradeRiskCap(1.00, 1.00), 1.00);
   });
 });

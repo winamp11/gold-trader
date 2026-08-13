@@ -101,6 +101,28 @@ describe('computeTimeBuckets', () => {
     assert.equal(b.by_3h_window['09-12'].net_pnl, 50);
   });
 
+  test('buckets by ENTRY time, not exit time', () => {
+    // The question these buckets answer is "which entry window works" --
+    // mechanical_prime vs mechanical_session is exactly that comparison.
+    // Entered 15:30 UAE (window 15-18), closed 20:00 UAE (window 18-21).
+    // Note the default fixture sets entry and exit to the same instant,
+    // which is why bucketing by exit time went unnoticed.
+    const held = [trade(100, '2026-08-10T11:30:00Z', { exit_timestamp: '2026-08-10T16:00:00Z' })];
+    const b = computeTimeBuckets(held);
+    assert.equal(b.by_hour[15].n, 1, 'entry hour 15 should own the trade');
+    assert.equal(b.by_hour[20].n, 0, 'exit hour 20 must not own the trade');
+    assert.equal(b.by_3h_window['15-18'].n, 1);
+    assert.equal(b.by_3h_window['18-21'].n, 0);
+  });
+
+  test('an overnight hold is bucketed on its entry weekday', () => {
+    // Entered Monday 22:00 UAE, closed Tuesday 02:00 UAE.
+    const overnight = [trade(50, '2026-08-10T18:00:00Z', { exit_timestamp: '2026-08-10T22:00:00Z' })];
+    const b = computeTimeBuckets(overnight);
+    assert.equal(b.by_weekday.Mon.n, 1);
+    assert.equal(b.by_weekday.Tue.n, 0);
+  });
+
   test('every hour bucket exists even with zero trades in it (n=0, not missing)', () => {
     const b = computeTimeBuckets([]);
     assert.equal(b.by_hour[3].n, 0);
