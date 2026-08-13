@@ -323,6 +323,7 @@ function ForwardRulebookSection({ rows }) {
             <th>ADX</th>
             <th>RSI</th>
             <th>n</th>
+            <th title="Distinct trading days this bucket's observations span. A bucket needs enough DAYS, not just enough rows — ~169 signals a day with overlapping 4h windows means 100 rows can be three days of one trend.">days</th>
             <th>Avg 1h</th>
             <th>Avg 4h</th>
             <th>% up 4h</th>
@@ -343,6 +344,14 @@ function ForwardRulebookSection({ rows }) {
                 <td><span className={`adx-chip ${adxClass(r.adx_bucket)}`}>{r.adx_bucket}</span></td>
                 <td><span className="adx-chip">{r.rsi_bucket}</span></td>
                 <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text2)' }}>{r.n_total}</td>
+                <td style={{
+                  fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 700,
+                  // Red below the floor: this bucket looks well-sampled but is
+                  // a handful of days of one market, and cannot act.
+                  color: r.n_days == null ? 'var(--text3)' : r.n_days < 10 ? 'var(--neg)' : 'var(--text2)',
+                }} title={r.n_days != null && r.n_days < 10 ? 'below the 10-day floor — cannot qualify' : undefined}>
+                  {r.n_days != null ? r.n_days : '—'}
+                </td>
                 <td><PtsCell val={r.avg_fwd_1h} /></td>
                 <td><PtsCell val={r.avg_fwd_4h} /></td>
                 <td style={{ fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 700, color: upColor }}>

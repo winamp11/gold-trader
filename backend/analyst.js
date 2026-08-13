@@ -551,7 +551,8 @@ export async function runAnalysis(pool) {
            COALESCE(h4_rsi_at_signal, h4_rsi) AS h4_rsi_v,
            dxy_bias_at_signal,
            fwd_return_1h, fwd_return_4h, fwd_return_eod,
-           fwd_max_up_4h, fwd_max_down_4h
+           fwd_max_up_4h, fwd_max_down_4h,
+           substring(timestamp from 1 for 10) AS obs_date
     FROM signals
     WHERE fwd_labeled_at IS NOT NULL AND fwd_return_4h IS NOT NULL
   `);
@@ -572,6 +573,11 @@ export async function runAnalysis(pool) {
 
   for (const { session, adx_bucket, rsi_bucket, rows: grp } of Object.values(fwdGroups)) {
     const nTotal  = grp.length;
+    // Distinct trading days, not raw observations. ~169 signals a day with
+    // overlapping 4h forward windows means rows inside one day are anything
+    // but independent, so nTotal overstates the evidence by roughly the
+    // number of signals per day.
+    const nDays   = new Set(grp.map(r => r.obs_date).filter(Boolean)).size;
     const pctUp4h = (grp.filter(r => r.fwd_return_4h > 0).length / nTotal) * 100;
 
     const dxyKnown      = grp.filter(r => r.dxy_bias_at_signal != null);
@@ -581,14 +587,14 @@ export async function runAnalysis(pool) {
 
     await pool.query(`
       INSERT INTO forward_rulebook (
-        session, adx_bucket, rsi_bucket, n_total,
+        session, adx_bucket, rsi_bucket, n_total, n_days,
         avg_fwd_1h, avg_fwd_4h, avg_fwd_eod, pct_up_4h,
         avg_max_up_4h, avg_max_down_4h,
         dxy_rising_pct, dxy_falling_pct, dxy_flat_pct,
         sample_confidence, last_updated
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
     `, [
-      session, adx_bucket, rsi_bucket, nTotal,
+      session, adx_bucket, rsi_bucket, nTotal, nDays,
       avg(grp.map(r => r.fwd_return_1h)),
       avg(grp.map(r => r.fwd_return_4h)),
       avg(grp.map(r => r.fwd_return_eod)),

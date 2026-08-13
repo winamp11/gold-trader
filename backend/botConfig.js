@@ -64,6 +64,8 @@ export const CONFIG_SCHEMA = [
   // ── Forward-rulebook context gates ─────────────────────────────────────
   { key: 'rulebookMinSamples',   label: 'Rulebook: min samples',    unit: '',    def: 100,  min: 10,  max: 2000, step: 10, group: 'Rulebook',
     help: 'A condition bucket is shown to the model as evidence only above this sample count.' },
+  { key: 'rulebookMinDays',      label: 'Rulebook: min days',       unit: '',    def: 10,   min: 1,   max: 120,  step: 1,  group: 'Rulebook',
+    help: 'Distinct trading days a bucket must span before it can act. Samples alone are misleading — ~169 signals a day with overlapping forward windows means 100 samples can be three days of one trend.' },
 
   // ── Day/time entry blocks (UAE hours, hard cutoffs) ─────────────────────
   // No new entries in these windows; market data/context keeps flowing as

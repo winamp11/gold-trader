@@ -6,12 +6,20 @@ import {
   classifyRulebookQualification, classifyOverlayStatus, classifyBranch, clampRiskUsd,
 } from '../hybridBranchClassifier.js';
 
-const CFG = { rulebookMinSamples: 100 };
+const CFG = { rulebookMinSamples: 100, rulebookMinDays: 10 };
 
-const qualifiedLongBucket  = { n_total: 200, avg_fwd_4h: 8,  pct_up_4h: 65 };
-const qualifiedShortBucket = { n_total: 200, avg_fwd_4h: -9, pct_up_4h: 30 };
-const thinBucket           = { n_total: 20,  avg_fwd_4h: 8,  pct_up_4h: 65 };
-const flatBucket           = { n_total: 300, avg_fwd_4h: 1,  pct_up_4h: 51 };
+// n_days is part of every fixture now: a bucket must span enough distinct
+// trading days, not just enough rows. Observations inside one day share a
+// market and overlapping 4h forward windows, so n_total alone overstates the
+// evidence by roughly the number of signals generated per day.
+const qualifiedLongBucket  = { n_total: 200, n_days: 25, avg_fwd_4h: 8,  pct_up_4h: 65 };
+const qualifiedShortBucket = { n_total: 200, n_days: 25, avg_fwd_4h: -9, pct_up_4h: 30 };
+const thinBucket           = { n_total: 20,  n_days: 25, avg_fwd_4h: 8,  pct_up_4h: 65 };
+const flatBucket           = { n_total: 300, n_days: 25, avg_fwd_4h: 1,  pct_up_4h: 51 };
+// Modelled on the real EUR/strong/bullish: plenty of rows, three days, all of
+// them inside one confirmed UP regime.
+const fewDaysBucket        = { n_total: 151, n_days: 3,  avg_fwd_4h: 11.5, pct_up_4h: 84 };
+const legacyBucket         = { n_total: 200, avg_fwd_4h: 8,  pct_up_4h: 65 };  // no n_days
 
 describe('classifyRulebookQualification', () => {
   test('qualifies a large, directionally consistent LONG bucket', () => {
@@ -34,7 +42,41 @@ describe('classifyRulebookQualification', () => {
   });
   test('handles a missing bucket without throwing', () => {
     const r = classifyRulebookQualification(null, CFG);
-    assert.deepEqual(r, { qualified: false, direction: null });
+    assert.equal(r.qualified, false);
+    assert.equal(r.direction, null);
+  });
+
+  test('rejects a bucket with plenty of rows but too few distinct days', () => {
+    // The case that prompted this rule. EUR/strong/bullish held 151
+    // observations drawn entirely from Aug 10-12, every one inside the
+    // confirmed UP regime, and would have told hybrid to go LONG on the
+    // strength of the rally it was sitting in.
+    const r = classifyRulebookQualification(fewDaysBucket, CFG);
+    assert.equal(r.qualified, false, 'three days must never qualify');
+    assert.equal(r.direction, null);
+    assert.match(r.reason, /3 distinct day/);
+  });
+
+  test('a bucket with no n_days is treated as failing, not passing', () => {
+    // Rows written before the column existed have never been day-counted.
+    // Defaulting them to "pass" would let every legacy bucket act
+    // unchecked for exactly as long as it takes the nightly rebuild to run.
+    const r = classifyRulebookQualification(legacyBucket, CFG);
+    assert.equal(r.qualified, false);
+    assert.match(r.reason, /n_days/);
+  });
+
+  test('the day floor is configurable and honoured', () => {
+    const bucket = { n_total: 200, n_days: 6, avg_fwd_4h: 8, pct_up_4h: 65 };
+    assert.equal(classifyRulebookQualification(bucket, { ...CFG, rulebookMinDays: 10 }).qualified, false);
+    assert.equal(classifyRulebookQualification(bucket, { ...CFG, rulebookMinDays: 5 }).qualified, true);
+  });
+
+  test('both floors must pass, not either', () => {
+    assert.equal(classifyRulebookQualification(
+      { n_total: 50, n_days: 40, avg_fwd_4h: 8, pct_up_4h: 65 }, CFG).qualified, false, 'days alone');
+    assert.equal(classifyRulebookQualification(
+      { n_total: 500, n_days: 2, avg_fwd_4h: 8, pct_up_4h: 65 }, CFG).qualified, false, 'rows alone');
   });
 });
 

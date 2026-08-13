@@ -748,6 +748,17 @@ class DatabaseService {
       )
     `);
 
+    // n_days: how many DISTINCT trading days a bucket's observations span.
+    //
+    // n_total alone is misleading here. The system evaluates ~169 signals a
+    // day with overlapping 4-hour forward windows, so observations inside one
+    // day share a market and are nowhere near independent. A bucket can clear
+    // an "n >= 100 samples" bar on three days of one trend:
+    // EUR/strong/bullish held 151 observations drawn entirely from Aug 10-12,
+    // every one of them inside the confirmed UP regime, and would have told
+    // hybrid to go LONG on the strength of the rally it was sitting in.
+    await this.pool.query(`ALTER TABLE forward_rulebook ADD COLUMN IF NOT EXISTS n_days INTEGER`);
+
     // Confirm row count unchanged after all DDL
     try {
       const r = await this.pool.query('SELECT COUNT(*) AS n FROM trades');

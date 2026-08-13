@@ -13,15 +13,40 @@ const EXECUTION_RISK_KEYWORDS = [
 // used: a bucket only counts as "qualified" (strong enough to act on alone)
 // above a sample floor with a clear directional lean either way.
 export function classifyRulebookQualification(bucket, cfg) {
-  if (!bucket) return { qualified: false, direction: null };
+  if (!bucket) return { qualified: false, direction: null, reason: 'no bucket' };
   const minSamples = cfg?.rulebookMinSamples ?? 100;
-  const n   = bucket.n_total;
-  const avg = bucket.avg_fwd_4h;
-  const up  = bucket.pct_up_4h;
-  if (n == null || avg == null || up == null || n < minSamples) return { qualified: false, direction: null };
-  if (avg >= 5 && up >= 58)  return { qualified: true, direction: 'LONG' };
-  if (avg <= -5 && up <= 42) return { qualified: true, direction: 'SHORT' };
-  return { qualified: false, direction: null };
+  const minDays    = cfg?.rulebookMinDays ?? 10;
+  const n    = bucket.n_total;
+  const days = bucket.n_days;
+  const avg  = bucket.avg_fwd_4h;
+  const up   = bucket.pct_up_4h;
+
+  if (n == null || avg == null || up == null) {
+    return { qualified: false, direction: null, reason: 'incomplete bucket' };
+  }
+  if (n < minSamples) {
+    return { qualified: false, direction: null, reason: `n ${n} < ${minSamples}` };
+  }
+
+  // Distinct-day floor. n_total counts observations, and ~169 signals a day
+  // with overlapping 4h forward windows means a bucket can clear a 100-sample
+  // bar on three days of a single trend. EUR/strong/bullish did exactly that:
+  // 151 observations, all from Aug 10-12, all inside one confirmed UP regime,
+  // qualifying LONG on the strength of the rally it was sitting in.
+  //
+  // A null n_days means the row predates this column, so it has never been
+  // day-counted and cannot be trusted to act alone -- treated as failing,
+  // not as passing. The nightly rebuild repopulates it.
+  if (days == null) {
+    return { qualified: false, direction: null, reason: 'n_days not yet computed' };
+  }
+  if (days < minDays) {
+    return { qualified: false, direction: null, reason: `only ${days} distinct day(s) < ${minDays}` };
+  }
+
+  if (avg >= 5 && up >= 58)  return { qualified: true, direction: 'LONG',  reason: null };
+  if (avg <= -5 && up <= 42) return { qualified: true, direction: 'SHORT', reason: null };
+  return { qualified: false, direction: null, reason: 'no directional lean' };
 }
 
 // Overlay exposes only a binary VETO (no confidence score) plus its own
