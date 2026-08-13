@@ -441,35 +441,61 @@
   .analyst-header__sub { display: none; }
 }
 
-/* ── Regime indicator ──────────────────────────────────────────────────── */
-/* Sparkline of the last 30 daily momentum readings. Bars grow up from the
-   midline for positive momentum and down for negative, coloured by the state
-   that reading produced — so the July chop and the August break are legible
-   as shapes, not just as a current label. */
-.regime-strip {
-  display: flex;
-  align-items: stretch;
-  gap: 2px;
-  height: 56px;
-  margin-top: 12px;
-  padding: 6px 0;
-  border-top: 1px solid rgba(148, 163, 184, 0.15);
-  overflow-x: auto;
+
+/* ── Regime chart ──────────────────────────────────────────────────────── */
+/* Diverging bars from a zero baseline: the reader's job is "is this above or
+   below the ±3% line", so the threshold rules and the zero line are drawn
+   first and the bars read against them. Colour restates the state the
+   geometry already shows. */
+.regime-chart {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
 }
 
-.regime-strip__bar {
-  flex: 1 1 0;
-  min-width: 6px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  height: 100%;
-}
-
-.regime-strip__fill {
+.regime-chart__svg {
   width: 100%;
-  border-radius: 2px;
-  opacity: 0.85;
+  height: auto;
+  display: block;
+  overflow: visible;
 }
 
-.regime-strip__bar:hover .regime-strip__fill { opacity: 1; }
+.regime-chart__tick {
+  fill: var(--text3);
+  font-size: 9px;
+  font-family: 'Space Mono', monospace;
+}
+
+.regime-chart__legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  margin-top: 10px;
+  font-size: 10px;
+  font-family: 'Space Mono', monospace;
+  color: var(--text2);
+}
+
+.regime-chart__key {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.regime-chart__key i {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.regime-chart__key em {
+  font-style: normal;
+  color: var(--text3);
+}
+
+.regime-chart__note {
+  margin-left: auto;
+  color: var(--text3);
+}

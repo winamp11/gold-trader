@@ -411,7 +411,99 @@ function Section({ id, title, count, defaultOpen = false, children }) {
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-const REGIME_COLOR = { UP: '#22c55e', DOWN: '#ef4444', FLAT: '#94a3b8', UNKNOWN: '#64748b' };
+// Diverging palette: two poles + a neutral gray midpoint. Validated against
+// this dashboard's dark surface (#0d1520) — passes the lightness band, the
+// normal-vision floor and 3:1 contrast. Green/red sits at ΔE 7.9 under
+// deuteranopia, inside the 6–8 floor band, which is only legal with secondary
+// encoding. That encoding is inherent here and not decorative: a bar's
+// position relative to the zero line and the ±3% threshold rules fully
+// determines its state, so colour is redundant reinforcement rather than the
+// carrier. A reader who cannot separate the hues still reads the chart.
+const REGIME_COLOR = { UP: '#0e9f6e', DOWN: '#f05252', FLAT: '#64748b', UNKNOWN: '#3d5a75' };
+const REGIME_LEGEND = [
+  ['UP', 'above +3%'],
+  ['FLAT', 'within ±3%'],
+  ['DOWN', 'below −3%'],
+];
+
+function RegimeChart({ history, thresholdPct }) {
+  const hist = (history || []).slice(-30);
+  if (hist.length === 0) return null;
+
+  const thr = thresholdPct ?? 3;
+  // Scale to the data or the threshold, whichever is larger, so the ±3% rules
+  // are always on-canvas — they are the decision boundary, and a chart that
+  // crops them hides the only line that matters.
+  const bound = Math.max(thr * 1.6, ...hist.map(h => Math.abs(h.momentum_pct ?? 0))) * 1.1;
+
+  const H = 132, PAD_L = 44, PAD_R = 12, PAD_T = 10, PAD_B = 24;
+  const W = 720;
+  const plotH = H - PAD_T - PAD_B;
+  const plotW = W - PAD_L - PAD_R;
+  const y = v => PAD_T + (1 - (v + bound) / (2 * bound)) * plotH;
+  const barW = Math.max(3, (plotW / hist.length) - 2);   // 2px surface gap
+
+  const first = hist[0], last = hist[hist.length - 1];
+  // The start of the CURRENT run, not the first transition in the window.
+  // Taking the first one labelled July's one-day false positive as though it
+  // were the live regime — the opposite of what the reader needs.
+  let runStart = hist.length - 1;
+  while (runStart > 0 && hist[runStart - 1].state === last.state) runStart--;
+  const flip = (last.state !== 'FLAT' && runStart > 0) ? hist[runStart] : null;
+
+  return (
+    <div className="regime-chart">
+      <svg viewBox={`0 0 ${W} ${H}`} className="regime-chart__svg" role="img"
+           aria-label={`Daily 10-day momentum for the last ${hist.length} trading days`}>
+        {/* threshold bands — the actual decision boundary */}
+        {[thr, -thr].map(t => (
+          <g key={t}>
+            <line x1={PAD_L} x2={W - PAD_R} y1={y(t)} y2={y(t)}
+                  stroke="#3d5a75" strokeWidth="1" strokeDasharray="3 3" />
+            <text x={PAD_L - 6} y={y(t) + 3} textAnchor="end" className="regime-chart__tick">
+              {t > 0 ? `+${t}%` : `−${t * -1}%`}
+            </text>
+          </g>
+        ))}
+        {/* zero baseline, drawn solid so the sign of every bar is unambiguous */}
+        <line x1={PAD_L} x2={W - PAD_R} y1={y(0)} y2={y(0)} stroke="#1a2e45" strokeWidth="1" />
+        <text x={PAD_L - 6} y={y(0) + 3} textAnchor="end" className="regime-chart__tick">0</text>
+
+        {hist.map((h, i) => {
+          const v = h.momentum_pct ?? 0;
+          const x = PAD_L + i * (plotW / hist.length) + 1;
+          const top = v >= 0 ? y(v) : y(0);
+          const hh = Math.max(2, Math.abs(y(v) - y(0)));
+          return (
+            <rect key={h.date} x={x} y={top} width={barW} height={hh} rx="2"
+                  fill={REGIME_COLOR[h.state] ?? REGIME_COLOR.FLAT}>
+              <title>{`${h.date} · ${v >= 0 ? '+' : ''}${v.toFixed(2)}% · ${h.state}`}</title>
+            </rect>
+          );
+        })}
+
+        <text x={PAD_L} y={H - 8} className="regime-chart__tick">{first.date}</text>
+        {flip && (
+          <text x={W / 2} y={H - 8} textAnchor="middle" className="regime-chart__tick">
+            {flip.state} from {flip.date}
+          </text>
+        )}
+        <text x={W - PAD_R} y={H - 8} textAnchor="end" className="regime-chart__tick">{last.date}</text>
+      </svg>
+
+      <div className="regime-chart__legend">
+        {REGIME_LEGEND.map(([k, desc]) => (
+          <span key={k} className="regime-chart__key">
+            <i style={{ background: REGIME_COLOR[k] }} />{k} <em>{desc}</em>
+          </span>
+        ))}
+        <span className="regime-chart__note">
+          each bar = one trading day&apos;s 10-day price change
+        </span>
+      </div>
+    </div>
+  );
+}
 
 // Regime indicator. Shows the number, its age and whether it is confirmed —
 // not just a label. A bare state hides the distinction that matters most:
@@ -424,18 +516,12 @@ function RegimePanel({ data }) {
   const mom = r?.momentumPct;
   const confirmed = r?.confirmed === true;
 
-  // Last 30 readings, oldest first — enough to show the July chop and the
-  // August break side by side.
-  const hist = (data?.history || []).slice(-30);
-  const vals = hist.map(h => h.momentum_pct).filter(v => v != null);
-  const bound = Math.max(6, ...vals.map(v => Math.abs(v)));
-
   return (
     <div className="analyst-card">
       <div className="analyst-card__header">
         <span className="analyst-card__title">Market regime</span>
         <span className="analyst-card__count">
-          {r?.lookbackDays ?? 10}d momentum · ±{(r?.thresholdPct ?? 3).toFixed(1)}%
+          {r?.lookbackDays ?? 10}d price change · ±{(r?.thresholdPct ?? 3).toFixed(1)}%
         </span>
       </div>
 
@@ -451,14 +537,14 @@ function RegimePanel({ data }) {
         </div>
 
         <div className="summary-card">
-          <div className="summary-card__label">Momentum</div>
+          <div className="summary-card__label">Price change (10d)</div>
           <div className="summary-card__val" style={{ color }}>
             {mom == null ? '—' : `${mom >= 0 ? '+' : ''}${mom.toFixed(2)}%`}
           </div>
           <div className="summary-card__sub">
             {r?.distancePct != null && state !== 'FLAT' && state !== 'UNKNOWN'
-              ? `${r.distancePct >= 0 ? '+' : ''}${r.distancePct.toFixed(2)}% past threshold`
-              : 'within threshold'}
+              ? `${r.distancePct >= 0 ? '+' : ''}${r.distancePct.toFixed(2)}% past the ±${r.thresholdPct}% line`
+              : `inside the ±${r?.thresholdPct ?? 3}% band`}
           </div>
         </div>
 
@@ -469,8 +555,8 @@ function RegimePanel({ data }) {
           </div>
           <div className="summary-card__sub">
             {confirmed
-              ? `counter-regime signals suppressed`
-              : `needs ${r?.confirmDays ?? 3} consecutive days`}
+              ? `${state === 'UP' ? 'SHORT' : 'LONG'} rulebook signals blocked`
+              : `needs ${r?.confirmDays ?? 3} days in a row`}
           </div>
         </div>
 
@@ -483,30 +569,7 @@ function RegimePanel({ data }) {
         </div>
       </div>
 
-      {hist.length > 0 && (
-        <div className="regime-strip">
-          {hist.map(h => {
-            const h_ = h.momentum_pct ?? 0;
-            const mag = Math.min(1, Math.abs(h_) / bound);
-            return (
-              <div
-                key={h.date}
-                className="regime-strip__bar"
-                title={`${h.date} · ${h_ >= 0 ? '+' : ''}${h_.toFixed(2)}% · ${h.state}`}
-              >
-                <div
-                  className="regime-strip__fill"
-                  style={{
-                    height: `${Math.max(4, mag * 100)}%`,
-                    background: REGIME_COLOR[h.state] ?? REGIME_COLOR.FLAT,
-                    alignSelf: h_ >= 0 ? 'flex-end' : 'flex-start',
-                  }}
-                />
-              </div>
-            );
-          })}
-        </div>
-      )}
+      <RegimeChart history={data?.history} thresholdPct={r?.thresholdPct} />
     </div>
   );
 }
