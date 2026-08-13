@@ -524,22 +524,29 @@ export default function AnalystDashboard({ onBack }) {
   const [error,        setError]        = useState(null);
 
   const fetchData = useCallback(async () => {
+    // Regime is fetched OUTSIDE the Promise.all below on purpose. Folding it
+    // in meant a single failing endpoint rejected the whole batch and blanked
+    // the entire analyst page behind "Could not reach backend" — a new panel
+    // must never be able to take down the pages that already worked.
+    fetch(`${API}/api/regime`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => setRegime(d ?? null))
+      .catch(() => setRegime(null));
+
     try {
-      const [rbRes, pinRes, mechRes, fwdRes, regRes] = await Promise.all([
+      const [rbRes, pinRes, mechRes, fwdRes] = await Promise.all([
         fetch(`${API}/api/analyst/rulebook`),
         fetch(`${API}/api/pinned-lessons`),
         fetch(`${API}/api/analyst/mechanical-rulebook`),
         fetch(`${API}/api/analyst/forward-rulebook`),
-        fetch(`${API}/api/regime`),
       ]);
-      const [rbData, pinData, mechData, fwdData, regimeData] = await Promise.all([
-        rbRes.json(), pinRes.json(), mechRes.json(), fwdRes.json(), regRes.json()
+      const [rbData, pinData, mechData, fwdData] = await Promise.all([
+        rbRes.json(), pinRes.json(), mechRes.json(), fwdRes.json()
       ]);
       setRulebook(rbData);
       setPins(pinData.pinned || []);
       setMechRulebook(mechData.rows || []);
       setFwdRulebook(fwdData.rows || []);
-      setRegime(regimeData || null);
       setLastUpdated(new Date());
       setError(null);
     } catch {
