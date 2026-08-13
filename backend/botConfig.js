@@ -8,6 +8,27 @@
 //
 // Values are read fresh each cycle, so edits take effect without a redeploy.
 
+import { createHash } from 'node:crypto';
+
+// A config's identity, for stamping onto every decision row.
+//
+// Values are read fresh each cycle and are editable from the dashboard, so
+// a three-month dataset can silently span several different treatments: a
+// window widened on day 20, a risk cap lowered on day 45. Without this,
+// those all aggregate into one "mechanical_prime" result that describes no
+// configuration that was ever actually run.
+//
+// Canonical JSON (keys sorted, so key order can never change the hash) then
+// a short SHA-256. Deterministic across restarts and processes, which a
+// hand-maintained version counter is not -- nobody has to remember to bump
+// anything, and two accounts running identical settings share a version.
+export function configFingerprint(config) {
+  const canonical = JSON.stringify(
+    Object.keys(config ?? {}).sort().map(k => [k, config[k]])
+  );
+  return createHash('sha256').update(canonical).digest('hex').slice(0, 12);
+}
+
 export const HYBRID_BOT = 'claude_hybrid';
 export const MECHANICAL_PRIME_BOT   = 'mechanical_prime';
 export const MECHANICAL_SESSION_BOT = 'mechanical_session';

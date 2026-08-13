@@ -29,6 +29,7 @@ import {
   CONFIG_SCHEMA,
   MECHANICAL_PRIME_SCHEMA,
   MECHANICAL_SESSION_SCHEMA,
+  configFingerprint,
 } from '../botConfig.js';
 
 const BACKEND = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -112,5 +113,43 @@ describe('bot config settings are actually consumed', () => {
       /applyPerTradeRiskCap\(\s*RISK_STATE_PCT\[[^\]]+\],\s*cfg\.maxRiskPerTradePct\s*\)/,
       'server.js no longer applies maxRiskPerTradePct to the risk-state percentage'
     );
+  });
+});
+
+describe('config fingerprinting', () => {
+  test('key order does not change the fingerprint', () => {
+    assert.equal(
+      configFingerprint({ b: 2, a: 1 }),
+      configFingerprint({ a: 1, b: 2 })
+    );
+  });
+
+  test('any value change produces a different fingerprint', () => {
+    const base = { entryWindowStartHour: 15, entryWindowEndHour: 18, maxRiskPerTradePct: 1.0 };
+    assert.notEqual(configFingerprint(base), configFingerprint({ ...base, entryWindowEndHour: 19 }));
+    assert.notEqual(configFingerprint(base), configFingerprint({ ...base, maxRiskPerTradePct: 0.5 }));
+  });
+
+  test('adding a key changes the fingerprint', () => {
+    assert.notEqual(configFingerprint({ a: 1 }), configFingerprint({ a: 1, b: 2 }));
+  });
+
+  test('identical configs on different accounts share a version', () => {
+    // Two accounts running the same settings are the same treatment, and
+    // should be poolable on that basis.
+    const cfg = { maxOpenPositions: 3, maxTotalRiskPct: 3 };
+    assert.equal(configFingerprint(cfg), configFingerprint({ ...cfg }));
+  });
+
+  test('empty and nullish configs do not throw', () => {
+    for (const c of [undefined, null, {}]) {
+      assert.match(configFingerprint(c), /^[0-9a-f]{12}$/, String(c));
+    }
+  });
+
+  test('every decision row is stamped with the config that produced it', () => {
+    const server = readFileSync(join(BACKEND, 'server.js'), 'utf8');
+    assert.match(server, /configVersion:\s*configFingerprint\(cfg\)/);
+    assert.match(server, /configSnapshot:\s*JSON\.stringify\(cfg\)/);
   });
 });

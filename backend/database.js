@@ -637,6 +637,18 @@ class DatabaseService {
     await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_mvd_weekday_hour   ON mechanical_variant_decisions(account, uae_weekday, uae_hour)`);
     await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_mvd_signal         ON mechanical_variant_decisions(signal_id)`);
 
+    // config_version / config_snapshot: which configuration produced this
+    // decision. Settings are dashboard-editable and read fresh each cycle,
+    // so without these a three-month dataset silently mixes treatments --
+    // an entry window widened mid-experiment aggregates into one result
+    // describing a configuration that was never actually run. The version
+    // is a deterministic fingerprint (see configFingerprint); the snapshot
+    // is the full config as JSON so a version can always be explained
+    // without reconstructing history.
+    await this.pool.query(`ALTER TABLE mechanical_variant_decisions ADD COLUMN IF NOT EXISTS config_version  TEXT`);
+    await this.pool.query(`ALTER TABLE mechanical_variant_decisions ADD COLUMN IF NOT EXISTS config_snapshot TEXT`);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_mvd_config_version ON mechanical_variant_decisions(account, config_version)`);
+
     // mechanical_variant_decision_outcomes — the Phase-2 maturation result for
     // a mechanical_variant_decisions row. Strictly separate from the decision
     // itself (never a column added to that table, never an UPDATE to it) so
@@ -1303,10 +1315,12 @@ class DatabaseService {
         session_permitted, risk_state_before, risk_state_after, state_transition_reason,
         allowed_risk_pct, equity, day_start_equity, day_pnl,
         open_risk_pct_before, open_position_count, consecutive_losses,
-        final_action, reason_code, lots, risk_usd, theoretical_1pct_lots, trade_id
+        final_action, reason_code, lots, risk_usd, theoretical_1pct_lots, trade_id,
+        config_version, config_snapshot
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
-        $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39
+        $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,
+        $40,$41
       ) RETURNING id
     `, [
       d.account, d.signalId ?? null, d.cycleTsUtc, d.cycleTsUae, d.uaeWeekday, d.uaeHour,
@@ -1318,6 +1332,7 @@ class DatabaseService {
       d.allowedRiskPct, d.equity, d.dayStartEquity, d.dayPnl,
       d.openRiskPctBefore, d.openPositionCount, d.consecutiveLosses,
       d.finalAction, d.reasonCode ?? null, d.lots ?? null, d.riskUsd ?? null, d.theoretical1pctLots, d.tradeId ?? null,
+      d.configVersion ?? null, d.configSnapshot ?? null,
     ]);
     return r.rows[0].id;
   }
@@ -1636,7 +1651,14 @@ class DatabaseService {
           COUNT(*)                                                    AS closed_trades,
           SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)                   AS wins,
           SUM(CASE WHEN pnl IS NOT NULL AND pnl <= 0 THEN 1 ELSE 0 END) AS losses
-        FROM trades WHERE exit_reason IS NOT NULL
+        -- pnl IS NOT NULL, not just exit_reason IS NOT NULL. A NO_ENTRY row
+        -- has an exit_reason but was never filled, so it has no P&L and is
+        -- not a trade that can be won or lost. Counting it inflated the
+        -- win-rate denominator while it could never reach the numerator,
+        -- making closed_trades > wins + losses. Small today (8 rows across
+        -- all accounts, ~0.6pp on mechanical) but wrong in a direction that
+        -- silently understates every account's win rate.
+        FROM trades WHERE exit_reason IS NOT NULL AND pnl IS NOT NULL
         GROUP BY portfolio_id
       ) wr ON wr.portfolio_id = p.id
       LEFT JOIN (

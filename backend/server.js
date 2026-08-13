@@ -1,5 +1,6 @@
 // gold-trader backend
 import express from 'express';
+import { EXIT_REASONS, FORCED_EXIT_REASONS_SQL } from './exitReasons.js';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import twelveData from './twelveData.js';
@@ -25,6 +26,7 @@ import { getM1CacheMetrics, cleanupOldM1Candles } from './m1CandleCache.js';
 import {
   CONFIG_SCHEMA, getBotConfig, saveBotConfig, HYBRID_BOT,
   MECHANICAL_PRIME_BOT, MECHANICAL_SESSION_BOT, MECHANICAL_PRIME_SCHEMA, MECHANICAL_SESSION_SCHEMA,
+  configFingerprint,
 } from './botConfig.js';
 import {
   RISK_STATE_PCT, applyPerTradeRiskCap,
@@ -262,7 +264,7 @@ async function checkHybridDayGuards(currentPrice) {
         if (hybridDay.seriesPeak >= armUsd && seriesPnl < floorUsd) {
           console.log(`🎯 [HYBRID] give-back: series peak +$${hybridDay.seriesPeak.toFixed(0)} → now +$${seriesPnl.toFixed(0)} (floor $${floorUsd.toFixed(0)}) — banking series, continuing to trade`);
           await logSeries('give_back', seriesPnl);
-          await outcomeTracker.forceClosePortfolio(p.id, currentPrice);
+          await outcomeTracker.forceClosePortfolio(p.id, currentPrice, EXIT_REASONS.GIVE_BACK);
           resetHybridSeries();
           hybridDay.runsBanked = (hybridDay.runsBanked || 0) + 1;
           await persistHybridDay();
@@ -295,7 +297,12 @@ async function checkHybridDayGuards(currentPrice) {
         await persistHybridDay();
       }
       console.log(`🛑 [HYBRID] ${flatten} — flattening and standing down for the day`);
-      if (hasOpen) await outcomeTracker.forceClosePortfolio(p.id, currentPrice);
+      if (hasOpen) {
+        await outcomeTracker.forceClosePortfolio(
+          p.id, currentPrice,
+          flattenReason === 'daily_max_loss' ? EXIT_REASONS.DAILY_MAX_LOSS : EXIT_REASONS.DAILY_TARGET
+        );
+      }
     }
   } catch (err) {
     console.error(`❌ [HYBRID] day-guard check failed: ${err.message}`);
@@ -598,6 +605,11 @@ async function evaluateMechanicalVariant({ account, portfolio, cfg, mechDecision
     allowedRiskPct, equity, dayStartEquity: state.dayStartEquity, dayPnl: guard.dayPnl,
     openRiskPctBefore, openPositionCount: openPositions.length, consecutiveLosses: state.consecutiveLosses,
     theoretical1pctLots: theoretical.lots,
+    // Which configuration produced this decision. Stamped on every row,
+    // including rejections, so any slice of the dataset can be checked for
+    // whether it spans more than one treatment before it is aggregated.
+    configVersion: configFingerprint(cfg),
+    configSnapshot: JSON.stringify(cfg),
   };
 
   const reject = (reasonCode, extra = {}) => database.saveMechanicalVariantDecision({
@@ -824,7 +836,7 @@ async function checkCircuitBreakers(currentPrice) {
         ` (realized $${realized.toFixed(2)} + unrealized $${unrealized.toFixed(2)} = $${dayPnl.toFixed(2)},` +
         ` threshold $${threshold.toFixed(2)}) — flattened and halted until next session`
       );
-      const closed = await outcomeTracker.forceClosePortfolio(p.id, currentPrice);
+      const closed = await outcomeTracker.forceClosePortfolio(p.id, currentPrice, EXIT_REASONS.CIRCUIT_BREAKER);
       state.halted      = true;
       state.haltedOnDate = today;
       await database.setCircuitBreakerDate(p.id, today);
@@ -841,7 +853,7 @@ async function checkCircuitBreakers(currentPrice) {
           `🛑 [PROP HARD HALT] ${p.name} equity $${equity.toFixed(2)} ≤ trailing limit $${totalLimit.toFixed(2)}` +
           ` (high water $${highWater.toFixed(2)} − $${PROP.totalDrawdownHalt}) — account permanently halted`
         );
-        await outcomeTracker.forceClosePortfolio(p.id, currentPrice);
+        await outcomeTracker.forceClosePortfolio(p.id, currentPrice, EXIT_REASONS.PROP_HARD_HALT);
         propHardHalted = today;
         await database.setServiceState('prop_hard_halt', JSON.stringify({ date: today, equity, limit: totalLimit }));
       }
@@ -1948,8 +1960,22 @@ app.get('/api/hybrid/branch-analytics', async (req, res) => {
       ORDER BY hd.cycle_ts ASC
     `, params);
 
+    // Coverage, not just counts. hybrid_decisions began mid-life, so a naive
+    // comparison against trades looks like broken linkage: Aug 1-10 shows 14
+    // journal trades against 39 in trade history purely because the journal
+    // starts Aug 6. Linkage is in fact exact for every day it covers. Stating
+    // the window removes the ambiguity rather than inviting the inference.
+    const covered = rows.length
+      ? { first_decision: rows[0].cycle_ts, last_decision: rows[rows.length - 1].cycle_ts }
+      : { first_decision: null, last_decision: null };
+
     res.json({
       horizon,
+      coverage: {
+        ...covered,
+        note: 'Decisions exist only from first_decision onward. Trades placed before it have no journal row and are absent from these branches by construction, not by a linkage fault.',
+      },
+      attribution_cutover: attributionCutover,
       total_evaluations: rows.length,
       branches: computeBranchAnalytics(rows, horizon),
     });
@@ -2035,7 +2061,7 @@ app.get('/api/mechanical-variants/comparison', async (req, res) => {
       accounts[name] = entry;
     }
 
-    res.json({ accounts });
+    res.json({ accounts, attribution_cutover: attributionCutover });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2320,7 +2346,7 @@ app.get('/api/analyst/backfill-journal', async (req, res) => {
       JOIN portfolios p ON p.id = j.portfolio_id
       WHERE j.portfolio_id IN (2, 3)
         AND j.entry_type = 'observation'
-        AND t.exit_reason IN ('WINDOW_CLOSE', 'CIRCUIT_BREAKER', 'MANAGED_CLOSE')
+        AND t.exit_reason IN (${FORCED_EXIT_REASONS_SQL})
         AND t.pnl IS NOT NULL
       GROUP BY p.name
     `);
@@ -2364,7 +2390,7 @@ app.post('/api/analyst/backfill-journal', async (req, res) => {
       WHERE j.signal_or_trade_id = t.id
         AND j.portfolio_id IN (2, 3)
         AND j.entry_type = 'observation'
-        AND t.exit_reason IN ('WINDOW_CLOSE', 'CIRCUIT_BREAKER', 'MANAGED_CLOSE')
+        AND t.exit_reason IN (${FORCED_EXIT_REASONS_SQL})
         AND t.pnl IS NOT NULL
     `);
 
@@ -2535,6 +2561,38 @@ app.get('/api/pinned-lessons', async (req, res) => {
 // Top-level await: must connect to PostgreSQL before accepting requests.
 await database.init();
 
+// Attribution cutover — the instant this build's corrected accounting went
+// live. Recorded on first boot after deploy and never rewritten, so the
+// timestamp is the real one rather than a guess made at commit time.
+//
+// Everything before it is invalid for prime/session value attribution:
+// counterfactuals were resolved against Mechanical's raw stop rather than
+// the ATR-clamped variant stop, the daily guards ignored unrealized P&L,
+// maxRiskPerTradePct did nothing, and time buckets keyed off exit time.
+// Decision rows written before the cutover have no clamped_stop and are
+// skipped by maturation permanently. Bump ATTRIBUTION_CUTOVER_ID if a
+// future change invalidates the series again.
+const ATTRIBUTION_CUTOVER_ID  = 'variant-attribution-v2';
+const ATTRIBUTION_CUTOVER_KEY = 'attribution_cutover';
+let attributionCutover = null;
+{
+  try {
+    const raw = await database.getServiceState(ATTRIBUTION_CUTOVER_KEY);
+    const prev = raw ? JSON.parse(raw) : null;
+    if (prev?.id === ATTRIBUTION_CUTOVER_ID) {
+      attributionCutover = prev;
+      console.log(`📌 [ATTRIBUTION] cutover ${prev.id} at ${prev.at}`);
+    } else {
+      attributionCutover = { id: ATTRIBUTION_CUTOVER_ID, at: new Date().toISOString() };
+      await database.setServiceState(ATTRIBUTION_CUTOVER_KEY, JSON.stringify(attributionCutover));
+      console.log(`📌 [ATTRIBUTION] new cutover ${attributionCutover.id} recorded at ${attributionCutover.at}` +
+        (prev ? ` (previous: ${prev.id} at ${prev.at})` : ''));
+    }
+  } catch (err) {
+    console.error(`❌ [ATTRIBUTION] could not record cutover: ${err.message}`);
+  }
+}
+
 // Restore the day's session range (survives redeploys).
 await restoreSessionRange();
 
@@ -2610,6 +2668,7 @@ app.get('/api/diag/queries', async (req, res) => {
           SUM(CASE WHEN t.exit_reason = 'TARGET_HIT'      THEN 1 ELSE 0 END) AS target_hit,
           SUM(CASE WHEN t.exit_reason = 'STOP_HIT'        THEN 1 ELSE 0 END) AS stop_hit,
           SUM(CASE WHEN t.exit_reason = 'CIRCUIT_BREAKER' THEN 1 ELSE 0 END) AS circuit_breaker,
+          SUM(CASE WHEN t.exit_reason IN (${FORCED_EXIT_REASONS_SQL}) THEN 1 ELSE 0 END) AS forced_exits,
           SUM(CASE WHEN t.exit_reason = 'NO_ENTRY'        THEN 1 ELSE 0 END) AS no_entry,
           SUM(CASE WHEN t.exit_reason = 'EXPIRED'         THEN 1 ELSE 0 END) AS expired
         FROM trades t JOIN portfolios p ON p.id = t.portfolio_id

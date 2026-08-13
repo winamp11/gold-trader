@@ -1,4 +1,5 @@
 import database from './database.js';
+import { EXIT_REASONS, isForcedExit } from './exitReasons.js';
 import { isTradingHours } from './tradingHours.js';
 import { reflect, reflectVeto } from './deciders/reflector.js';
 import { VALUE_PER_LOT, SPREAD_POINTS } from './contractSpec.js';
@@ -204,7 +205,7 @@ class OutcomeTracker {
 
     if (tracking.type === 'GREEN' &&
         (outcome === 'TARGET_HIT' || outcome === 'STOP_HIT' ||
-         ((outcome === 'WINDOW_CLOSE' || outcome === 'CIRCUIT_BREAKER' || outcome === 'MANAGED_CLOSE') && tracking.entryTriggered))) {
+         (isForcedExit(outcome) && tracking.entryTriggered))) {
       const lots = tracking.lots || 0.01;
       const priceMove = tracking.direction === 'LONG'
         ? fillPrice - tracking.entryPrice
@@ -248,10 +249,10 @@ class OutcomeTracker {
     if (tracking.type === 'GREEN') {
       const exitStr = fillPrice != null ? ` @ $${fillPrice.toFixed(2)}` : '';
       const pnlStr  = pnl      != null ? ` · ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}` : '';
-      if (outcome === 'WINDOW_CLOSE') {
+      if (outcome === EXIT_REASONS.WINDOW_CLOSE) {
         console.log(`🔔 [WINDOW CLOSE] ${tracking.portfolioName} | ${tracking.direction} closed${exitStr}${pnlStr} · WINDOW_CLOSE`);
-      } else if (outcome === 'CIRCUIT_BREAKER') {
-        console.log(`🛑 [CIRCUIT BREAKER] ${tracking.portfolioName} | ${tracking.direction} closed${exitStr}${pnlStr} · CIRCUIT_BREAKER`);
+      } else if (isForcedExit(outcome)) {
+        console.log(`🛑 [FORCED EXIT] ${tracking.portfolioName} | ${tracking.direction} closed${exitStr}${pnlStr} · ${outcome}`);
       } else {
         console.log(`🔴 [CLOSE] ${tracking.portfolioName} | ${outcome}${exitStr}${pnlStr}`);
       }
@@ -294,17 +295,21 @@ class OutcomeTracker {
 
   // ── Circuit-breaker sweep — one portfolio only ────────────────────────────
 
-  async forceClosePortfolio(portfolioId, price) {
+  // `reason` is the CAUSE of the flatten, not a label to be assumed. It used
+  // to be hardcoded to CIRCUIT_BREAKER, which collapsed give-back banking,
+  // daily-guard flattens and the real breaker into one indistinguishable
+  // value. Callers must say why they are closing.
+  async forceClosePortfolio(portfolioId, price, reason = EXIT_REASONS.CIRCUIT_BREAKER) {
     const positions = Array.from(this.activeTracking.values())
       .filter(t => t.portfolioId === portfolioId && t.type === 'GREEN');
     const shadows = Array.from(this.shadowTracking.values())
       .filter(s => s.portfolioId === portfolioId);
 
     for (const t of positions) {
-      await this.finalizePosition(t, t.entryTriggered ? 'CIRCUIT_BREAKER' : 'NO_ENTRY', price);
+      await this.finalizePosition(t, t.entryTriggered ? reason : EXIT_REASONS.NO_ENTRY, price);
     }
     for (const s of shadows) {
-      await this.finalizeShadow(s, 'CIRCUIT_BREAKER', price);
+      await this.finalizeShadow(s, reason, price);
     }
     return positions.length + shadows.length;
   }

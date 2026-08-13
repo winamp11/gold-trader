@@ -131,6 +131,8 @@ describe('database write paths (live)', { skip: TEST_URL ? false : 'TEST_DATABAS
       riskUsd: 1000,
       theoretical1pctLots: 0.5,
       tradeId: null,
+      configVersion: 'abc123def456',
+      configSnapshot: JSON.stringify({ entryWindowStartHour: 15, entryWindowEndHour: 18 }),
     };
 
     const id = await db.saveMechanicalVariantDecision(decision);
@@ -154,6 +156,10 @@ describe('database write paths (live)', { skip: TEST_URL ? false : 'TEST_DATABAS
     assert.equal(row.trade_id, null);
     assert.equal(row.session_permitted, true);
     assert.equal(row.consecutive_losses, 0);
+    // The config stamp is at the very end of the column list, which is
+    // exactly where an arity mistake lands.
+    assert.equal(row.config_version, 'abc123def456');
+    assert.equal(JSON.parse(row.config_snapshot).entryWindowStartHour, 15);
   });
 
   test('saveMechanicalVariantDecisionOutcome persists once and is idempotent', async () => {

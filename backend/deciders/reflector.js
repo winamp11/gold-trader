@@ -6,6 +6,7 @@
 // Mechanical positions are silently ignored (no journal for mechanical).
 
 import { callReflector, callBatchReflector } from './claudeClient.js';
+import { isForcedExit } from '../exitReasons.js';
 import database from '../database.js';
 import { TAXONOMY_PROMPT_BLOCK } from '../tagTaxonomy.js';
 
@@ -48,7 +49,7 @@ function pnlStr(pnl) {
 function classifyOutcome(outcome, pnl) {
   if (outcome === 'TARGET_HIT') return { entryType: 'win',  exitType: 'strategy' };
   if (outcome === 'STOP_HIT')   return { entryType: 'loss', exitType: 'strategy' };
-  if (outcome === 'WINDOW_CLOSE' || outcome === 'CIRCUIT_BREAKER' || outcome === 'MANAGED_CLOSE') {
+  if (isForcedExit(outcome)) {
     // Forced exits: count as win/loss by P&L sign so the Analyst sees them.
     return { entryType: pnl > 0 ? 'win' : pnl < 0 ? 'loss' : 'observation', exitType: 'forced' };
   }
