@@ -22,7 +22,14 @@ class DatabaseService {
     const isInternal = connectionString
       ? connectionString.includes('railway.internal')
       : pgHost.includes('railway.internal');
-    const ssl = isInternal ? false : { rejectUnauthorized: false };
+    // Standard libpq opt-out, honoured so a plain local Postgres (which
+    // speaks no SSL at all) is reachable -- otherwise every non-Railway
+    // host is forced into SSL and the integration tests cannot connect.
+    // Railway's own URLs set neither, so its behaviour is unchanged.
+    const sslDisabled =
+      process.env.PGSSLMODE === 'disable' ||
+      (connectionString || '').includes('sslmode=disable');
+    const ssl = (isInternal || sslDisabled) ? false : { rejectUnauthorized: false };
 
     // If DATABASE_URL is set use it; otherwise pg reads PG* env vars natively.
     this.pool = new Pool({
@@ -254,9 +261,6 @@ class DatabaseService {
     // NULL on older rows and veto/observation entries.
     await this.pool.query(`ALTER TABLE journal ADD COLUMN IF NOT EXISTS exit_type TEXT`);
 
-    // forced_close_pct: what % of a tag's analyst-visible trades were forced exits.
-    await this.pool.query(`ALTER TABLE analyst_rulebook ADD COLUMN IF NOT EXISTS forced_close_pct DOUBLE PRECISION`);
-
     // Additive range columns: session high/low snapshot and derived position metrics.
     await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS session_high          DOUBLE PRECISION`);
     await this.pool.query(`ALTER TABLE signals ADD COLUMN IF NOT EXISTS session_low           DOUBLE PRECISION`);
@@ -367,6 +371,14 @@ class DatabaseService {
         FOREIGN KEY (portfolio_id) REFERENCES portfolios(id)
       )
     `);
+
+    // forced_close_pct: what % of a tag's analyst-visible trades were forced exits.
+    // Must stay below the CREATE TABLE above -- it previously sat with the
+    // other ALTERs further up the file, which made initialize() throw
+    // "relation analyst_rulebook does not exist" on a genuinely empty
+    // database. Existing deployments never hit it because the table was
+    // already there from an earlier boot.
+    await this.pool.query(`ALTER TABLE analyst_rulebook ADD COLUMN IF NOT EXISTS forced_close_pct DOUBLE PRECISION`);
 
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS analyst_combinations (
