@@ -1,6 +1,7 @@
 // gold-trader backend
 import express from 'express';
 import { EXIT_REASONS, FORCED_EXIT_REASONS_SQL } from './exitReasons.js';
+import { computeRegime, isCounterRegime, formatRegimeForPrompt, REGIME_DEFAULTS } from './regimeIndicator.js';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import twelveData from './twelveData.js';
@@ -50,6 +51,10 @@ app.use(express.json());
 let currentSignal      = null;
 let lastUpdate         = null;
 let lastKnownPrice     = null;
+// Latest regime reading, refreshed once per cycle after the day's close is
+// recorded. Cached because every hybrid decision and the analyst dashboard
+// read it, and it only changes when a new daily close lands.
+let currentRegime      = null;
 let lastCycleDecisions = null;
 let wasInTradingHours  = false;
 
@@ -717,6 +722,24 @@ async function openVetoShadow({ portfolio, decision, currentPrice, session = nul
 // ── Circuit-breaker helpers ────────────────────────────────────────────────
 
 // Current date in UAE (UTC+4, no DST) as YYYY-MM-DD.
+// Upsert today's close and recompute the regime from the stored series.
+// Failure here must never stop a trading cycle: a stale or absent regime
+// degrades to UNKNOWN, which blocks nothing.
+async function refreshRegime(price) {
+  try {
+    if (price != null) await database.recordDailyClose(uaeDate(), price, 'live');
+    const closes = await database.getDailyCloses(120);
+    const next = computeRegime(closes, REGIME_DEFAULTS);
+    if (currentRegime && next.state !== currentRegime.state) {
+      console.log(`🔄 [REGIME] ${currentRegime.state} → ${next.state} ` +
+        `(${next.momentumPct?.toFixed(2)}% over ${next.lookbackDays}d, threshold ±${next.thresholdPct}%)`);
+    }
+    currentRegime = next;
+  } catch (err) {
+    console.error(`❌ [REGIME] refresh failed: ${err.message}`);
+  }
+}
+
 function uaeDate() {
   return new Date(Date.now() + 4 * 3600000).toISOString().split('T')[0];
 }
@@ -904,6 +927,10 @@ async function generateSignalIfTradingHours() {
     const currentPrice   = marketData.h1.price || marketData.m30.price;
     const currentSession = getSession(new Date());
     lastKnownPrice = currentPrice;
+    // Record the day's close before anything else in the cycle can bail out.
+    // The regime series must not depend on whether the strategies traded --
+    // a quiet day is still a day the market moved.
+    await refreshRegime(currentPrice);
     updateSessionRange(currentPrice);
     marketData.sessionRange = getSessionRangeStr(currentPrice);
     const prevDayHL = await getOrFetchPrevDayHighLow();
@@ -1153,7 +1180,21 @@ async function generateSignalIfTradingHours() {
           const bucket = bRows[0] ?? null;
 
           // ── Deterministic branch classification (no LLM self-labelling) ──
-          const { qualified: rulebookQualified, direction: rulebookDirection } = classifyRulebookQualification(bucket, cfg);
+          let { qualified: rulebookQualified, direction: rulebookDirection } = classifyRulebookQualification(bucket, cfg);
+
+          // Counter-regime suppression, in code rather than in the prompt.
+          // The rulebook's buckets are all-history averages with no time
+          // dimension, so they can assert a direction the market stopped
+          // paying for weeks ago. FLAT and UNKNOWN suppress nothing --
+          // absence of a regime is not evidence for one.
+          let regimeSuppressed = null;
+          if (rulebookQualified && isCounterRegime(rulebookDirection, currentRegime)) {
+            regimeSuppressed = `${rulebookDirection} suppressed — regime is ${currentRegime.state} ` +
+              `(${currentRegime.momentumPct?.toFixed(2)}% over ${currentRegime.lookbackDays}d, day ${currentRegime.daysInState})`;
+            console.log(`🚫 [HYBRID] ${regimeSuppressed}`);
+            rulebookQualified = false;
+            rulebookDirection = null;
+          }
           const { status: overlayStatus, oppositionType: overlayOppositionType, opposingTrade: overlayOpposingTrade } =
             classifyOverlayStatus(overlayDecision, rulebookDirection, mechDecision);
           const { branch, llmNeeded } = classifyBranch({ rulebookQualified, overlayStatus, overlayOpposingTrade });
@@ -1165,6 +1206,7 @@ async function generateSignalIfTradingHours() {
               marketData, atr, portfolio: hyPortfolio, session: currentSession, price: currentPrice,
               overlayDecision, bucket, bucketDesc, cfg, branch,
               openPositions: openPos, riskUsed,
+              regime: currentRegime,
               // No journal fed back by design: the forward rulebook is this
               // bot's only learning input. hybrid_decisions below is pure
               // observability, never re-read into a future prompt.
@@ -1292,6 +1334,10 @@ async function generateSignalIfTradingHours() {
               cfRulebookRiskUsd: cfRulebook?.riskUsd ?? null, cfRulebookLots: cfRulebook?.lots ?? null,
               cfOverlayDirection: cfOverlay?.direction ?? null, cfOverlayEntry: cfOverlay?.entry ?? null,
               cfOverlayStop: cfOverlay?.stop ?? null, cfOverlayTarget: cfOverlay?.target ?? null, cfOverlayLots: cfOverlay?.lots ?? null,
+              regimeState: currentRegime?.state ?? null,
+              regimeMomentumPct: currentRegime?.momentumPct ?? null,
+              regimeDaysInState: currentRegime?.daysInState ?? null,
+              regimeSuppressed: regimeSuppressed,
             });
           } catch (journalErr) {
             console.error(`⚠️  [HYBRID] decision journal write failed (non-fatal): ${journalErr.message}`);
@@ -2001,6 +2047,42 @@ app.post('/api/mechanical-variants/maturation/run', async (req, res) => {
 // budget-exhausted misses, broken down per consumer (forward_labeler /
 // hybrid_maturation / mechanical_variant_maturation). This is what lets you
 // confirm the third maturation job did not add a third job's worth of usage.
+// Regime indicator — the daily-close series and the current 10-day reading.
+// Fed by daily_close, which is written every cycle regardless of whether any
+// account traded, so this is a property of the market rather than of the
+// bots' activity.
+app.get('/api/regime', async (req, res) => {
+  try {
+    const closes = await database.getDailyCloses(Number(req.query.days) || 120);
+    const regime = computeRegime(closes, REGIME_DEFAULTS);
+
+    // The series with each day's state, so the dashboard can draw where the
+    // flips happened rather than just today's label.
+    const history = [];
+    for (let end = REGIME_DEFAULTS.lookbackDays + 1; end <= closes.length; end++) {
+      const window = closes.slice(0, end);
+      const r = computeRegime(window, REGIME_DEFAULTS);
+      history.push({
+        date: window[window.length - 1].date,
+        close: window[window.length - 1].close,
+        momentum_pct: r.momentumPct,
+        state: r.state,
+      });
+    }
+
+    res.json({
+      regime,
+      config: REGIME_DEFAULTS,
+      closes_recorded: closes.length,
+      first_close: closes[0]?.date ?? null,
+      last_close: closes[closes.length - 1]?.date ?? null,
+      history,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/m1-cache/metrics', (req, res) => {
   res.json(getM1CacheMetrics());
 });
@@ -2560,6 +2642,16 @@ app.get('/api/pinned-lessons', async (req, res) => {
 
 // Top-level await: must connect to PostgreSQL before accepting requests.
 await database.init();
+
+// Seed daily_close from historical signals so the regime indicator works on
+// the first cycle rather than ten days from now. Never overwrites a live
+// reading, so this is safe to run on every boot.
+try {
+  const seeded = await database.backfillDailyClosesFromSignals();
+  console.log(`📈 [REGIME] daily_close seeded: ${seeded.written}/${seeded.candidates} days from signals history`);
+} catch (err) {
+  console.error(`❌ [REGIME] backfill failed: ${err.message}`);
+}
 
 // Attribution cutover — the instant this build's corrected accounting went
 // live. Recorded on first boot after deploy and never rewritten, so the

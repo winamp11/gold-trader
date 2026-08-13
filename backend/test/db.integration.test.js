@@ -162,6 +162,33 @@ describe('database write paths (live)', { skip: TEST_URL ? false : 'TEST_DATABAS
     assert.equal(JSON.parse(row.config_snapshot).entryWindowStartHour, 15);
   });
 
+  test('a backfilled close never overwrites a live one', async () => {
+    // Getting this precedence backwards silently replaces real closes with
+    // approximated ones. It is not a subtle failure downstream: during
+    // development an overwritten close produced a 145% ten-day momentum
+    // reading, which would have confirmed a regime instantly.
+    const date = '2019-01-02';   // far outside any real series
+    await db.recordDailyClose(date, 4390.0, 'live');
+    await db.recordDailyClose(date, 9999.0, 'backfill_signals');
+
+    let { rows } = await db.pool.query('SELECT close, source FROM daily_close WHERE date = $1', [date]);
+    assert.equal(Number(rows[0].close), 4390.0, 'backfill must not clobber a live close');
+    assert.equal(rows[0].source, 'live');
+
+    // A newer live price does supersede.
+    await db.recordDailyClose(date, 4400.0, 'live');
+    ({ rows } = await db.pool.query('SELECT close FROM daily_close WHERE date = $1', [date]));
+    assert.equal(Number(rows[0].close), 4400.0);
+
+    // And a backfill may still fill a genuine gap.
+    const gap = '2019-01-03';
+    await db.recordDailyClose(gap, 4100.0, 'backfill_signals');
+    ({ rows } = await db.pool.query('SELECT close FROM daily_close WHERE date = $1', [gap]));
+    assert.equal(Number(rows[0].close), 4100.0);
+
+    await db.pool.query('DELETE FROM daily_close WHERE date IN ($1,$2)', [date, gap]);
+  });
+
   test('saveMechanicalVariantDecisionOutcome persists once and is idempotent', async () => {
     const { rows: [decision] } = await db.pool.query(
       'SELECT id FROM mechanical_variant_decisions WHERE account = $1 LIMIT 1',

@@ -411,11 +411,113 @@ function Section({ id, title, count, defaultOpen = false, children }) {
 
 // ── Main component ────────────────────────────────────────────────────────────
 
+const REGIME_COLOR = { UP: '#22c55e', DOWN: '#ef4444', FLAT: '#94a3b8', UNKNOWN: '#64748b' };
+
+// Regime indicator. Shows the number, its age and whether it is confirmed —
+// not just a label. A bare state hides the distinction that matters most:
+// day 1 of a flip is where false positives live (July produced two), while a
+// confirmed run is what actually gates hybrid.
+function RegimePanel({ data }) {
+  const r = data?.regime;
+  const state = r?.state ?? 'UNKNOWN';
+  const color = REGIME_COLOR[state] ?? REGIME_COLOR.UNKNOWN;
+  const mom = r?.momentumPct;
+  const confirmed = r?.confirmed === true;
+
+  // Last 30 readings, oldest first — enough to show the July chop and the
+  // August break side by side.
+  const hist = (data?.history || []).slice(-30);
+  const vals = hist.map(h => h.momentum_pct).filter(v => v != null);
+  const bound = Math.max(6, ...vals.map(v => Math.abs(v)));
+
+  return (
+    <div className="analyst-card">
+      <div className="analyst-card__header">
+        <span className="analyst-card__title">Market regime</span>
+        <span className="analyst-card__count">
+          {r?.lookbackDays ?? 10}d momentum · ±{(r?.thresholdPct ?? 3).toFixed(1)}%
+        </span>
+      </div>
+
+      <div className="analyst-summary">
+        <div className="summary-card">
+          <div className="summary-card__label">State</div>
+          <div className="summary-card__val" style={{ color }}>{state}</div>
+          <div className="summary-card__sub">
+            {r?.daysInState != null
+              ? `day ${r.daysInState}${r.truncatedHistory ? '+' : ''}${r.previousState ? ` · was ${r.previousState}` : ''}`
+              : 'no reading'}
+          </div>
+        </div>
+
+        <div className="summary-card">
+          <div className="summary-card__label">Momentum</div>
+          <div className="summary-card__val" style={{ color }}>
+            {mom == null ? '—' : `${mom >= 0 ? '+' : ''}${mom.toFixed(2)}%`}
+          </div>
+          <div className="summary-card__sub">
+            {r?.distancePct != null && state !== 'FLAT' && state !== 'UNKNOWN'
+              ? `${r.distancePct >= 0 ? '+' : ''}${r.distancePct.toFixed(2)}% past threshold`
+              : 'within threshold'}
+          </div>
+        </div>
+
+        <div className="summary-card">
+          <div className="summary-card__label">Gating hybrid</div>
+          <div className="summary-card__val" style={{ color: confirmed ? color : REGIME_COLOR.FLAT }}>
+            {confirmed ? 'YES' : 'NO'}
+          </div>
+          <div className="summary-card__sub">
+            {confirmed
+              ? `counter-regime signals suppressed`
+              : `needs ${r?.confirmDays ?? 3} consecutive days`}
+          </div>
+        </div>
+
+        <div className="summary-card">
+          <div className="summary-card__label">Daily closes</div>
+          <div className="summary-card__val">{data?.closes_recorded ?? '—'}</div>
+          <div className="summary-card__sub">
+            {data?.first_close ? `${data.first_close} → ${data.last_close}` : 'none recorded'}
+          </div>
+        </div>
+      </div>
+
+      {hist.length > 0 && (
+        <div className="regime-strip">
+          {hist.map(h => {
+            const h_ = h.momentum_pct ?? 0;
+            const mag = Math.min(1, Math.abs(h_) / bound);
+            return (
+              <div
+                key={h.date}
+                className="regime-strip__bar"
+                title={`${h.date} · ${h_ >= 0 ? '+' : ''}${h_.toFixed(2)}% · ${h.state}`}
+              >
+                <div
+                  className="regime-strip__fill"
+                  style={{
+                    height: `${Math.max(4, mag * 100)}%`,
+                    background: REGIME_COLOR[h.state] ?? REGIME_COLOR.FLAT,
+                    alignSelf: h_ >= 0 ? 'flex-end' : 'flex-start',
+                  }}
+                />
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 export default function AnalystDashboard({ onBack }) {
   const [rulebook,     setRulebook]     = useState(null);
   const [pins,         setPins]         = useState([]);
   const [mechRulebook, setMechRulebook] = useState([]);
   const [fwdRulebook,  setFwdRulebook]  = useState([]);
+  const [regime,       setRegime]       = useState(null);
   const [filter,       setFilter]       = useState('all');
 
   const [lastUpdated,  setLastUpdated]  = useState(null);
@@ -423,19 +525,21 @@ export default function AnalystDashboard({ onBack }) {
 
   const fetchData = useCallback(async () => {
     try {
-      const [rbRes, pinRes, mechRes, fwdRes] = await Promise.all([
+      const [rbRes, pinRes, mechRes, fwdRes, regRes] = await Promise.all([
         fetch(`${API}/api/analyst/rulebook`),
         fetch(`${API}/api/pinned-lessons`),
         fetch(`${API}/api/analyst/mechanical-rulebook`),
         fetch(`${API}/api/analyst/forward-rulebook`),
+        fetch(`${API}/api/regime`),
       ]);
-      const [rbData, pinData, mechData, fwdData] = await Promise.all([
-        rbRes.json(), pinRes.json(), mechRes.json(), fwdRes.json()
+      const [rbData, pinData, mechData, fwdData, regimeData] = await Promise.all([
+        rbRes.json(), pinRes.json(), mechRes.json(), fwdRes.json(), regRes.json()
       ]);
       setRulebook(rbData);
       setPins(pinData.pinned || []);
       setMechRulebook(mechData.rows || []);
       setFwdRulebook(fwdData.rows || []);
+      setRegime(regimeData || null);
       setLastUpdated(new Date());
       setError(null);
     } catch {
@@ -487,6 +591,12 @@ export default function AnalystDashboard({ onBack }) {
       </header>
 
       <main className="analyst-main">
+
+        {/* Regime indicator — derived from daily_close, which is recorded every
+            day regardless of whether any account traded, so this reflects the
+            market rather than the bots' activity. Feeds hybrid: a CONFIRMED
+            regime suppresses counter-regime rulebook signals in code. */}
+        <RegimePanel data={regime} />
 
         {/* Summary bar */}
         <div className="analyst-summary">

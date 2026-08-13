@@ -558,6 +558,16 @@ class DatabaseService {
         created_at            TEXT NOT NULL DEFAULT TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
       )
     `);
+
+    // Regime context recorded on every hybrid decision, including no-trades.
+    // Needed to answer the question that decides whether this layer earns its
+    // place: how often does the LLM disagree with the regime when one is
+    // present? If that number is ~0, the regime is not informing judgement,
+    // it is replacing it -- and a lookup table would be cheaper.
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS regime_state         TEXT`);
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS regime_momentum_pct  DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS regime_days_in_state INTEGER`);
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS regime_suppressed    TEXT`);
     await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_hybrid_decisions_branch ON hybrid_decisions(decision_branch)`);
     await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_hybrid_decisions_cycle_ts ON hybrid_decisions(cycle_ts)`);
 
@@ -675,6 +685,22 @@ class DatabaseService {
       )
     `);
     await this.pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mvdo_decision_id ON mechanical_variant_decision_outcomes(decision_id)`);
+
+    // daily_close — one XAU/USD close per UAE calendar day, recorded whether
+    // or not any account traded that day. The regime indicator must not be a
+    // function of the bot's own activity: a quiet day is still a day the
+    // market moved, and deriving the series from trades or signals would make
+    // the trend read depend on how busy the strategies happened to be.
+    // Upserted every cycle, so the last price seen on a given UAE day wins.
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS daily_close (
+        date         TEXT PRIMARY KEY,   -- UAE calendar date, YYYY-MM-DD
+        close        DOUBLE PRECISION NOT NULL,
+        source       TEXT NOT NULL,      -- live | backfill_signals
+        recorded_at  TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
+      )
+    `);
 
     // market_candles_m1 — shared XAU/USD 1-minute candle cache. The ONE
     // stored copy of historical M1 data, so forwardLabeler/hybridMaturation/
@@ -1276,12 +1302,14 @@ class DatabaseService {
         rulebook_avg_max_up_4h, rulebook_avg_max_down_4h, rulebook_confidence, signals_agreed,
         cf_rulebook_direction, cf_rulebook_entry, cf_rulebook_stop, cf_rulebook_target,
         cf_rulebook_risk_usd, cf_rulebook_lots,
-        cf_overlay_direction, cf_overlay_entry, cf_overlay_stop, cf_overlay_target, cf_overlay_lots
+        cf_overlay_direction, cf_overlay_entry, cf_overlay_stop, cf_overlay_target, cf_overlay_lots,
+        regime_state, regime_momentum_pct, regime_days_in_state, regime_suppressed
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
         $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,
         $34,$35,$36,$37,$38,$39,
-        $40,$41,$42,$43,$44
+        $40,$41,$42,$43,$44,
+        $45,$46,$47,$48
       ) RETURNING id
     `, [
       d.signalId ?? null, d.cycleTs, d.decisionBranch, d.finalAction, d.finalRiskUsd ?? null, d.finalRiskPct ?? null,
@@ -1295,6 +1323,7 @@ class DatabaseService {
       d.cfRulebookDirection ?? null, d.cfRulebookEntry ?? null, d.cfRulebookStop ?? null, d.cfRulebookTarget ?? null,
       d.cfRulebookRiskUsd ?? null, d.cfRulebookLots ?? null,
       d.cfOverlayDirection ?? null, d.cfOverlayEntry ?? null, d.cfOverlayStop ?? null, d.cfOverlayTarget ?? null, d.cfOverlayLots ?? null,
+      d.regimeState ?? null, d.regimeMomentumPct ?? null, d.regimeDaysInState ?? null, d.regimeSuppressed ?? null,
     ]);
     return r.rows[0].id;
   }
@@ -1377,6 +1406,66 @@ class DatabaseService {
   }
 
   // ── market_candles_m1: shared M1 cache (see m1CandleCache.js) ────────────
+
+  // ── daily_close: the regime indicator's input series ────────────────────
+
+  // Upsert today's close. Called every trading cycle, so the final price seen
+  // on a UAE day is what persists. A live reading always beats a backfilled
+  // one, never the reverse -- otherwise a backfill pass could overwrite a
+  // genuine close with an interpolated one.
+  async recordDailyClose(date, close, source = 'live') {
+    if (close == null || !isFinite(Number(close))) return false;
+    const now = new Date().toISOString();
+    const r = await this.pool.query(`
+      INSERT INTO daily_close (date, close, source, recorded_at, updated_at)
+      VALUES ($1, $2, $3, $4, $4)
+      ON CONFLICT (date) DO UPDATE SET
+        close      = EXCLUDED.close,
+        source     = EXCLUDED.source,
+        updated_at = EXCLUDED.updated_at
+      -- Allow the write when the INCOMING row is live (a newer live price
+      -- always supersedes), or when the STORED row is not live (a backfill
+      -- may fill a gap). The one case that must never happen is a backfill
+      -- overwriting a live close, which is what the stored-side check
+      -- excludes. Getting this backwards silently replaces real closes with
+      -- approximated ones and corrupts the regime series.
+      WHERE EXCLUDED.source = 'live' OR daily_close.source <> 'live'
+    `, [date, Number(close), source, now]);
+    return r.rowCount > 0;
+  }
+
+  // Ascending by date -- computeRegime() requires that ordering.
+  async getDailyCloses(limit = 120) {
+    const { rows } = await this.pool.query(`
+      SELECT date, close, source FROM daily_close
+      ORDER BY date DESC
+      LIMIT $1
+    `, [limit]);
+    return rows.reverse().map(r => ({ date: r.date, close: Number(r.close), source: r.source }));
+  }
+
+  // One-time seed so the indicator is usable immediately rather than in ten
+  // days' time. Uses the last recorded price_at_signal of each UAE day from
+  // the signals table -- an approximation of the close, marked as such by its
+  // source, and never allowed to overwrite a live reading.
+  async backfillDailyClosesFromSignals() {
+    const { rows } = await this.pool.query(`
+      SELECT DISTINCT ON (d) d AS date, price AS close
+      FROM (
+        SELECT substring(timestamp from 1 for 10) AS d,
+               timestamp,
+               COALESCE(price_at_signal, entry_price) AS price
+        FROM signals
+        WHERE COALESCE(price_at_signal, entry_price) IS NOT NULL
+      ) x
+      ORDER BY d, timestamp DESC
+    `);
+    let written = 0;
+    for (const r of rows) {
+      if (await this.recordDailyClose(r.date, r.close, 'backfill_signals')) written++;
+    }
+    return { candidates: rows.length, written };
+  }
 
   async getM1Candles(symbol, startMs, endMs) {
     const { rows } = await this.pool.query(`

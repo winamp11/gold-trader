@@ -440,3 +440,36 @@
   /* subtitle collides with the title at phone widths */
   .analyst-header__sub { display: none; }
 }
+
+/* ── Regime indicator ──────────────────────────────────────────────────── */
+/* Sparkline of the last 30 daily momentum readings. Bars grow up from the
+   midline for positive momentum and down for negative, coloured by the state
+   that reading produced — so the July chop and the August break are legible
+   as shapes, not just as a current label. */
+.regime-strip {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  height: 56px;
+  margin-top: 12px;
+  padding: 6px 0;
+  border-top: 1px solid rgba(148, 163, 184, 0.15);
+  overflow-x: auto;
+}
+
+.regime-strip__bar {
+  flex: 1 1 0;
+  min-width: 6px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  height: 100%;
+}
+
+.regime-strip__fill {
+  width: 100%;
+  border-radius: 2px;
+  opacity: 0.85;
+}
+
+.regime-strip__bar:hover .regime-strip__fill { opacity: 1; }

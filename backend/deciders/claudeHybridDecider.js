@@ -17,6 +17,7 @@
 // cannot distort by relabelling its own outcomes after the fact.
 
 import { callDecider, validateIntent } from './claudeClient.js';
+import { formatRegimeForPrompt } from '../regimeIndicator.js';
 
 const SYSTEM = `\
 You trade gold (XAU/USD) for a paper account by reconciling two independent \
@@ -229,10 +230,15 @@ function formatMarket(marketData, atr, session, price) {
 export async function decide({
   marketData, atr, portfolio, session, price,
   overlayDecision, bucket, bucketDesc, cfg, branch,
-  openPositions = [], riskUsed = 0,
+  openPositions = [], riskUsed = 0, regime = null,
 }) {
   const userContent = [
     `DECISION BRANCH: ${branch}`,
+    '',
+    // Placed above the market data on purpose: the regime is context the
+    // rest of the prompt should be read through, and it is a computed fact,
+    // not something to be re-derived from the price action below.
+    formatRegimeForPrompt(regime),
     '',
     formatMarket(marketData, atr, session, price),
     '',
