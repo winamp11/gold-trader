@@ -13,7 +13,7 @@ import { decide as mechanicalDecide }    from './deciders/mechanicalDecider.js';
 import { decide as claudeOverlayDecide } from './deciders/claudeOverlayDecider.js';
 import { decide as claudeSoloDecide }    from './deciders/claudeSoloDecider.js';
 import { decide as claudeHybridDecide }  from './deciders/claudeHybridDecider.js';
-import { reflectDaily } from './deciders/reflector.js';
+import { reflectDaily, normalizeReflectMin, shouldReflectNow, REFLECT_PORTFOLIO_IDS } from './deciders/reflector.js';
 import { callDecider, todayCallCount, getLastCallUsage, PROVIDER, MODEL as LLM_MODEL } from './deciders/claudeClient.js';
 import { VALUE_PER_LOT } from './contractSpec.js';
 import { TAG_TAXONOMY } from './tagTaxonomy.js';
@@ -1455,20 +1455,95 @@ function startBackgroundSignalGeneration() {
 // ── Daily reflection cron — one batched LLM call at 21:15 UAE ────────────
 // Runs 15 min after the window close, so every position is closed and P&L
 // booked. Replaces ~15 per-trade calls with one.
+const REFLECT_STATE_KEY = 'last_reflect_run';
+
+// Last successful reflection, cached in memory but sourced from service_state
+// so a redeploy cannot make the job forget it already ran -- or, worse, forget
+// that it has NOT run for two weeks.
+let lastReflectRun = null;
+
+async function loadLastReflectRun() {
+  try {
+    const raw = await database.getServiceState(REFLECT_STATE_KEY);
+    lastReflectRun = raw ? JSON.parse(raw) : null;
+  } catch { lastReflectRun = null; }
+  return lastReflectRun;
+}
+
+function uaeDateOffset(days) {
+  return new Date(Date.now() + 4 * 3600000 + days * 86400000).toISOString().split('T')[0];
+}
+
+async function runDailyReflection(reason) {
+  const today = uaeDate();
+  console.log(`\n🪞 [DAILY REFLECTION] ${today} (${reason}) ─────────────────────────`);
+  const result = await reflectDaily(database.pool, { portfolioIds: REFLECT_PORTFOLIO_IDS });
+
+  // Only a clean run counts as "done for today". Recording the date on a
+  // failure would mark the day complete and skip it forever -- the journal
+  // stopping for two weeks with nothing surfaced is exactly the failure this
+  // guards against.
+  if (result?.error) {
+    console.error(`❌ [DAILY REFLECTION] ${today} failed: ${result.error} — will retry`);
+    return result;
+  }
+  lastReflectRun = {
+    date: today,
+    at: new Date().toISOString(),
+    written: result?.written ?? 0,
+    trades: result?.trades ?? 0,
+    vetoes: result?.vetoes ?? 0,
+    reason,
+  };
+  try {
+    await database.setServiceState(REFLECT_STATE_KEY, JSON.stringify(lastReflectRun));
+  } catch (err) {
+    console.error(`❌ [DAILY REFLECTION] could not persist run marker: ${err.message}`);
+  }
+  console.log(`🪞 [DAILY REFLECTION] ${today} complete — ${lastReflectRun.written} entries written`);
+  return result;
+}
+
 function startDailyReflector() {
-  const REFLECT_UAE_MIN = (parseInt(process.env.REFLECT_UAE_MIN) || (21 * 60 + 15));
-  let lastRunDate = null;
+  const REFLECT_UAE_MIN = normalizeReflectMin(
+    process.env.REFLECT_UAE_MIN,
+    msg => console.error(`⚠️  [REFLECTOR CONFIG] ${msg}`)
+  );
   console.log(`🪞 Starting daily reflector (${Math.floor(REFLECT_UAE_MIN / 60)}:${String(REFLECT_UAE_MIN % 60).padStart(2, '0')} UAE)...`);
 
-  setInterval(async () => {
-    const uae   = new Date(Date.now() + 4 * 3600000);
-    const mins  = uae.getUTCHours() * 60 + uae.getUTCMinutes();
-    const today = uaeDate();
-    if (lastRunDate === today || mins < REFLECT_UAE_MIN) return;
-    lastRunDate = today;   // set before awaiting so a slow run can't double-fire
-    console.log(`\n🪞 [DAILY REFLECTION] ${today} ─────────────────────────`);
-    await reflectDaily(database.pool);
-  }, 60 * 1000);
+  // A tick can outlive its interval when the LLM call is slow; without this a
+  // second tick starts while the first is still writing and both reflect the
+  // same trades.
+  let running = false;
+
+  const tick = async () => {
+    if (running) return;
+    try {
+      if (lastReflectRun === null) await loadLastReflectRun();
+      const uae  = new Date(Date.now() + 4 * 3600000);
+      const mins = uae.getUTCHours() * 60 + uae.getUTCMinutes();
+      const { due, reason } = shouldReflectNow({
+        lastRunDate: lastReflectRun?.date ?? null,
+        today:       uaeDate(),
+        yesterday:   uaeDateOffset(-1),
+        minsNow:     mins,
+        reflectMin:  REFLECT_UAE_MIN,
+      });
+      if (!due) return;
+      running = true;
+      await runDailyReflection(reason);
+    } catch (err) {
+      console.error(`❌ [DAILY REFLECTION] tick failed: ${err.message}`);
+    } finally {
+      running = false;
+    }
+  };
+
+  // Run once shortly after boot as well as on the minute. A process that is
+  // never alive during the scheduled window would otherwise lose that day
+  // permanently, which is how a fortnight of journal entries went missing.
+  setTimeout(tick, 90 * 1000);
+  setInterval(tick, 60 * 1000);
 }
 
 // ── Forward labeler cron — hourly, plus one pass shortly after boot ───────
@@ -2292,6 +2367,49 @@ app.post('/api/llm/verify', async (req, res) => {
 });
 
 // Manual trigger for the daily batch reflection (also runs at 21:15 UAE).
+// Reflector health. The journal stopped for 16 days with nothing surfacing
+// it: the scheduler was in-memory only, and a job that never runs produces no
+// error to notice. days_since_last_run is the number worth alarming on.
+app.get('/api/reflect/status', async (req, res) => {
+  try {
+    if (lastReflectRun === null) await loadLastReflectRun();
+    const today = uaeDate();
+    const last  = lastReflectRun?.date ?? null;
+    const daysSince = last
+      ? Math.round((Date.parse(today) - Date.parse(last)) / 86400000)
+      : null;
+
+    const { rows: [j] } = await database.pool.query(
+      `SELECT MAX(timestamp) AS newest, COUNT(*) AS total
+       FROM journal WHERE portfolio_id = ANY($1)`, [REFLECT_PORTFOLIO_IDS]
+    );
+    const { rows: [p] } = await database.pool.query(`
+      SELECT COUNT(*) AS pending
+      FROM trades t
+      WHERE t.portfolio_id = ANY($1)
+        AND t.exit_reason IS NOT NULL
+        AND t.exit_reason NOT IN ('NO_ENTRY', 'EXPIRED')
+        AND NOT EXISTS (
+          SELECT 1 FROM journal j
+          WHERE j.signal_or_trade_id = t.id
+            AND j.portfolio_id = t.portfolio_id
+            AND j.entry_type <> 'veto')`, [REFLECT_PORTFOLIO_IDS]);
+
+    res.json({
+      scheduled_uae_min: normalizeReflectMin(process.env.REFLECT_UAE_MIN),
+      portfolio_ids: REFLECT_PORTFOLIO_IDS,
+      last_run: lastReflectRun,
+      days_since_last_run: daysSince,
+      healthy: daysSince != null && daysSince <= 1,
+      newest_journal_entry: j?.newest ?? null,
+      journal_entries: Number(j?.total ?? 0),
+      trades_pending_reflection: Number(p?.pending ?? 0),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/reflect/daily', async (req, res) => {
   try {
     res.json(await reflectDaily(database.pool, { dryRun: req.query.dry_run === '1', limit: parseInt(req.query.limit) || undefined }));

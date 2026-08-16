@@ -68,6 +68,72 @@ function classifyOutcome(outcome, pnl) {
 
 const BATCH_LIMIT = 25;
 
+// Accounts the reflector writes journal entries for.
+//
+// claude_solo (3) was removed when solo was disabled on 2026-08-09: it no
+// longer trades, so reflecting on its history spends tokens producing lessons
+// nothing will ever read. Its existing entries are left untouched. Add the id
+// back here if solo is ever resumed.
+export const REFLECT_PORTFOLIO_IDS = [2];   // claude_overlay
+
+// Minutes-since-UAE-midnight at which the daily reflection runs. 21:15 UAE,
+// 15 minutes after the 21:00 window close, so every position is closed and
+// its P&L booked.
+export const REFLECT_DEFAULT_MIN = 21 * 60 + 15;
+
+/**
+ * Resolve the configured run time, defending against the unit confusion that
+ * silently disabled this job.
+ *
+ * The value is MINUTES SINCE MIDNIGHT, not HHMM. Setting it to "2115" — the
+ * obvious thing to write if you read the name as a clock time — produces a
+ * threshold that minutes-since-midnight (max 1439) can never reach, so the
+ * scheduler returns early forever and the journal simply stops, with no error
+ * anywhere. Out-of-range values now fall back to the default and say so.
+ */
+export function normalizeReflectMin(raw, warn = () => {}) {
+  if (raw == null || raw === '') return REFLECT_DEFAULT_MIN;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n)) {
+    warn(`REFLECT_UAE_MIN="${raw}" is not a number — using default ${REFLECT_DEFAULT_MIN}`);
+    return REFLECT_DEFAULT_MIN;
+  }
+  if (n < 0 || n > 1439) {
+    warn(
+      `REFLECT_UAE_MIN=${n} is outside 0-1439 (minutes since midnight, not HHMM) — ` +
+      `using default ${REFLECT_DEFAULT_MIN}. A value like 2115 can never be reached ` +
+      `and would disable daily reflection entirely.`
+    );
+    return REFLECT_DEFAULT_MIN;
+  }
+  return n;
+}
+
+/**
+ * Should the daily reflection run right now?
+ *
+ * Pure so the condition that broke can actually be tested. `lastRunDate` is
+ * the last UAE date a run completed, read from persistent storage rather than
+ * memory -- an in-memory value resets on every redeploy and cannot tell
+ * "already ran today" from "never ran".
+ *
+ * Two ways to become due:
+ *   - the normal one: it is past the scheduled minute and today has no run
+ *   - catch-up: the last run predates yesterday, so a whole day was already
+ *     missed. Time of day no longer matters -- waiting for the window risks
+ *     missing it again, and every missed day is lost work.
+ */
+export function shouldReflectNow({ lastRunDate, today, yesterday, minsNow, reflectMin }) {
+  if (lastRunDate === today) return { due: false, reason: 'already ran today' };
+  const missedAFullDay = !lastRunDate || lastRunDate < yesterday;
+  if (missedAFullDay) {
+    return { due: true, reason: lastRunDate ? `catch-up — last run ${lastRunDate}` : 'catch-up — never run' };
+  }
+  if (minsNow < reflectMin) return { due: false, reason: 'before the scheduled time' };
+  return { due: true, reason: 'scheduled' };
+}
+
+
 const BATCH_SYSTEM = `\
 You are writing a first-person trading journal for a gold (XAU/USD) paper-trading account.
 You are reviewing a full day of completed trades and resolved vetoes at once.
@@ -88,9 +154,10 @@ Output format — one object per item you were given, echoing its id exactly:
 // opts.dryRun — ignore the "not yet journaled" filter and skip all writes.
 // Exercises query → prompt → LLM → parse without mutating the journal, so the
 // batch path can be verified on a day whose trades are already reflected.
-export async function reflectDaily(pool, { dryRun = false, limit = BATCH_LIMIT } = {}) {
+export async function reflectDaily(pool, { dryRun = false, limit = BATCH_LIMIT, portfolioIds = REFLECT_PORTFOLIO_IDS } = {}) {
   try {
     const cap = Math.max(1, Math.min(limit, BATCH_LIMIT));
+    const ids = (portfolioIds && portfolioIds.length) ? portfolioIds : REFLECT_PORTFOLIO_IDS;
     const notJournaledTrade = dryRun ? '' : `
         AND NOT EXISTS (
           SELECT 1 FROM journal j
@@ -114,12 +181,12 @@ export async function reflectDaily(pool, { dryRun = false, limit = BATCH_LIMIT }
              t.max_price_during, t.min_price_during
       FROM trades t
       JOIN portfolios p ON p.id = t.portfolio_id
-      WHERE t.portfolio_id IN (2, 3)
+      WHERE t.portfolio_id = ANY($1)
         AND t.exit_reason IS NOT NULL
         AND t.exit_reason NOT IN ('NO_ENTRY', 'EXPIRED')${notJournaledTrade}
       ORDER BY t.exit_timestamp DESC
       LIMIT ${cap}
-    `);
+    `, [ids]);
 
     const { rows: shadows } = await pool.query(`
       SELECT v.id, v.portfolio_id, p.name AS portfolio_name, v.direction,
@@ -127,11 +194,11 @@ export async function reflectDaily(pool, { dryRun = false, limit = BATCH_LIMIT }
              v.would_be_outcome, v.would_be_pnl
       FROM veto_shadows v
       JOIN portfolios p ON p.id = v.portfolio_id
-      WHERE v.portfolio_id IN (2, 3)
+      WHERE v.portfolio_id = ANY($1)
         AND v.would_be_outcome IS NOT NULL${notJournaledShadow}
       ORDER BY v.timestamp DESC
       LIMIT ${cap}
-    `);
+    `, [ids]);
 
     if (trades.length === 0 && shadows.length === 0) {
       console.log('🪞 [reflectDaily] nothing to reflect on');
