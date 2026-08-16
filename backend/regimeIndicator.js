@@ -7,23 +7,37 @@
 // silent -- and every hybrid trade fell through to the overlay_only branch.
 // This module supplies the missing axis.
 //
-// Deliberately one number and one threshold. On the 53 days of history
-// available, +/-3% over 10 days fires three episodes:
+// WHAT THIS IS NOW: a LABEL, not a predictor. It answers "what had the market
+// done over the last 10 trading days" -- a fact about the past, useful for
+// knowing which conditions an observation was collected under. It does not
+// forecast, and nothing in the pipeline acts on it.
 //
-//   Jul 9      UP   +3.04%            1 day   false — FLAT again next day
-//   Jul 17-20  DOWN -4.35% / -3.32%   2 days  false — price then bounced
-//                                             3994 -> 4126 within two days
-//   Aug 6-13   UP   +4.21% -> +9.46%  6+ days real — same day mechanical
-//                                             flipped to 100% long
+// VALIDATED AND FAILED, 2026-08-16. The parameters below were originally
+// chosen by eye from 53 days (2026-06 to 2026-08). Tested afterwards on two
+// years of daily closes -- 527 rows, 467 of them out-of-sample, 21 confirmed
+// episodes -- a confirmed regime carried no forward information:
 //
-// The threshold alone is therefore NOT clean through July: it produces two
-// false episodes for every true one. What separates them is persistence,
-// which is why suppression requires `confirmDays` while reporting does not.
-// Anything more elaborate would be fitted to a single observed flip.
+//   mean forward return vs the unconditional base rate, out-of-sample
+//     confirmed UP :  +0.08% at 5d,  -0.37% at 10d,  +0.52% at 20d
+//
+// The sign flips with the horizon. Confirmed DOWN had only 5 episodes, so it
+// is untested rather than disproven. Counter-regime suppression was removed
+// from server.js as a result.
+//
+// Two things the same study showed about the fitting window itself: it
+// produced regime episodes at roughly twice the out-of-sample rate, and its
+// gold/EUR-USD correlation ran 0.799 against a 0.335 two-year norm. The
+// parameters were fitted to an unusual stretch of market, which is the
+// likeliest reason they did not generalise. Treat any future parameter
+// chosen from a short recent window with the same suspicion.
+//
+// Still worth keeping: this is how EUR/strong/bullish was caught holding 151
+// observations drawn from three days entirely inside one rally. Provenance is
+// a real use; prediction is not.
 //
 // The model is never asked to judge the regime -- same principle as
 // hybridBranchClassifier.js's no-self-labelling rule. It is computed here,
-// from daily closes, and handed to the LLM as a fact.
+// from daily closes, and handed to the LLM as descriptive context.
 //
 // Pure functions only: no I/O, no clock, no randomness. The caller supplies
 // the series.
@@ -33,20 +47,14 @@ export const REGIME_STATES = ['UP', 'DOWN', 'FLAT', 'UNKNOWN'];
 export const REGIME_DEFAULTS = {
   lookbackDays: 10,   // "any news event takes time to flow through the market"
   thresholdPct: 3.0,
-  // A state must persist this many consecutive days before it is allowed to
-  // SUPPRESS anything. Reporting is unaffected -- the raw state is always
-  // shown, and the LLM always sees day 1.
+  // Consecutive days a directional state must hold before `confirmed` is set.
+  // Nothing acts on `confirmed` any more -- it is reported, not enforced --
+  // so this now only affects what the dashboard and the prompt describe.
   //
-  // On the 53 days available, +/-3% fires three episodes: UP for 1 day
-  // (Jul 9, +3.04%, straight back to FLAT), DOWN for 2 days (Jul 17-20,
-  // -4.35%/-3.32%, immediately before a bounce from 3994 to 4126), and UP
-  // from Aug 6 running 6+ days. Both false episodes died within two days;
-  // the real one persisted. Requiring three days removes both without
-  // touching the threshold, at the cost of two days' lag on a true signal.
-  //
-  // This is still fitted -- three episodes is not a sample. It is a weaker
-  // form of fitting than tuning the threshold, because it only ever errs
-  // toward doing nothing.
+  // Out-of-sample it removes a lot: 56% of directional episodes lasted two
+  // days or fewer and never reached confirmation. That makes it a reasonable
+  // description of "persistent", but persistence turned out not to predict
+  // anything, so do not mistake the filtering for an edge.
   confirmDays: 3,
 };
 
@@ -155,10 +163,15 @@ export function computeRegime(closes, cfg = {}) {
 /**
  * Is `direction` fighting the regime?
  *
- * Used as a hard gate in code rather than as prompt guidance: a rule written
- * into a system prompt is a suggestion, and a long enough reasoning chain
- * argues its way past it. FLAT and UNKNOWN never block anything -- absence of
- * a regime is not evidence for one.
+ * NOT WIRED TO ANYTHING as of 2026-08-16. It was hybrid's counter-regime gate
+ * until out-of-sample testing showed a confirmed regime carries no forward
+ * information (see the header). Kept, with its tests, because the decision is
+ * reversible and the implementation is correct for what it does.
+ *
+ * Do not re-wire it on the strength of a good week. The sample unit is
+ * confirmed EPISODES, not days or trades: two years produced 16 UP and 5 DOWN.
+ * Restoring this needs a fresh out-of-sample test on a materially larger
+ * episode count, not a fresh opinion.
  */
 export function isCounterRegime(direction, regime) {
   if (!direction || !regime) return false;
@@ -203,14 +216,18 @@ export function formatRegimeForPrompt(regime) {
 
   lines.push(
     '',
-    'How to use this. It informs SIZE and STOP WIDTH, not direction — direction',
-    'is already decided upstream. Counter-regime trades are blocked in code before',
-    'you see them, so you never need to argue about that.',
-    '  - Confirmed regime (days in state >= 3): pullbacks are more likely noise than',
-    '    reversal. Favour the wider end of the ATR stop band and holding the position.',
-    '  - Fresh flip (days in state <= 2): the signal may be a false positive. Reduce',
-    '    size rather than changing direction.',
-    '  - FLAT: no trend edge. Favour tighter stops, smaller size, quicker exits.',
+    'This is CONTEXT, not an instruction. It describes what the market has',
+    'already done over the last 10 trading days. It does not predict what',
+    'happens next, and you should not treat it as though it does.',
+    '',
+    'Tested on two years of daily closes: after a confirmed regime, forward',
+    'returns beat the unconditional base rate by +0.08%, -0.37% and +0.52% at',
+    '5, 10 and 20 days — a sign that flips with the horizon, on 21 episodes.',
+    'There is no measured edge here. Earlier versions of this block told you to',
+    'widen stops in a confirmed regime; that advice was removed because nothing',
+    'supports it.',
+    '',
+    'Weigh it as one descriptive input among the others, or ignore it.',
   );
 
   return lines.join('\n');

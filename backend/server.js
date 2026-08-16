@@ -1,7 +1,7 @@
 // gold-trader backend
 import express from 'express';
 import { EXIT_REASONS, FORCED_EXIT_REASONS_SQL } from './exitReasons.js';
-import { computeRegime, isCounterRegime, formatRegimeForPrompt, REGIME_DEFAULTS } from './regimeIndicator.js';
+import { computeRegime, formatRegimeForPrompt, REGIME_DEFAULTS } from './regimeIndicator.js';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import twelveData from './twelveData.js';
@@ -1183,21 +1183,26 @@ async function generateSignalIfTradingHours() {
           const bucket = bRows[0] ?? null;
 
           // ── Deterministic branch classification (no LLM self-labelling) ──
-          let { qualified: rulebookQualified, direction: rulebookDirection } = classifyRulebookQualification(bucket, cfg);
+          const { qualified: rulebookQualified, direction: rulebookDirection } = classifyRulebookQualification(bucket, cfg);
 
-          // Counter-regime suppression, in code rather than in the prompt.
-          // The rulebook's buckets are all-history averages with no time
-          // dimension, so they can assert a direction the market stopped
-          // paying for weeks ago. FLAT and UNKNOWN suppress nothing --
-          // absence of a regime is not evidence for one.
-          let regimeSuppressed = null;
-          if (rulebookQualified && isCounterRegime(rulebookDirection, currentRegime)) {
-            regimeSuppressed = `${rulebookDirection} suppressed — regime is ${currentRegime.state} ` +
-              `(${currentRegime.momentumPct?.toFixed(2)}% over ${currentRegime.lookbackDays}d, day ${currentRegime.daysInState})`;
-            console.log(`🚫 [HYBRID] ${regimeSuppressed}`);
-            rulebookQualified = false;
-            rulebookDirection = null;
-          }
+          // Counter-regime suppression was REMOVED on 2026-08-16 after the
+          // rule failed out-of-sample validation. Two years of daily closes
+          // (527 rows, 21 confirmed episodes) showed a confirmed regime
+          // carries no forward information: the mean 5/10/20-row return
+          // after confirmed UP beat the unconditional base rate by +0.08,
+          // -0.37 and +0.52 percentage points, a sign that flips with the
+          // horizon. Suppression assumed counter-regime trades fare worse
+          // during a confirmed regime; that premise is unsupported, so the
+          // gate was deleting signals on a belief the data does not carry.
+          //
+          // The indicator itself is kept, as a LABEL. Knowing which regime
+          // an observation was collected in is a fact, not a forecast, and
+          // it is how EUR/strong/bullish was caught holding 151 rows drawn
+          // from three days inside one rally.
+          //
+          // Restoring the gate needs new evidence, not a new opinion:
+          // confirmed episodes are the sample unit, and at the observed
+          // arrival rate a usable count is years away on this instrument.
           const { status: overlayStatus, oppositionType: overlayOppositionType, opposingTrade: overlayOpposingTrade } =
             classifyOverlayStatus(overlayDecision, rulebookDirection, mechDecision);
           const { branch, llmNeeded } = classifyBranch({ rulebookQualified, overlayStatus, overlayOpposingTrade });
@@ -1340,7 +1345,10 @@ async function generateSignalIfTradingHours() {
               regimeState: currentRegime?.state ?? null,
               regimeMomentumPct: currentRegime?.momentumPct ?? null,
               regimeDaysInState: currentRegime?.daysInState ?? null,
-              regimeSuppressed: regimeSuppressed,
+              // Retained and always null since 2026-08-16: the column is the
+              // record that suppression is off, and rows written before that
+              // date keep whatever it did.
+              regimeSuppressed: null,
             });
           } catch (journalErr) {
             console.error(`⚠️  [HYBRID] decision journal write failed (non-fatal): ${journalErr.message}`);

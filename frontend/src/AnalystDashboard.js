@@ -530,7 +530,7 @@ function RegimePanel({ data }) {
       <div className="analyst-card__header">
         <span className="analyst-card__title">Market regime</span>
         <span className="analyst-card__count">
-          {r?.lookbackDays ?? 10}d price change · ±{(r?.thresholdPct ?? 3).toFixed(1)}%
+          {r?.lookbackDays ?? 10}d price change · ±{(r?.thresholdPct ?? 3).toFixed(1)}% · descriptive only
         </span>
       </div>
 
@@ -558,14 +558,18 @@ function RegimePanel({ data }) {
         </div>
 
         <div className="summary-card">
-          <div className="summary-card__label">Gating hybrid</div>
+          {/* Was "Gating hybrid". The counter-regime gate was removed on
+              2026-08-16 after out-of-sample testing found no forward edge, so
+              a card implying this drives trading would now be a lie. It shows
+              persistence instead — a description, which is all this is. */}
+          <div className="summary-card__label">Persistence</div>
           <div className="summary-card__val" style={{ color: confirmed ? color : REGIME_COLOR.FLAT }}>
-            {confirmed ? 'YES' : 'NO'}
+            {confirmed ? 'CONFIRMED' : 'BRIEF'}
           </div>
           <div className="summary-card__sub">
             {confirmed
-              ? `${state === 'UP' ? 'SHORT' : 'LONG'} rulebook signals blocked`
-              : `needs ${r?.confirmDays ?? 3} days in a row`}
+              ? `held ${r?.confirmDays ?? 3}+ days · informational only`
+              : `under ${r?.confirmDays ?? 3} days in a row`}
           </div>
         </div>
 

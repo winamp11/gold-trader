@@ -159,10 +159,23 @@ describe('formatRegimeForPrompt', () => {
     assert.match(text, /state\s*:\s*UP/);
   });
 
-  test('states plainly that direction is not the LLM\'s to change', () => {
+  test('presents itself as context, and gives no instruction', () => {
+    // The block used to tell the model to widen stops in a confirmed regime.
+    // Two years of out-of-sample data showed a confirmed regime carries no
+    // forward information (+0.08/-0.37/+0.52 pp vs base rate), so that advice
+    // was unsupported. This pins the ABSENCE of it: prescriptive language
+    // here is a claim about the future, and we do not have one to make.
     const text = formatRegimeForPrompt(computeRegime(flat(30)));
-    assert.match(text, /SIZE and STOP WIDTH, not direction/);
-    assert.match(text, /blocked in code/);
+    assert.match(text, /CONTEXT, not an instruction/);
+    assert.match(text, /does not predict/i);
+    assert.ok(!/blocked in code/.test(text), 'suppression no longer exists');
+    assert.ok(!/Favour the wider end/.test(text), 'stop-width advice was removed');
+    assert.ok(!/Reduce\s+size/.test(text), 'sizing advice was removed');
+  });
+
+  test('states the measured result rather than asserting an edge', () => {
+    const text = formatRegimeForPrompt(computeRegime(flat(30)));
+    assert.match(text, /no measured edge/i);
   });
 
   test('UNKNOWN tells the model not to infer a regime itself', () => {
