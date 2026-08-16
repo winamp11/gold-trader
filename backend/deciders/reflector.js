@@ -66,7 +66,15 @@ function classifyOutcome(outcome, pnl) {
 // Self-healing: selection is "has no journal row", not "closed today", so a
 // failed run is picked up by the next one. Capped per run to bound prompt size.
 
-const BATCH_LIMIT = 25;
+// Items per run, applied to trades and vetoes separately -- so 8 means up to
+// 16 entries and roughly 400 + 16*220 output tokens.
+//
+// Was 25 (up to 50 items, capped at 8000 tokens), which reliably exceeded the
+// 90s LLM timeout once a backlog built up: every attempt failed, and because a
+// failed run is deliberately not recorded as done, the scheduler retried it
+// every minute. Small batches complete comfortably; a backlog is drained by
+// running repeatedly rather than by one large call.
+export const BATCH_LIMIT = 8;
 
 // Accounts the reflector writes journal entries for.
 //

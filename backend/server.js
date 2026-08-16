@@ -13,7 +13,10 @@ import { decide as mechanicalDecide }    from './deciders/mechanicalDecider.js';
 import { decide as claudeOverlayDecide } from './deciders/claudeOverlayDecider.js';
 import { decide as claudeSoloDecide }    from './deciders/claudeSoloDecider.js';
 import { decide as claudeHybridDecide }  from './deciders/claudeHybridDecider.js';
-import { reflectDaily, normalizeReflectMin, shouldReflectNow, REFLECT_PORTFOLIO_IDS } from './deciders/reflector.js';
+import {
+  reflectDaily, normalizeReflectMin, shouldReflectNow,
+  REFLECT_PORTFOLIO_IDS, BATCH_LIMIT as REFLECT_BATCH_LIMIT,
+} from './deciders/reflector.js';
 import { callDecider, todayCallCount, getLastCallUsage, PROVIDER, MODEL as LLM_MODEL } from './deciders/claudeClient.js';
 import { VALUE_PER_LOT } from './contractSpec.js';
 import { TAG_TAXONOMY } from './tagTaxonomy.js';
@@ -1457,6 +1460,16 @@ function startBackgroundSignalGeneration() {
 // booked. Replaces ~15 per-trade calls with one.
 const REFLECT_STATE_KEY = 'last_reflect_run';
 
+// Guard rails on retrying. A failed run is intentionally not recorded as
+// "done for today" so it gets picked up again -- but without a cooldown that
+// turns a persistent failure into a once-a-minute LLM call forever. That is
+// exactly what happened when an oversized batch began timing out: three paid
+// calls in three minutes, and it would not have stopped on its own.
+const REFLECT_RETRY_COOLDOWN_MS = 15 * 60 * 1000;
+const REFLECT_MAX_FAILURES_PER_DAY = 5;
+const REFLECT_MAX_RUNS_PER_DAY     = 15;
+let reflectAttempts = { date: null, failures: 0, runs: 0, lastAttemptMs: 0, gaveUpLogged: false };
+
 // Last successful reflection, cached in memory but sourced from service_state
 // so a redeploy cannot make the job forget it already ran -- or, worse, forget
 // that it has NOT run for two weeks.
@@ -1487,6 +1500,16 @@ async function runDailyReflection(reason) {
     console.error(`❌ [DAILY REFLECTION] ${today} failed: ${result.error} — will retry`);
     return result;
   }
+  // A run that filled its batch almost certainly left more behind. Recording
+  // the date would mark the day complete and stall the backlog for 24h, so
+  // leave it unmarked and let the next tick continue draining.
+  const filledBatch = (result?.written ?? 0) > 0 &&
+    ((result?.trades ?? 0) >= REFLECT_BATCH_LIMIT || (result?.vetoes ?? 0) >= REFLECT_BATCH_LIMIT);
+  if (filledBatch) {
+    console.log(`🪞 [DAILY REFLECTION] ${today} wrote ${result.written} — batch full, more pending`);
+    return result;
+  }
+
   lastReflectRun = {
     date: today,
     at: new Date().toISOString(),
@@ -1530,8 +1553,32 @@ function startDailyReflector() {
         reflectMin:  REFLECT_UAE_MIN,
       });
       if (!due) return;
+
+      const today = uaeDate();
+      if (reflectAttempts.date !== today) {
+        reflectAttempts = { date: today, failures: 0, runs: 0, lastAttemptMs: 0, gaveUpLogged: false };
+      }
+      if (reflectAttempts.failures >= REFLECT_MAX_FAILURES_PER_DAY ||
+          reflectAttempts.runs     >= REFLECT_MAX_RUNS_PER_DAY) {
+        if (!reflectAttempts.gaveUpLogged) {
+          console.error(
+            `⛔ [DAILY REFLECTION] ${today} stopping for today — ` +
+            `${reflectAttempts.failures} failure(s), ${reflectAttempts.runs} run(s). ` +
+            `See /api/reflect/status.`
+          );
+          reflectAttempts.gaveUpLogged = true;
+        }
+        return;
+      }
+      const since = Date.now() - reflectAttempts.lastAttemptMs;
+      if (reflectAttempts.failures > 0 && since < REFLECT_RETRY_COOLDOWN_MS) return;
+
       running = true;
-      await runDailyReflection(reason);
+      reflectAttempts.runs++;
+      reflectAttempts.lastAttemptMs = Date.now();
+      const result = await runDailyReflection(reason);
+      if (result?.error) reflectAttempts.failures++;
+      else reflectAttempts.failures = 0;
     } catch (err) {
       console.error(`❌ [DAILY REFLECTION] tick failed: ${err.message}`);
     } finally {
@@ -2401,6 +2448,10 @@ app.get('/api/reflect/status', async (req, res) => {
       last_run: lastReflectRun,
       days_since_last_run: daysSince,
       healthy: daysSince != null && daysSince <= 1,
+      attempts_today: reflectAttempts.date === today
+        ? { runs: reflectAttempts.runs, failures: reflectAttempts.failures }
+        : { runs: 0, failures: 0 },
+      batch_limit: REFLECT_BATCH_LIMIT,
       newest_journal_entry: j?.newest ?? null,
       journal_entries: Number(j?.total ?? 0),
       trades_pending_reflection: Number(p?.pending ?? 0),
