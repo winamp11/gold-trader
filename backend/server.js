@@ -1551,6 +1551,7 @@ function startDailyReflector() {
         yesterday:   uaeDateOffset(-1),
         minsNow:     mins,
         reflectMin:  REFLECT_UAE_MIN,
+        draining:    reflectAttempts.date === uaeDate() && reflectAttempts.runs > 0,
       });
       if (!due) return;
 

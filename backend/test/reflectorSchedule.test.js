@@ -91,6 +91,15 @@ describe('shouldReflectNow', () => {
     assert.match(r.reason, /catch-up — last run 2026-07-31/);
   });
 
+  test('a backlog drain reports progress, not "never run"', () => {
+    // Mid-drain the day is deliberately left unmarked so the backlog keeps
+    // going. Reporting "never run" on every pass makes steady progress look
+    // like a stuck loop in the logs.
+    const r = shouldReflectNow({ ...base, lastRunDate: null, minsNow: 0, draining: true });
+    assert.equal(r.due, true);
+    assert.equal(r.reason, 'draining backlog');
+  });
+
   test('a first-ever run catches up rather than waiting for the window', () => {
     const r = shouldReflectNow({ ...base, lastRunDate: null, minsNow: 0 });
     assert.equal(r.due, true);

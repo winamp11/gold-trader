@@ -131,10 +131,16 @@ export function normalizeReflectMin(raw, warn = () => {}) {
  *     missed. Time of day no longer matters -- waiting for the window risks
  *     missing it again, and every missed day is lost work.
  */
-export function shouldReflectNow({ lastRunDate, today, yesterday, minsNow, reflectMin }) {
+export function shouldReflectNow({ lastRunDate, today, yesterday, minsNow, reflectMin, draining = false }) {
   if (lastRunDate === today) return { due: false, reason: 'already ran today' };
   const missedAFullDay = !lastRunDate || lastRunDate < yesterday;
   if (missedAFullDay) {
+    // `draining` distinguishes "we are mid-backlog and deliberately have not
+    // marked today complete" from "we have genuinely never run". Without it
+    // every run of a long drain logs "never run", which reads like a stuck
+    // loop rather than steady progress -- the exact thing someone scanning
+    // these logs is trying to tell apart.
+    if (draining) return { due: true, reason: 'draining backlog' };
     return { due: true, reason: lastRunDate ? `catch-up — last run ${lastRunDate}` : 'catch-up — never run' };
   }
   if (minsNow < reflectMin) return { due: false, reason: 'before the scheduled time' };
