@@ -143,6 +143,22 @@ export function todayCallCount() { return _counter.count; }
 let _lastUsage = null;
 export function getLastCallUsage() { return _lastUsage ? { ..._lastUsage } : null; }
 
+// ── Last-call raw response text (overwritten after every call) ───────────
+// Same single-slot pattern, and safe for the same reason: the cycle awaits
+// each decider in turn, so no two calls are ever in flight together.
+//
+// This exists because callDecider() returns the PARSED object, and on a
+// parse/validation/truncation failure there is no parsed object to return —
+// it returns a synthetic noTrade instead and the model's actual words survive
+// only in a console.error, i.e. in log retention. Those are precisely the
+// responses worth keeping. Set in callDecider() before any parsing is
+// attempted, and cleared at the start of every call so an API error can never
+// leave the PREVIOUS call's text sitting here to be journaled as this one's.
+//
+// Only callDecider() maintains it; the reflection paths are untouched.
+let _lastRaw = null;
+export function getLastRawResponse() { return _lastRaw; }
+
 // ── Schema validation ───────────────────────────────────────────────────
 
 function validateDecision(obj) {
@@ -310,9 +326,14 @@ export async function callDecider({ systemPrompt, userContent, deciderName, mode
   // Starts as 'api_error'; updated as we pass each parsing stage.
   let failureType = 'api_error';
 
+  // Cleared up front: if chat() throws, the journal must record "no response"
+  // rather than the previous cycle's text.
+  _lastRaw = null;
+
   try {
     const { text: raw, usage } = await chat({ systemPrompt, userContent, maxTokens: MAX_TOKENS, modelOverride });
 
+    _lastRaw   = raw;
     _lastUsage = usage;
     console.log(
       `📊 [${deciderName}] tokens: in=${usage.input}` +

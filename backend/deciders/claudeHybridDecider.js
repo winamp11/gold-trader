@@ -16,8 +16,24 @@
 // is its only learning input, precisely because that is the one source it
 // cannot distort by relabelling its own outcomes after the fact.
 
-import { callDecider, validateIntent } from './claudeClient.js';
+import { createHash } from 'node:crypto';
+
+import { callDecider, validateIntent, getLastRawResponse, getLastCallUsage } from './claudeClient.js';
 import { formatRegimeForPrompt } from '../regimeIndicator.js';
+
+// Bump on ANY change to the rendered prompt -- the SYSTEM block below, the
+// user-content assembly in decide(), or any of the format* helpers.
+//
+// The system-prompt hash is computed automatically and catches edits to SYSTEM
+// on its own; this constant exists for the half it cannot see, since the user
+// content is rebuilt from live market data every cycle and hashing it would
+// produce a different value every time. Without a manual marker, a change to
+// formatMarket() is indistinguishable in the data from a change in the market.
+//
+// v1 = the prompt as it stood at the Release 1 observability cutover: regime
+// block present, DXY unlabelled, spread described as charged rather than
+// assumed. Release 1 deliberately changes NONE of that.
+export const HYBRID_PROMPT_VERSION = 'v1';
 
 const SYSTEM = `\
 You trade gold (XAU/USD) for a paper account by reconciling two independent \
@@ -227,6 +243,23 @@ function formatMarket(marketData, atr, session, price) {
 
 // ── Decider ──────────────────────────────────────────────────────────────
 
+// First 12 hex chars of the SHA-256 of the static system prompt. Computed once
+// at module load -- SYSTEM is a constant, so this cannot drift at runtime.
+export const SYSTEM_PROMPT_SHA = createHash('sha256').update(SYSTEM).digest('hex').slice(0, 12);
+
+/**
+ * Returns { decision, renderedPrompt, systemPromptSha, promptVersion,
+ *           rawResponse, usage }.
+ *
+ * The decision is what the caller acts on; everything alongside it is
+ * observability. Returning the rendered prompt rather than re-deriving it at
+ * the call site is deliberate: a reconstruction can drift from what was
+ * actually sent, and a record that might be wrong is worse than none.
+ *
+ * rawResponse is the model's unparsed text. It is present even when the
+ * decision is a synthetic noTrade from a parse/validation/API failure, which
+ * is the case it exists for.
+ */
 export async function decide({
   marketData, atr, portfolio, session, price,
   overlayDecision, bucket, bucketDesc, cfg, branch,
@@ -251,5 +284,16 @@ export async function decide({
     `Given the branch above, size and place this trade (or add to your position). Do not re-litigate which branch this is.`,
   ].join('\n');
 
-  return await callDecider({ systemPrompt: SYSTEM, userContent, deciderName: 'hybrid', validator: validateIntent });
+  const decision = await callDecider({
+    systemPrompt: SYSTEM, userContent, deciderName: 'hybrid', validator: validateIntent,
+  });
+
+  return {
+    decision,
+    renderedPrompt:  userContent,
+    systemPromptSha: SYSTEM_PROMPT_SHA,
+    promptVersion:   HYBRID_PROMPT_VERSION,
+    rawResponse:     getLastRawResponse(),
+    usage:           getLastCallUsage(),
+  };
 }

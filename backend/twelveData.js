@@ -280,6 +280,17 @@ class TwelveDataService {
         return {
           interval,
           price:       currentPrice,
+          // Datetime of the source candle these indicator values were computed
+          // on, straight from the API response. Carried through so freshness
+          // can be judged per timeframe against that timeframe's own bar
+          // interval -- a 4h candle three hours old is current, not stale, so
+          // a single global max-age would be meaningless. Nothing consumes
+          // this for decisions yet; it is recorded only.
+          //
+          // All four indicator series for one interval come from the same bar,
+          // so any of them carries the same datetime; rsi is used as the
+          // primary with the others as fallbacks in case one series is absent.
+          datetime:    rsi.datetime ?? macd.datetime ?? atr.datetime ?? adx.datetime ?? null,
           rsi:         f(rsi.rsi),
           macd:        f(macd.macd),
           macd_signal: f(macd.macd_signal),

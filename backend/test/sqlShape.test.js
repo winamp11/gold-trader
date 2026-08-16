@@ -189,10 +189,37 @@ describe('SQL write paths', () => {
       'mechanical_variant_decisions',
       'mechanical_variant_decision_outcomes',
       'hybrid_decisions',
+      'hybrid_skips',
       'trades',
       'signals',
     ]) {
       assert.ok(tables.has(required), `no parsed INSERT into ${required}`);
+    }
+  });
+
+  test('the hybrid decision journal still records what the model saw and said', () => {
+    // These columns are the whole point of the Release 1 observability work:
+    // without them a hybrid decision is reconstructible only from its
+    // ingredients, and the model's actual words survive nowhere but log
+    // retention. They are easy to drop by accident in a later refactor of a
+    // 72-column INSERT, and nothing else in this suite would notice — arity
+    // stays self-consistent when a column and its placeholder go together.
+    const insert = STATIC_INSERTS.find(i => i.table === 'hybrid_decisions');
+    assert.ok(insert, 'no parsed INSERT into hybrid_decisions');
+    for (const col of [
+      'prompt_version',
+      'system_prompt_sha',
+      'rendered_user_prompt',
+      'raw_response',
+      'parsed_decision',
+      'llm_called',
+      'nearest_same_dir_distance_atr',
+      'config_version',
+    ]) {
+      assert.ok(
+        insert.columns.includes(col),
+        `hybrid_decisions INSERT no longer records "${col}"`
+      );
     }
   });
 

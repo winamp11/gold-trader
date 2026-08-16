@@ -18,7 +18,8 @@ import {
   REFLECT_PORTFOLIO_IDS, BATCH_LIMIT as REFLECT_BATCH_LIMIT,
 } from './deciders/reflector.js';
 import { callDecider, todayCallCount, getLastCallUsage, PROVIDER, MODEL as LLM_MODEL } from './deciders/claudeClient.js';
-import { VALUE_PER_LOT } from './contractSpec.js';
+import { VALUE_PER_LOT, SPREAD_POINTS } from './contractSpec.js';
+import { candleAgeSec, nearestSameDirDistanceAtr, uaeMidnightUtcIso } from './hybridObservability.js';
 import { TAG_TAXONOMY } from './tagTaxonomy.js';
 import { runAnalysis, formatRulebookPrompt, adxBucket, rsiBucket } from './analyst.js';
 import { runForwardLabeling } from './forwardLabeler.js';
@@ -747,6 +748,9 @@ function uaeDate() {
   return new Date(Date.now() + 4 * 3600000).toISOString().split('T')[0];
 }
 
+// Observability helpers live in hybridObservability.js — pure, injected clock,
+// and unit-tested there rather than regex-matched through this file.
+
 // True if the circuit breaker fired for this portfolio today.
 function isHaltedToday(portfolioId) {
   const s = circuitBreakerState[portfolioId];
@@ -1147,30 +1151,59 @@ async function generateSignalIfTradingHours() {
         const inMondayBlock = uaeDow === 1 && uaeHour >= cfg.mondayBlockStartHour && uaeHour < cfg.mondayBlockEndHour;
         const inFridayBlock = uaeDow === 5 && uaeHour >= cfg.fridayBlockStartHour && uaeHour < cfg.fridayBlockEndHour;
 
-        let skip = null;
-        if (inMondayBlock)                                    skip = `Monday block (${cfg.mondayBlockStartHour}:00-${cfg.mondayBlockEndHour}:00 UAE) — indicators still settling after the weekend`;
-        else if (inFridayBlock)                               skip = `Friday block (${cfg.fridayBlockStartHour}:00-${cfg.fridayBlockEndHour}:00 UAE) — confirmed weak window, 25% WR historically`;
-        else if (hybridDay.stoppedReason)                     skip = `stood down: ${hybridDay.stoppedReason}`;
-        else if (isHaltedToday(hyPortfolio.id))               skip = 'circuit breaker active';
-        else if (openPos.length >= cfg.maxOpenPositions)      skip = `position cap ${openPos.length}/${cfg.maxOpenPositions}`;
-        else if (riskLeft < 50)                               skip = `risk budget exhausted ($${riskUsed.toFixed(0)}/$${riskBudget.toFixed(0)})`;
+        // skipCode is a stable enum for grouping; skip is the human string,
+        // which embeds live numbers and so cannot be grouped on.
+        let skip = null, skipCode = null;
+        if (inMondayBlock)                               { skipCode = 'MONDAY_BLOCK';    skip = `Monday block (${cfg.mondayBlockStartHour}:00-${cfg.mondayBlockEndHour}:00 UAE) — indicators still settling after the weekend`; }
+        else if (inFridayBlock)                          { skipCode = 'FRIDAY_BLOCK';    skip = `Friday block (${cfg.fridayBlockStartHour}:00-${cfg.fridayBlockEndHour}:00 UAE) — confirmed weak window, 25% WR historically`; }
+        else if (hybridDay.stoppedReason)                { skipCode = 'STOOD_DOWN';      skip = `stood down: ${hybridDay.stoppedReason}`; }
+        else if (isHaltedToday(hyPortfolio.id))          { skipCode = 'CIRCUIT_BREAKER'; skip = 'circuit breaker active'; }
+        else if (openPos.length >= cfg.maxOpenPositions) { skipCode = 'POSITION_CAP';    skip = `position cap ${openPos.length}/${cfg.maxOpenPositions}`; }
+        else if (riskLeft < 50)                          { skipCode = 'RISK_EXHAUSTED';  skip = `risk budget exhausted ($${riskUsed.toFixed(0)}/$${riskBudget.toFixed(0)})`; }
 
         // Entry throttle is read from the DB, not memory: in-memory state resets
         // to "never traded" on every redeploy, which silently bypassed the gate.
+        //
+        // The same query also counts today's entries -- one round trip rather
+        // than two, and the count is the real number from `trades` rather than
+        // hybridDay.runsBanked, which counts give-back SERIES banked, not
+        // entries. Still gated on !skip, as before: a cycle already blocked by
+        // an earlier guard journals no entry count, so querying for one would
+        // be a wasted round trip on every skipped cycle.
+        let entriesToday = null;
         if (!skip) {
           const { rows: lastRows } = await database.pool.query(
-            `SELECT timestamp FROM trades WHERE portfolio_id = $1 ORDER BY timestamp DESC LIMIT 1`,
-            [hyPortfolio.id]
+            `SELECT MAX(timestamp) AS last_ts,
+                    COUNT(*) FILTER (WHERE timestamp >= $2) AS entries_today
+               FROM trades WHERE portfolio_id = $1`,
+            [hyPortfolio.id, uaeMidnightUtcIso(uaeDate())]
           );
-          const lastMs = lastRows[0] ? new Date(lastRows[0].timestamp).getTime() : 0;
+          entriesToday = Number(lastRows[0]?.entries_today ?? 0);
+          const lastMs = lastRows[0]?.last_ts ? new Date(lastRows[0].last_ts).getTime() : 0;
           const waited = Date.now() - lastMs;
           if (lastMs && waited < cfg.entryIntervalMin * 60000) {
+            skipCode = 'ENTRY_THROTTLE';
             skip = `entry throttle — ${Math.ceil((cfg.entryIntervalMin * 60000 - waited) / 60000)} min to go`;
           }
         }
 
         if (skip) {
           console.log(`⏸️  [HYBRID] no entry — ${skip}`);
+          // Journal the blocked cycle. Previously this produced a log line and
+          // nothing else, so guard frequencies were not recoverable from the
+          // database at all. Non-fatal: a journal failure must never stop the
+          // cycle, exactly like the decision journal below.
+          try {
+            await database.saveHybridSkip({
+              cycleTs: new Date().toISOString(), uaeDate: uaeDate(),
+              skipCode, skipReason: skip,
+              session: currentSession ?? null, price: currentPrice ?? null,
+              openPositions: openPos.length, riskUsed, riskLeft,
+              configVersion: configFingerprint(cfg),
+            });
+          } catch (skipErr) {
+            console.error(`⚠️  [HYBRID] skip journal write failed (non-fatal): ${skipErr.message}`);
+          }
         } else {
           const sess = currentSession ?? 'unknown';
           const adxB = adxBucket(marketData.h4?.adx);
@@ -1209,8 +1242,12 @@ async function generateSignalIfTradingHours() {
 
           let hyDecision;
           let vetoOrReductionReason = null;
+          // Observability only -- populated on LLM branches, left null on the
+          // deterministic ones. llmCalled disambiguates the two, so a null
+          // prompt never has to be read as "recorded before the migration".
+          let promptRecord = null;
           if (llmNeeded) {
-            hyDecision = await claudeHybridDecide({
+            const hy = await claudeHybridDecide({
               marketData, atr, portfolio: hyPortfolio, session: currentSession, price: currentPrice,
               overlayDecision, bucket, bucketDesc, cfg, branch,
               openPositions: openPos, riskUsed,
@@ -1219,6 +1256,8 @@ async function generateSignalIfTradingHours() {
               // bot's only learning input. hybrid_decisions below is pure
               // observability, never re-read into a future prompt.
             });
+            hyDecision   = hy.decision;
+            promptRecord = hy;
           } else {
             // Deterministic NO_TRADE rules per spec — no token spent.
             const reasons = {
@@ -1321,6 +1360,12 @@ async function generateSignalIfTradingHours() {
           // ── Journal every evaluation that reached this point ─────────────
           // Pure observability — nothing here is ever read back into a future
           // decision. Logged regardless of branch or outcome.
+          //
+          // Candle ages are measured against the moment the journal row is
+          // written rather than the moment of the fetch: within one cycle the
+          // difference is the duration of the LLM call, and the age that
+          // matters is the age of the data the decision was made on.
+          const nowMs = Date.now();
           try {
             await database.saveHybridDecision({
               signalId, cycleTs: new Date().toISOString(), decisionBranch: branch,
@@ -1349,6 +1394,50 @@ async function generateSignalIfTradingHours() {
               // record that suppression is off, and rows written before that
               // date keep whatever it did.
               regimeSuppressed: null,
+
+              // ── Release 1 observability — none of this feeds a decision ──
+              promptVersion:      promptRecord?.promptVersion   ?? null,
+              systemPromptSha:    promptRecord?.systemPromptSha ?? null,
+              renderedUserPrompt: promptRecord?.renderedPrompt  ?? null,
+              rawResponse:        promptRecord?.rawResponse     ?? null,
+              // The decision object as returned, including the synthetic
+              // noTrade produced by a parse/validation/API failure — that
+              // pairing with rawResponse is the point of storing both.
+              parsedDecision:     JSON.stringify(hyDecision),
+              llmCalled:          llmNeeded,
+              tokensIn:           promptRecord?.usage?.input      ?? null,
+              tokensOut:          promptRecord?.usage?.output     ?? null,
+              tokensCacheRead:    promptRecord?.usage?.cache_read ?? null,
+
+              // Provenance stamp: a compile-time constant today, so every row
+              // reads 0.30. It exists so rows stay distinguishable if the
+              // assumption ever changes.
+              assumedSpreadPoints: SPREAD_POINTS,
+
+              // Facts about the moment that the prompt does NOT carry.
+              // Baseline for comparison if they are added in Release 3.
+              entriesToday,
+              adrValue:        adrValue ?? null,
+              adrConsumedPct:  mechSignal.adrConsumedPct ?? null,
+
+              candleTsH4:  marketData.h4?.datetime  ?? null,
+              candleTsH1:  marketData.h1?.datetime  ?? null,
+              candleTsM30: marketData.m30?.datetime ?? null,
+              candleTsM5:  marketData.m5?.datetime  ?? null,
+              candleAgeSecH4:  candleAgeSec(marketData.h4?.datetime,  nowMs),
+              candleAgeSecH1:  candleAgeSec(marketData.h1?.datetime,  nowMs),
+              candleAgeSecM30: candleAgeSec(marketData.m30?.datetime, nowMs),
+              candleAgeSecM5:  candleAgeSec(marketData.m5?.datetime,  nowMs),
+
+              // Measured against the direction actually decided; null on a
+              // NO_TRADE, since "how close to an existing entry" has no
+              // meaning without a proposed direction.
+              nearestSameDirDistanceAtr: nearestSameDirDistanceAtr(
+                finalDirection, currentPrice, openPos, atr?.h1
+              ),
+
+              configVersion:  configFingerprint(cfg),
+              configSnapshot: JSON.stringify(cfg),
             });
           } catch (journalErr) {
             console.error(`⚠️  [HYBRID] decision journal write failed (non-fatal): ${journalErr.message}`);

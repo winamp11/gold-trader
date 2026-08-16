@@ -571,6 +571,120 @@ class DatabaseService {
     await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_hybrid_decisions_branch ON hybrid_decisions(decision_branch)`);
     await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_hybrid_decisions_cycle_ts ON hybrid_decisions(cycle_ts)`);
 
+    // ── Release 1: observability only ────────────────────────────────────
+    // None of the columns below feeds a decision. They exist because until
+    // now the journal recorded the INGREDIENTS of a hybrid decision but not
+    // what the model was actually shown, and not what it actually replied.
+    // Three months from now, "why did it do that" has to be answerable from
+    // the row, not from Railway log retention.
+    //
+    // Every column is nullable. Rows written before this migration keep NULL,
+    // which is correct: the prompt genuinely was not recorded for those.
+
+    // What the model was shown. rendered_user_prompt is the exact string sent,
+    // returned by the decider rather than reconstructed at the call site --
+    // a reconstruction can drift from what was really sent, and a record that
+    // might be wrong is worse than no record.
+    //
+    // The system prompt is static and ~4KB, so it is stored as a hash, not a
+    // copy on every row. prompt_version covers the user-content half, which
+    // changes with the market every cycle and so cannot be usefully hashed.
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS prompt_version       TEXT`);
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS system_prompt_sha    TEXT`);
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS rendered_user_prompt TEXT`);
+
+    // What the model replied. raw_response is the unparsed text: it is present
+    // even when parsed_decision holds a synthetic noTrade from a parse,
+    // validation or API failure, which is the case it exists for.
+    // llm_called separates the three LLM branches from the three resolved
+    // deterministically -- without it a NULL prompt is ambiguous between
+    // "no LLM call" and "call made before this migration".
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS raw_response         TEXT`);
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS parsed_decision      TEXT`);
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS llm_called           BOOLEAN`);
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS tokens_in            INTEGER`);
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS tokens_out           INTEGER`);
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS tokens_cache_read    INTEGER`);
+
+    // Cost assumption in force at decision time. Today this is a compile-time
+    // constant (contractSpec.js SPREAD_POINTS) and every row will read 0.30 --
+    // it is a provenance stamp, so that if the assumption ever changes, rows
+    // either side of the change remain distinguishable.
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS assumed_spread_points DOUBLE PRECISION`);
+
+    // Facts about the moment that the prompt does NOT currently carry.
+    // Recorded now so that if they are ever added to the prompt (Release 3),
+    // there is a pre-change baseline to compare against.
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS entries_today        INTEGER`);
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS adr_value            DOUBLE PRECISION`);
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS adr_consumed_pct     DOUBLE PRECISION`);
+
+    // Source-candle datetimes and their age at decision time, per timeframe.
+    // Per timeframe on purpose: freshness is only meaningful against a
+    // timeframe's own bar interval, so a single global age column could not
+    // support the Release 2 guard.
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS candle_ts_h4         TEXT`);
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS candle_ts_h1         TEXT`);
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS candle_ts_m30        TEXT`);
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS candle_ts_m5         TEXT`);
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS candle_age_sec_h4    INTEGER`);
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS candle_age_sec_h1    INTEGER`);
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS candle_age_sec_m30   INTEGER`);
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS candle_age_sec_m5    INTEGER`);
+
+    // Distance from the current price to the nearest OPEN same-direction
+    // entry, in H1 ATR units. This is the measurement that must precede any
+    // clustering threshold: the tolerance cannot be chosen from a
+    // distribution that has never been recorded. ATR-normalised because $2 is
+    // a wide cluster in quiet conditions and nothing in volatile ones.
+    //
+    // NULL when flat, or when no open position shares the direction. Expect a
+    // sparse column: it is only non-null once hybrid already holds a
+    // same-direction position, which the 3-position cap and the entry
+    // throttle both make uncommon. Months, not weeks, before it can support
+    // a threshold. NOTHING enforces on this in Release 1.
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS nearest_same_dir_distance_atr DOUBLE PRECISION`);
+
+    // Same purpose as the columns already on mechanical_variant_decisions:
+    // keep configuration eras from being silently pooled in analysis.
+    // hybrid_decisions had neither.
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS config_version       TEXT`);
+    await this.pool.query(`ALTER TABLE hybrid_decisions ADD COLUMN IF NOT EXISTS config_snapshot      TEXT`);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_hybrid_decisions_prompt_version ON hybrid_decisions(prompt_version)`);
+
+    // ── hybrid_skips — the cycles that never reached a decision ───────────
+    // A guard-blocked cycle previously produced a console.log and nothing
+    // else, so the frequencies that matter most for interpreting hybrid's
+    // record -- how often the entry throttle binds, how often the position
+    // cap or risk budget blocks, how often the Monday/Friday windows fire --
+    // were not recoverable from the database at all.
+    //
+    // Deliberately a separate table rather than rows in hybrid_decisions: a
+    // skip has no branch, no rulebook bucket and no decision, and widening
+    // the decision journal with a mostly-null row shape would make every
+    // existing query say "AND final_action IS NOT NULL" to stay correct.
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS hybrid_skips (
+        id              SERIAL PRIMARY KEY,
+        cycle_ts        TEXT NOT NULL,
+        uae_date        TEXT NOT NULL,
+        -- Stable enum for grouping. The human string in skip_reason embeds
+        -- live numbers ("entry throttle — 12 min to go", "position cap 3/3"),
+        -- so GROUP BY on it would produce one row per distinct countdown.
+        skip_code       TEXT NOT NULL,
+        skip_reason     TEXT NOT NULL,
+        session         TEXT,
+        price           DOUBLE PRECISION,
+        open_positions  INTEGER,
+        risk_used       DOUBLE PRECISION,
+        risk_left       DOUBLE PRECISION,
+        config_version  TEXT,
+        created_at      TEXT NOT NULL DEFAULT TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+      )
+    `);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_hybrid_skips_uae_date ON hybrid_skips(uae_date)`);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_hybrid_skips_code ON hybrid_skips(skip_code)`);
+
     // mechanical_variant_decisions — INSERT-ONLY, immutable decision journal
     // for mechanical_prime/mechanical_session. One row per account per
     // Mechanical TRADE signal (RED cycles need no gating, mirroring
@@ -1314,13 +1428,27 @@ class DatabaseService {
         cf_rulebook_direction, cf_rulebook_entry, cf_rulebook_stop, cf_rulebook_target,
         cf_rulebook_risk_usd, cf_rulebook_lots,
         cf_overlay_direction, cf_overlay_entry, cf_overlay_stop, cf_overlay_target, cf_overlay_lots,
-        regime_state, regime_momentum_pct, regime_days_in_state, regime_suppressed
+        regime_state, regime_momentum_pct, regime_days_in_state, regime_suppressed,
+        prompt_version, system_prompt_sha, rendered_user_prompt,
+        raw_response, parsed_decision, llm_called,
+        tokens_in, tokens_out, tokens_cache_read,
+        assumed_spread_points, entries_today, adr_value, adr_consumed_pct,
+        candle_ts_h4, candle_ts_h1, candle_ts_m30, candle_ts_m5,
+        candle_age_sec_h4, candle_age_sec_h1, candle_age_sec_m30, candle_age_sec_m5,
+        nearest_same_dir_distance_atr, config_version, config_snapshot
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
         $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,
         $34,$35,$36,$37,$38,$39,
         $40,$41,$42,$43,$44,
-        $45,$46,$47,$48
+        $45,$46,$47,$48,
+        $49,$50,$51,
+        $52,$53,$54,
+        $55,$56,$57,
+        $58,$59,$60,$61,
+        $62,$63,$64,$65,
+        $66,$67,$68,$69,
+        $70,$71,$72
       ) RETURNING id
     `, [
       d.signalId ?? null, d.cycleTs, d.decisionBranch, d.finalAction, d.finalRiskUsd ?? null, d.finalRiskPct ?? null,
@@ -1335,8 +1463,31 @@ class DatabaseService {
       d.cfRulebookRiskUsd ?? null, d.cfRulebookLots ?? null,
       d.cfOverlayDirection ?? null, d.cfOverlayEntry ?? null, d.cfOverlayStop ?? null, d.cfOverlayTarget ?? null, d.cfOverlayLots ?? null,
       d.regimeState ?? null, d.regimeMomentumPct ?? null, d.regimeDaysInState ?? null, d.regimeSuppressed ?? null,
+      d.promptVersion ?? null, d.systemPromptSha ?? null, d.renderedUserPrompt ?? null,
+      d.rawResponse ?? null, d.parsedDecision ?? null, d.llmCalled ?? null,
+      d.tokensIn ?? null, d.tokensOut ?? null, d.tokensCacheRead ?? null,
+      d.assumedSpreadPoints ?? null, d.entriesToday ?? null, d.adrValue ?? null, d.adrConsumedPct ?? null,
+      d.candleTsH4 ?? null, d.candleTsH1 ?? null, d.candleTsM30 ?? null, d.candleTsM5 ?? null,
+      d.candleAgeSecH4 ?? null, d.candleAgeSecH1 ?? null, d.candleAgeSecM30 ?? null, d.candleAgeSecM5 ?? null,
+      d.nearestSameDirDistanceAtr ?? null, d.configVersion ?? null, d.configSnapshot ?? null,
     ]);
     return r.rows[0].id;
+  }
+
+  // ── Hybrid skip journal ────────────────────────────────────────────────
+  // One row per cycle blocked by a guard before any decision was reached.
+  // INSERT-only; nothing reads it back into a decision.
+
+  async saveHybridSkip(s) {
+    await this.pool.query(`
+      INSERT INTO hybrid_skips (
+        cycle_ts, uae_date, skip_code, skip_reason, session, price,
+        open_positions, risk_used, risk_left, config_version
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+    `, [
+      s.cycleTs, s.uaeDate, s.skipCode, s.skipReason, s.session ?? null, s.price ?? null,
+      s.openPositions ?? null, s.riskUsed ?? null, s.riskLeft ?? null, s.configVersion ?? null,
+    ]);
   }
 
   // ── Mechanical-variant decision journal (mechanical_prime/mechanical_session) ──
