@@ -22,10 +22,23 @@ import {
 describe('candleAgeSec', () => {
   const now = Date.parse('2026-08-16T14:05:00Z');
 
-  test('a naive Twelve Data datetime is read as UTC', () => {
-    // The API returns "2026-08-16 14:00:00" with no zone designator. Read as
-    // local time on a non-UTC host this would be hours out.
-    assert.equal(candleAgeSec('2026-08-16 14:00:00', now), 300);
+  test('REGRESSION: a naive Twelve Data datetime is UTC+10, not UTC', () => {
+    // Shipped wrong on 2026-08-17 and caught within the hour in production:
+    // getMarketDataBulk sends no `timezone` param, so the API applies its own
+    // default of UTC+10 for XAU/USD. Reading the value as UTC made every age
+    // about -36000s.
+    //
+    // The original version of this test asserted the UTC reading and passed,
+    // because it checked a synthetic string against a synthetic clock -- both
+    // carrying the same wrong assumption. The live sample below is the fix for
+    // that: it is a real bar, at a real observed time.
+    assert.equal(candleAgeSec('2026-08-16 14:00:00', now), 300 + 10 * 3600);
+
+    // Observed in production: at 06:20:49Z the M5 bar was "2026-08-17 16:15:00".
+    // A 5-minute bar, so a few hundred seconds old -- never several hours.
+    const observed = candleAgeSec('2026-08-17 16:15:00', Date.parse('2026-08-17T06:20:49Z'));
+    assert.equal(observed, 349);
+    assert.ok(observed > 0 && observed < 3600, `M5 bar age out of range: ${observed}s`);
   });
 
   test('an ISO datetime with an explicit zone is honoured, not re-stamped', () => {
@@ -48,8 +61,26 @@ describe('candleAgeSec', () => {
   });
 
   test('a feed clock ahead of ours yields a negative age rather than a clamp', () => {
-    // Worth being able to see in the data — clamping would hide it.
+    // Worth being able to see in the data — clamping would hide it. Written
+    // with an explicit Z so it tests the sign handling only, and cannot double
+    // as an accidental assertion about the naive-datetime offset.
     assert.equal(candleAgeSec('2026-08-16T14:10:00Z', now), -300);
+  });
+
+  test('every live timeframe reads as a plausible age, none deeply negative', () => {
+    // The shape of the bug: a wrong offset makes ages hugely negative across
+    // the board rather than failing loudly. Real production datetimes from
+    // 2026-08-17T06:20:49Z, each bounded by its own timeframe.
+    const at = Date.parse('2026-08-17T06:20:49Z');
+    const bars = [['h4', '2026-08-17 15:00:00', 5 * 3600],
+                  ['h1', '2026-08-17 16:00:00', 2 * 3600],
+                  ['m30','2026-08-17 16:00:00', 2 * 3600],
+                  ['m5', '2026-08-17 16:15:00', 1 * 3600]];
+    for (const [tf, dt, maxAge] of bars) {
+      const age = candleAgeSec(dt, at);
+      assert.ok(age > 0,      `${tf} age must be positive, got ${age}s`);
+      assert.ok(age < maxAge, `${tf} age ${age}s exceeds its bar interval`);
+    }
   });
 });
 

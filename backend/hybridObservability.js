@@ -15,6 +15,21 @@
 //
 // Pure: no I/O, no module state, no randomness. The clock is always injected.
 
+// Offset Twelve Data stamps its naive datetimes with for XAU/USD.
+//
+// getMarketDataBulk() sends no `timezone` parameter, so the API applies its
+// own default -- UTC+10, not UTC. Confirmed against production on 2026-08-17:
+// at 06:20:49Z the M5 bar was labelled "2026-08-17 16:15:00". Read as UTC that
+// is an age of -35650s; read as UTC+10 it is 349s, which is what a 5-minute
+// bar should be.
+//
+// Handled here, at the parse site, rather than by adding `timezone=UTC` to the
+// request. That looks like the cleaner fix but it shifts H4 bar boundaries,
+// which moves H4 RSI/ADX, which moves hybrid's rulebook bucket and mechanical's
+// signal -- a live behaviour change. If the request is ever changed, delete
+// this constant and the tests below will fail loudly, which is the point.
+const API_NAIVE_DATETIME_OFFSET = '+10:00';
+
 /**
  * Age in whole seconds of a source candle at `nowMs`.
  *
@@ -23,18 +38,22 @@
  * exact inversion of the truth and the kind of value a freshness guard would
  * later trust. Null is honest and a guard can refuse on it.
  *
- * Twelve Data returns datetimes like "2026-08-16 14:00:00" with no timezone
- * designator; the account is configured for UTC, so 'Z' is appended when one
- * is absent. A datetime that already carries an offset is left alone.
+ * Twelve Data returns datetimes like "2026-08-17 16:15:00" with no timezone
+ * designator. A naive value is read at API_NAIVE_DATETIME_OFFSET above; one
+ * that already carries an offset is honoured as written.
  *
  * A negative age is returned as-is rather than clamped: it means the feed's
- * clock is ahead of ours, which is a real condition worth seeing in the data.
+ * clock is genuinely ahead of ours, which is worth seeing in the data rather
+ * than hiding. Note that an offset mistake shows up exactly this way -- a
+ * column of large negative ages means the parse is wrong, not the feed.
  */
 export function candleAgeSec(datetime, nowMs = Date.now()) {
   if (typeof datetime !== 'string' || datetime.trim() === '') return null;
   const trimmed = datetime.trim();
   const hasZone = /[Zz]$|[+-]\d{2}:?\d{2}$/.test(trimmed);
-  const iso = hasZone ? trimmed.replace(' ', 'T') : `${trimmed.replace(' ', 'T')}Z`;
+  const iso = hasZone
+    ? trimmed.replace(' ', 'T')
+    : `${trimmed.replace(' ', 'T')}${API_NAIVE_DATETIME_OFFSET}`;
   const ms = new Date(iso).getTime();
   if (!isFinite(ms)) return null;
   return Math.round((nowMs - ms) / 1000);
