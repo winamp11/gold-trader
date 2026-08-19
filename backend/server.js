@@ -2282,11 +2282,19 @@ app.get('/api/regime', async (req, res) => {
     for (let end = REGIME_DEFAULTS.lookbackDays + 1; end <= closes.length; end++) {
       const window = closes.slice(0, end);
       const r = computeRegime(window, REGIME_DEFAULTS);
+      const bar = window[window.length - 1];
       history.push({
-        date: window[window.length - 1].date,
-        close: window[window.length - 1].close,
+        date: bar.date,
+        close: bar.close,
         momentum_pct: r.momentumPct,
         state: r.state,
+        // The current UAE day's row is rewritten by refreshRegime() on every
+        // cycle with the LIVE price, so while the day is running it is not a
+        // close -- it is "right now" carrying today's date, and its momentum
+        // and state can still change before the session ends. Flagged here
+        // rather than derived in the browser so the UAE day boundary has one
+        // definition, not two.
+        provisional: bar.date === uaeDate(),
       });
     }
 

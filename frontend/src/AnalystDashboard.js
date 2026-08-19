@@ -483,10 +483,22 @@ function RegimeChart({ history, thresholdPct }) {
           const x = PAD_L + i * (plotW / hist.length) + 1;
           const top = v >= 0 ? y(v) : y(0);
           const hh = Math.max(2, Math.abs(y(v) - y(0)));
+          // Today's bar is the LIVE price under today's date, not a close —
+          // it keeps moving until the session ends and its state can still
+          // flip. Drawn hollow so it is never read as a settled day.
+          const close = h.close != null
+            ? `$${Number(h.close).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+            : 'n/a';
+          const label = h.provisional
+            ? `${h.date} · ${close} live, not yet closed · ${v >= 0 ? '+' : ''}${v.toFixed(2)}% · ${h.state} (provisional)`
+            : `${h.date} · close ${close} · ${v >= 0 ? '+' : ''}${v.toFixed(2)}% · ${h.state}`;
           return (
             <rect key={h.date} x={x} y={top} width={barW} height={hh} rx="2"
-                  fill={REGIME_COLOR[h.state] ?? REGIME_COLOR.FLAT}>
-              <title>{`${h.date} · ${v >= 0 ? '+' : ''}${v.toFixed(2)}% · ${h.state}`}</title>
+                  fill={h.provisional ? 'transparent' : (REGIME_COLOR[h.state] ?? REGIME_COLOR.FLAT)}
+                  stroke={h.provisional ? (REGIME_COLOR[h.state] ?? REGIME_COLOR.FLAT) : 'none'}
+                  strokeWidth={h.provisional ? 1.5 : 0}
+                  strokeDasharray={h.provisional ? '2 2' : undefined}>
+              <title>{label}</title>
             </rect>
           );
         })}
@@ -508,6 +520,9 @@ function RegimeChart({ history, thresholdPct }) {
         ))}
         <span className="regime-chart__note">
           each bar = one trading day&apos;s 10-day price change
+          {hist[hist.length - 1]?.provisional
+            ? ' · hollow bar = today, still live (not a close)'
+            : ''}
         </span>
       </div>
     </div>
