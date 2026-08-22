@@ -25,7 +25,7 @@ import { runForwardLabeling } from './forwardLabeler.js';
 import { runHybridMaturation } from './hybridMaturation.js';
 import { computeBranchAnalytics } from './hybridAnalytics.js';
 import { getM1CacheMetrics, cleanupOldM1Candles } from './m1CandleCache.js';
-import { CONFIG_SCHEMA, getBotConfig, saveBotConfig, HYBRID_BOT, configFingerprint } from './botConfig.js';
+import { CONFIG_SCHEMA, getBotConfig, saveBotConfig, HYBRID_BOT, MIRROR_BOT, configFingerprint } from './botConfig.js';
 import { classifyRulebookQualification, classifyOverlayStatus, classifyBranch, clampRiskUsd } from './hybridBranchClassifier.js';
 
 dotenv.config();
@@ -172,6 +172,114 @@ function resetHybridSeries() {
   hybridDay.seriesPeakSession = null;
   hybridDay.seriesPeakPositionCount = null;
   hybridDay.seriesPeakPositionDirections = null;
+}
+
+// ── overlay_mirror ────────────────────────────────────────────────────────
+// Executes claude_overlay's decision VERBATIM -- same direction, entry, stop
+// and target -- and changes exactly one thing: the risk envelope. Its own
+// position sizing, its own day guards, its own give-back rule.
+//
+// No model, so no token cost. That is the point: overlay is the only account
+// with a demonstrated payoff shape (avg win +2,218 vs avg loss -804, a 2.76
+// ratio on a 36% win rate), and the open question is whether risk management
+// preserves that or destroys it. Hybrid suggests destroys -- its rule-based
+// exits close winners at ~+180 while stops run to -443, inverting the ratio to
+// 0.67. But hybrid also re-decides entries, so its result cannot separate the
+// two causes. This account holds the decision fixed so the risk envelope is
+// the only variable.
+//
+// Deliberately NOT clamped to its own ATR band: the stop is overlay's, exactly
+// as overlay set it. Clamping would change the geometry and reintroduce the
+// confound this account exists to remove.
+const mirrorDay = {
+  date: null, stoppedReason: null, runsBanked: 0,
+  seriesStartBalance: null, seriesPeak: 0,
+};
+
+async function restoreOrResetMirrorDay(today) {
+  try {
+    const raw = await database.getServiceState('mirror_day');
+    const saved = raw ? JSON.parse(raw) : null;
+    if (saved && saved.date === today) {
+      Object.assign(mirrorDay, saved);
+      console.log(`🔄 [MIRROR] day state restored: series peak +$${(saved.seriesPeak ?? 0).toFixed(0)}${saved.stoppedReason ? `, stood down (${saved.stoppedReason})` : ''}`);
+      return;
+    }
+  } catch { /* fall through */ }
+  mirrorDay.date = today;
+  mirrorDay.stoppedReason = null;
+  mirrorDay.runsBanked = 0;
+  mirrorDay.seriesStartBalance = null;
+  mirrorDay.seriesPeak = 0;
+  await persistMirrorDay();
+}
+
+async function persistMirrorDay() {
+  try { await database.setServiceState('mirror_day', JSON.stringify(mirrorDay)); }
+  catch { /* non-fatal */ }
+}
+
+// Same three rules hybrid runs, on the same 1-minute cadence so a spike
+// between 5-minute cycles cannot escape the give-back floor.
+async function checkMirrorDayGuards(currentPrice) {
+  try {
+    if (currentPrice == null || !isTradingHours()) return;
+    const p = await database.getPortfolioByName(MIRROR_BOT);
+    if (!p) return;
+    if (mirrorDay.date !== uaeDate()) await restoreOrResetMirrorDay(uaeDate());
+
+    const cfg        = await getBotConfig(database.pool, MIRROR_BOT, CONFIG_SCHEMA);
+    const dayStart   = circuitBreakerState[p.id]?.dayStartBalance ?? p.current_balance;
+    const unrealized = computeUnrealizedPnl(p.id, currentPrice);
+    const dayPnl     = (p.current_balance - dayStart) + unrealized;
+    const bal        = p.starting_balance || 100000;
+    const openNow    = outcomeTracker.getOpenPositionsForPortfolio(p.id);
+    const hasOpen    = openNow.length > 0;
+
+    if (hasOpen && mirrorDay.seriesStartBalance != null) {
+      const seriesPnl = (p.current_balance - mirrorDay.seriesStartBalance) + unrealized;
+      if (seriesPnl > mirrorDay.seriesPeak) { mirrorDay.seriesPeak = seriesPnl; await persistMirrorDay(); }
+
+      if (!mirrorDay.stoppedReason) {
+        const armUsd   = bal * (cfg.giveBackArmPct / 100);
+        const floorUsd = mirrorDay.seriesPeak * (1 - cfg.giveBackPct / 100);
+        if (mirrorDay.seriesPeak >= armUsd && seriesPnl < floorUsd) {
+          console.log(`🎯 [MIRROR] give-back: peak +$${mirrorDay.seriesPeak.toFixed(0)} → now +$${seriesPnl.toFixed(0)} — banking, continuing to trade`);
+          await outcomeTracker.forceClosePortfolio(p.id, currentPrice, EXIT_REASONS.GIVE_BACK);
+          mirrorDay.seriesStartBalance = null;
+          mirrorDay.seriesPeak = 0;
+          mirrorDay.runsBanked = (mirrorDay.runsBanked || 0) + 1;
+          await persistMirrorDay();
+          return;
+        }
+      }
+    }
+
+    if (mirrorDay.stoppedReason) return;
+
+    const targetUsd  = bal * (cfg.dailyProfitTargetPct / 100);
+    const maxLossUsd = bal * (cfg.dailyMaxLossPct / 100);
+    let flatten = null, flattenReason = null;
+    if (dayPnl >= targetUsd)        { flatten = `daily target hit (+$${dayPnl.toFixed(0)})`;  flattenReason = 'daily_target'; }
+    else if (dayPnl <= -maxLossUsd) { flatten = `daily max loss hit ($${dayPnl.toFixed(0)})`; flattenReason = 'daily_max_loss'; }
+
+    if (flatten) {
+      mirrorDay.stoppedReason = flatten;
+      mirrorDay.seriesStartBalance = null;
+      mirrorDay.seriesPeak = 0;
+      await persistMirrorDay();
+      console.log(`🛑 [MIRROR] ${flatten} — flattening and standing down for the day`);
+      // Named inline, not via a variable: the four give-back / daily-target /
+      // daily-loss / breaker causes collapsed into CIRCUIT_BREAKER once before,
+      // and the test that caught it checks the call site literally.
+      if (hasOpen) await outcomeTracker.forceClosePortfolio(
+        p.id, currentPrice,
+        flattenReason === 'daily_max_loss' ? EXIT_REASONS.DAILY_MAX_LOSS : EXIT_REASONS.DAILY_TARGET
+      );
+    }
+  } catch (err) {
+    console.error(`❌ [MIRROR] day-guard check failed: ${err.message}`);
+  }
 }
 
 // Hybrid day guards: update the profit peak and flatten if the daily target,
@@ -833,6 +941,90 @@ async function generateSignalIfTradingHours() {
       }
     }
 
+    // ── overlay_mirror — overlay's decision, our risk envelope ───────────
+    // Zero LLM cost: it consumes the overlayDecision already computed above.
+    // The decision is taken verbatim; only sizing and the day guards differ.
+    try {
+      const mPortfolio = await database.getPortfolioByName(MIRROR_BOT);
+      if (mPortfolio) {
+        const mcfg = await getBotConfig(database.pool, MIRROR_BOT, CONFIG_SCHEMA);
+        if (mirrorDay.date !== uaeDate()) await restoreOrResetMirrorDay(uaeDate());
+        await checkMirrorDayGuards(currentPrice);
+
+        const mOpen     = outcomeTracker.getOpenPositionsForPortfolio(mPortfolio.id);
+        const mBal      = mPortfolio.starting_balance || 100000;
+        const mRiskUsed = computeOpenRiskUsd(mPortfolio.id);
+        const mBudget   = mBal * (mcfg.maxTotalRiskPct / 100);
+        const mRiskLeft = Math.max(0, mBudget - mRiskUsed);
+
+        const mUae   = new Date(Date.now() + 4 * 3600000);
+        const mDow   = mUae.getUTCDay();
+        const mHour  = mUae.getUTCHours();
+
+        let mSkip = null, mSkipCode = null;
+        if (overlayDecision?.action !== 'TRADE')                  { mSkipCode = 'NO_OVERLAY_TRADE'; mSkip = `overlay did not propose (${overlayDecision?.action ?? 'none'})`; }
+        else if (mDow === 1 && mHour >= mcfg.mondayBlockStartHour && mHour < mcfg.mondayBlockEndHour) { mSkipCode = 'MONDAY_BLOCK';    mSkip = 'Monday block'; }
+        else if (mDow === 5 && mHour >= mcfg.fridayBlockStartHour && mHour < mcfg.fridayBlockEndHour) { mSkipCode = 'FRIDAY_BLOCK';    mSkip = 'Friday block'; }
+        else if (mirrorDay.stoppedReason)                         { mSkipCode = 'STOOD_DOWN';      mSkip = `stood down: ${mirrorDay.stoppedReason}`; }
+        else if (isHaltedToday(mPortfolio.id))                    { mSkipCode = 'CIRCUIT_BREAKER'; mSkip = 'circuit breaker active'; }
+        else if (mOpen.length >= mcfg.maxOpenPositions)           { mSkipCode = 'POSITION_CAP';    mSkip = `position cap ${mOpen.length}/${mcfg.maxOpenPositions}`; }
+        else if (mRiskLeft < 50)                                  { mSkipCode = 'RISK_EXHAUSTED';  mSkip = `risk budget exhausted ($${mRiskUsed.toFixed(0)}/$${mBudget.toFixed(0)})`; }
+
+        // Same DB-read throttle hybrid uses: in-memory state resets to "never
+        // traded" on redeploy, which silently bypasses the gate.
+        if (!mSkip) {
+          const { rows: lastRows } = await database.pool.query(
+            `SELECT MAX(timestamp) AS last_ts FROM trades WHERE portfolio_id = $1`, [mPortfolio.id]
+          );
+          const lastMs = lastRows[0]?.last_ts ? new Date(lastRows[0].last_ts).getTime() : 0;
+          const waited = Date.now() - lastMs;
+          if (lastMs && waited < mcfg.entryIntervalMin * 60000) {
+            mSkipCode = 'ENTRY_THROTTLE';
+            mSkip = `entry throttle — ${Math.ceil((mcfg.entryIntervalMin * 60000 - waited) / 60000)} min to go`;
+          }
+        }
+
+        if (mSkip) {
+          if (mSkipCode !== 'NO_OVERLAY_TRADE') console.log(`⏸️  [MIRROR] no entry — ${mSkip}`);
+        } else {
+          // Overlay's geometry, verbatim. Only the LOT SIZE is ours, derived
+          // from our per-trade risk cap and whatever budget is left.
+          const stopDist = Math.abs(overlayDecision.entry - overlayDecision.stop);
+          const riskUsd  = clampRiskUsd(mBal * (mcfg.maxRiskPerTradePct / 100), mRiskLeft, mBal * (mcfg.maxRiskPerTradePct / 100));
+
+          if (!stopDist || stopDist <= 0 || riskUsd < 50) {
+            console.log(`⏸️  [MIRROR] entry rejected — stopDist=${stopDist} riskUsd=${riskUsd?.toFixed?.(0)}`);
+          } else {
+            const lots = Math.max(0.01, Math.min(Math.floor((riskUsd / (stopDist * VALUE_PER_LOT)) * 100) / 100, 1.0));
+            // Starting from flat: the give-back baseline must not inherit an
+            // earlier, already-closed series.
+            if (mOpen.length === 0) {
+              mirrorDay.seriesStartBalance = mPortfolio.current_balance;
+              mirrorDay.seriesPeak = 0;
+              await persistMirrorDay();
+            }
+            await openPosition({
+              portfolio: mPortfolio,
+              decision: {
+                action: 'TRADE',
+                direction: overlayDecision.direction,
+                entry:  overlayDecision.entry,
+                stop:   overlayDecision.stop,
+                target: overlayDecision.target,
+                lots,
+                reasoning: `mirror of overlay: ${overlayDecision.reasoning ?? '(none)'}`,
+                tag: `mirror_${overlayDecision.tag ?? 'overlay'}`,
+              },
+              signalId, currentPrice, isSignalOwner: false, session: currentSession,
+            });
+            console.log(`🪞 [MIRROR] ${overlayDecision.direction} entry=${overlayDecision.entry?.toFixed(2)} stop=${overlayDecision.stop?.toFixed(2)} lots=${lots} risk=$${riskUsd.toFixed(0)} (overlay lots ${overlayDecision.lots})`);
+          }
+        }
+      }
+    } catch (mErr) {
+      console.error(`❌ [MIRROR] executor error (cycle continues): ${mErr.message}`);
+    }
+
     // ── Hybrid bot — overlay judgment + forward-rulebook evidence ─────────
     // Risk envelope is fully config-driven (bot_config table, editable in the
     // web app). Order matters: day-level guards run before any entry logic so
@@ -1253,6 +1445,7 @@ function startPricePoller() {
       // Circuit-breaker check runs every tick (unrealized P&L moves with price).
       await checkCircuitBreakers(price);
       await checkHybridDayGuards(price);
+      await checkMirrorDayGuards(price);
     } catch (error) {
       console.error('❌ [POLLER] Price check failed:', error.message);
     }
@@ -2169,6 +2362,46 @@ app.post('/api/reflect/daily', async (req, res) => {
 
 // Hybrid bot live state: day P&L against its target, loss limit and the
 // give-back floor, plus why it stood down if it did.
+app.get('/api/mirror/status', async (req, res) => {
+  try {
+    const p = await database.getPortfolioByName(MIRROR_BOT);
+    if (!p) return res.status(404).json({ error: 'overlay_mirror portfolio not found' });
+    const cfg = await getBotConfig(database.pool, MIRROR_BOT, CONFIG_SCHEMA);
+
+    const today      = new Date().toISOString().split('T')[0];
+    const realized   = await database.getDailyRealizedPnl(p.id, today);
+    const unrealized = lastKnownPrice ? computeUnrealizedPnl(p.id, lastKnownPrice) : 0;
+    const bal        = p.starting_balance || 100000;
+    const isToday    = mirrorDay.date === uaeDate();
+    const seriesActive = isToday && mirrorDay.seriesStartBalance != null;
+    const seriesPnl  = seriesActive ? (p.current_balance - mirrorDay.seriesStartBalance) + unrealized : null;
+    const seriesPeak = seriesActive ? Math.max(mirrorDay.seriesPeak, seriesPnl) : null;
+    const armUsd     = bal * (cfg.giveBackArmPct / 100);
+    const armed      = seriesActive && seriesPeak >= armUsd;
+
+    res.json({
+      balance:          p.current_balance,
+      starting_balance: bal,
+      day_pnl:          realized + unrealized,
+      series_active:    seriesActive,
+      series_pnl:       seriesPnl,
+      series_peak:      seriesPeak,
+      give_back_armed:  armed,
+      give_back_floor:  armed ? seriesPeak * (1 - cfg.giveBackPct / 100) : null,
+      daily_target:     bal * (cfg.dailyProfitTargetPct / 100),
+      daily_max_loss:   -(bal * (cfg.dailyMaxLossPct / 100)),
+      stopped_reason:   isToday ? mirrorDay.stoppedReason : null,
+      runs_banked:      isToday ? (mirrorDay.runsBanked || 0) : 0,
+      open_positions:   outcomeTracker.getOpenPositionsForPortfolio(p.id).length,
+      risk_used:        computeOpenRiskUsd(p.id),
+      risk_budget:      bal * (cfg.maxTotalRiskPct / 100),
+      config:           cfg,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/hybrid/status', async (req, res) => {
   try {
     const p = await database.getPortfolioByName(HYBRID_BOT);
@@ -2225,9 +2458,13 @@ app.get('/api/hybrid/status', async (req, res) => {
 // retired; the ?bot= parameter is kept so existing callers still work.
 function schemaForBot() { return CONFIG_SCHEMA; }
 
+// Both hybrid and overlay_mirror expose the same fields; ?bot= selects which
+// bot_config row is read or written, so their tolerances stay independent.
+function botNameFor(q) { return q === MIRROR_BOT ? MIRROR_BOT : HYBRID_BOT; }
+
 app.get('/api/bot-config', async (req, res) => {
   try {
-    const bot = req.query.bot || HYBRID_BOT;
+    const bot = botNameFor(req.query.bot);
     const schema = schemaForBot(bot);
     res.json({ bot, schema, config: await getBotConfig(database.pool, bot, schema) });
   } catch (err) {
@@ -2237,7 +2474,7 @@ app.get('/api/bot-config', async (req, res) => {
 
 app.put('/api/bot-config', async (req, res) => {
   try {
-    const bot = req.query.bot || HYBRID_BOT;
+    const bot = botNameFor(req.query.bot);
     const schema = schemaForBot(bot);
     const saved = await saveBotConfig(database.pool, req.body?.config ?? req.body ?? {}, bot, schema);
     console.log(`⚙️  [${bot}] config updated: ${JSON.stringify(saved)}`);

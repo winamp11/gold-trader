@@ -29,6 +29,7 @@ export function configFingerprint(config) {
   return createHash('sha256').update(canonical).digest('hex').slice(0, 12);
 }
 
+export const MIRROR_BOT = 'overlay_mirror';
 export const HYBRID_BOT = 'claude_hybrid';
 
 // group is used by the UI to section the form.

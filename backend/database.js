@@ -138,9 +138,17 @@ class DatabaseService {
 
     // Hybrid bot: overlay's judgment + forward-rulebook evidence, under a
     // live-editable risk envelope (see botConfig.js).
+    //
+    // overlay_mirror: takes overlay's decision VERBATIM -- same direction,
+    // entry, stop and target -- and applies only its own position sizing and
+    // day-level risk guards. No model of its own, so no token cost. It is the
+    // clean single-variable test of whether risk management helps or hurts a
+    // signal that already works: any difference from claude_overlay is
+    // attributable to the risk envelope and nothing else.
     await this.pool.query(`
       INSERT INTO portfolios (name, starting_balance, current_balance) VALUES
-        ('claude_hybrid', 100000, 100000)
+        ('claude_hybrid',  100000, 100000),
+        ('overlay_mirror', 100000, 100000)
       ON CONFLICT (name) DO NOTHING
     `);
 

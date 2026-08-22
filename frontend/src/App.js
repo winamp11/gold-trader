@@ -13,6 +13,7 @@ const C = {
   mech:    '#4d9de0',
   overlay: '#f0a030',
   hybrid:  '#38bdf8',
+  mirror:  '#c084fc',
   win:     '#22c55e',
   loss:    '#ef4444',
   veto:    '#a78bfa',
@@ -80,6 +81,7 @@ function accountColor(name) {
   if (name === 'mechanical')          return C.mech;
   if (name === 'claude_overlay')      return C.overlay;
   if (name === 'claude_hybrid')       return C.hybrid;
+  if (name === 'overlay_mirror')      return C.mirror;
   return '#888';
 }
 
@@ -87,6 +89,7 @@ function accountLabel(name) {
   if (name === 'mechanical')          return 'Mechanical';
   if (name === 'claude_overlay')      return 'Overlay';
   if (name === 'claude_hybrid')       return 'Hybrid';
+  if (name === 'overlay_mirror')      return 'Overlay Mirror';
   return name;
 }
 
@@ -375,7 +378,7 @@ const CustomTooltip = ({ active, payload, label }) => {
   );
 };
 
-const EQUITY_LINE_KEYS = ['mechanical', 'claude_overlay', 'claude_hybrid'];
+const EQUITY_LINE_KEYS = ['mechanical', 'claude_overlay', 'overlay_mirror', 'claude_hybrid'];
 
 function firstOfMonthStr() {
   const d = new Date();
@@ -439,6 +442,7 @@ function EquityChart({ equity, range }) {
         />
         <Line dataKey="mechanical"     stroke={C.mech}    strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.mech    }} connectNulls />
         <Line dataKey="claude_overlay" stroke={C.overlay} strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.overlay }} connectNulls />
+        <Line dataKey="overlay_mirror" stroke={C.mirror} strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.mirror }} connectNulls />
         <Line dataKey="claude_hybrid"  stroke={C.hybrid}  strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.hybrid  }} connectNulls />
       </LineChart>
     </ResponsiveContainer>
@@ -607,7 +611,7 @@ function Gauge({ label, value, detail, tone }) {
 
 // ─── Hybrid bot panel + live settings ────────────────────────────────────────
 
-function HybridSettings({ schema, config, onSaved }) {
+function HybridSettings({ schema, config, onSaved, bot }) {
   const [draft, setDraft] = useState(config);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState(null);
@@ -619,7 +623,7 @@ function HybridSettings({ schema, config, onSaved }) {
   const save = async () => {
     setSaving(true); setMsg(null);
     try {
-      const res  = await fetch(`${API}/api/bot-config`, {
+      const res  = await fetch(`${API}/api/bot-config?bot=${encodeURIComponent(bot)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ config: draft }),
@@ -775,19 +779,22 @@ function BranchPerformance({ dateRange }) {
   );
 }
 
-function HybridPanel({ status, account, schema, onConfigSaved, positions, trades, tradeHasMore, onLoadMoreTrades, dateRange }) {
+// Renders hybrid OR overlay_mirror -- identical risk envelope, so identical
+// layout. `bot` selects which bot_config row the settings form writes.
+function HybridPanel({ status, account, schema, onConfigSaved, positions, trades, tradeHasMore, onLoadMoreTrades, dateRange,
+                       bot = 'claude_hybrid', title = 'Hybrid · overlay + rulebook', color = '#38bdf8' }) {
   const [showSettings, setShowSettings] = useState(false);
   if (!status) return null;
 
   const usd0 = n => `${n < 0 ? '-' : '+'}$${Math.abs(n).toFixed(0)}`;
-  const myPos = (positions || []).filter(p => p.portfolioName === 'claude_hybrid');
+  const myPos = (positions || []).filter(p => p.portfolioName === bot);
 
   return (
-    <div className="account-panel" style={{ borderLeftColor: '#38bdf8' }}>
+    <div className="account-panel" style={{ borderLeftColor: color }}>
       <div className="panel-headline">
         <div className="panel-headline__top">
-          <span className="panel-headline__dot" style={{ background: '#38bdf8' }} />
-          <span className="panel-headline__name">Hybrid · overlay + rulebook</span>
+          <span className="panel-headline__dot" style={{ background: color }} />
+          <span className="panel-headline__name">{title}</span>
           {status.open_positions > 0 && (
             <span className="panel-headline__open">{status.open_positions} open</span>
           )}
@@ -856,7 +863,7 @@ function HybridPanel({ status, account, schema, onConfigSaved, positions, trades
       </CollapsibleSection>
 
       {showSettings && schema && (
-        <HybridSettings schema={schema} config={status.config} onSaved={onConfigSaved} />
+        <HybridSettings schema={schema} config={status.config} onSaved={onConfigSaved} bot={bot} />
       )}
     </div>
   );
@@ -870,6 +877,7 @@ export default function App() {
   const [accounts,    setAccounts]    = useState(null);
   const [hybridStatus, setHybridStatus] = useState(null);
   const [hybridSchema, setHybridSchema] = useState(null);
+  const [mirrorStatus, setMirrorStatus] = useState(null);
   const [equity,      setEquity]      = useState(null);
   const [dateRange,   setDateRange]   = useState(() => ({ start: firstOfMonthStr(), end: todayStr() }));
   const [positions,   setPositions]   = useState([]);
@@ -879,13 +887,13 @@ export default function App() {
   const [error,       setError]       = useState(null);
 
   const [trades, setTrades] = useState({
-    mechanical: [], claude_overlay: [], claude_hybrid: [],
+    mechanical: [], claude_overlay: [], claude_hybrid: [], overlay_mirror: [],
   });
   const [tradeHasMore, setTradeHasMore] = useState({
-    mechanical: false, claude_overlay: false, claude_hybrid: false,
+    mechanical: false, claude_overlay: false, claude_hybrid: false, overlay_mirror: false,
   });
   const [tradeOffsets, setTradeOffsets] = useState({
-    mechanical: 0, claude_overlay: 0, claude_hybrid: 0,
+    mechanical: 0, claude_overlay: 0, claude_hybrid: 0, overlay_mirror: 0,
   });
 
   const [journal, setJournal] = useState({
@@ -897,7 +905,7 @@ export default function App() {
       const [
         accRes, equityRes, posRes, snapRes, missedRes,
         mechTR, overlayTR, hybridTR,
-        overlayJR, hybridRes, cfgRes,
+        overlayJR, hybridRes, cfgRes, mirrorTR, mirrorRes,
       ] = await Promise.all([
         fetch(`${API}/api/accounts`),
         fetch(`${API}/api/equity`),
@@ -910,18 +918,21 @@ export default function App() {
         fetch(`${API}/api/journal?account=claude_overlay&limit=${JOURNAL_LIMIT}`),
         fetch(`${API}/api/hybrid/status`),
         fetch(`${API}/api/bot-config`),
+        fetch(`${API}/api/trades/recent?account=overlay_mirror&limit=${TRADE_PAGE}`),
+        fetch(`${API}/api/mirror/status`),
       ]);
 
       const [
         accData, equityData, posData, snapData, missedData,
-        mechTD, overlayTD, hybridTD,
+        mechTD, overlayTD, hybridTD, mirrorTD,
         overlayJD,
       ] = await Promise.all([
         accRes.json(), equityRes.json(), posRes.json(), snapRes.json(), missedRes.json(),
-        mechTR.json(), overlayTR.json(), hybridTR.json(),
+        mechTR.json(), overlayTR.json(), hybridTR.json(), mirrorTR.json(),
         overlayJR.json(),
       ]);
       setHybridStatus(hybridRes.ok ? await hybridRes.json() : null);
+      setMirrorStatus(mirrorRes.ok ? await mirrorRes.json() : null);
       if (cfgRes.ok) setHybridSchema((await cfgRes.json()).schema);
 
       setAccounts(accData.accounts || []);
@@ -933,12 +944,14 @@ export default function App() {
       const mt = mechTD.trades    || [];
       const ot = overlayTD.trades || [];
       const ht = hybridTD.trades  || [];
-      setTrades({ mechanical: mt, claude_overlay: ot, claude_hybrid: ht });
-      setTradeOffsets({ mechanical: 0, claude_overlay: 0, claude_hybrid: 0 });
+      const rt = mirrorTD.trades  || [];
+      setTrades({ mechanical: mt, claude_overlay: ot, claude_hybrid: ht, overlay_mirror: rt });
+      setTradeOffsets({ mechanical: 0, claude_overlay: 0, claude_hybrid: 0, overlay_mirror: 0 });
       setTradeHasMore({
         mechanical:     mt.length >= TRADE_PAGE,
         claude_overlay: ot.length >= TRADE_PAGE,
         claude_hybrid:  ht.length >= TRADE_PAGE,
+        overlay_mirror: rt.length >= TRADE_PAGE,
       });
 
       setJournal({
@@ -981,6 +994,7 @@ export default function App() {
   const mech    = accounts?.find(a => a.name === 'mechanical');
   const overlay = accounts?.find(a => a.name === 'claude_overlay');
   const hybridAcct = accounts?.find(a => a.name === 'claude_hybrid');
+  const mirrorAcct = accounts?.find(a => a.name === 'overlay_mirror');
   const sessionNow  = sessionLabel(new Date().toISOString());
   const isTradingNow = snapshot?.tradingHours ?? false;
 
@@ -1031,6 +1045,20 @@ export default function App() {
           tradeHasMore={tradeHasMore.claude_overlay}
           journal={journal.claude_overlay}
           onLoadMoreTrades={() => loadMoreTrades('claude_overlay')}
+        />
+        <HybridPanel
+          bot="overlay_mirror"
+          title="Overlay Mirror · same calls, our risk"
+          color="#c084fc"
+          status={mirrorStatus}
+          account={mirrorAcct}
+          schema={hybridSchema}
+          positions={positions}
+          trades={trades.overlay_mirror}
+          tradeHasMore={tradeHasMore.overlay_mirror}
+          onLoadMoreTrades={() => loadMoreTrades('overlay_mirror')}
+          onConfigSaved={cfg => setMirrorStatus(s => s ? { ...s, config: cfg } : s)}
+          dateRange={dateRange}
         />
         <HybridPanel
           status={hybridStatus}
