@@ -57,18 +57,69 @@ function mean(xs) {
   return v.length ? v.reduce((s, x) => s + x, 0) / v.length : null;
 }
 
+/** Mean per day, then mean across days. Equal weight to every day. */
+function dayWeightedMean(rows, field) {
+  const byDay = new Map();
+  for (const r of rows) {
+    const v = r[field];
+    if (v == null || !Number.isFinite(Number(v))) continue;
+    const d = String(r.timestamp).slice(0, 10);
+    if (!byDay.has(d)) byDay.set(d, []);
+    byDay.get(d).push(Number(v));
+  }
+  if (byDay.size === 0) return null;
+  const perDay = [...byDay.values()].map(v => v.reduce((s, x) => s + x, 0) / v.length);
+  return perDay.reduce((s, x) => s + x, 0) / perDay.length;
+}
+
 /**
- * Summary for one group of rows: sample sizes plus mean forward return at
- * each horizon. Returns nulls rather than 0 for an empty group -- a horizon
- * with no matured rows is unknown, not flat.
+ * Summary for one group of rows, at BOTH weightings. Reporting only one is how
+ * this tool misleads you, and it did:
+ *
+ *   trade-weighted -- the plain mean over observations. What someone taking
+ *     every signal actually receives. Its flaw is that 169 overlapping
+ *     5-minute rows in a day are nothing like 169 independent facts.
+ *
+ *   day-weighted -- mean within each day, then across days. Fixes that
+ *     autocorrelation, but silently assumes signal frequency is unrelated to
+ *     outcome. When a rule fires 12 times on the days it fails and 3 times on
+ *     the days it works, equal-weighting days makes a loser look like a
+ *     winner.
+ *
+ * Measured on the range-position rule, 2026-08-22, out-of-sample:
+ *   day-weighted   +3.50 pts   (looked like a strong edge)
+ *   trade-weighted -1.02 pts   (loses money, confirmed by trade simulation)
+ * The busiest third of days averaged -5.59; the quietest third +12.00.
+ *
+ * Neither number is "the truth". A large disagreement between them IS the
+ * finding -- it says the rule's firing rate is tied to its outcome.
  */
 export function summarizeGroup(rows) {
+  const perDayCounts = [...rows.reduce((m, r) => {
+    const d = String(r.timestamp).slice(0, 10);
+    return m.set(d, (m.get(d) ?? 0) + 1);
+  }, new Map()).values()].sort((a, b) => a - b);
+
+  const at = field => ({
+    trade: mean(rows.map(r => r[field])),
+    day:   dayWeightedMean(rows, field),
+  });
+
   return {
-    n:     rows.length,
-    days:  uniqueDays(rows),
-    fwd1h: mean(rows.map(r => r.fwd_return_1h)),
-    fwd4h: mean(rows.map(r => r.fwd_return_4h)),
-    fwdEod: mean(rows.map(r => r.fwd_return_eod)),
+    n:      rows.length,
+    days:   uniqueDays(rows),
+    // Proper median: the average of the two middle values on an even count.
+    // Taking the upper element instead skews this upward, which matters here
+    // because a high signals-per-day figure is the warning sign.
+    perDayMedian: perDayCounts.length
+      ? (perDayCounts.length % 2
+          ? perDayCounts[(perDayCounts.length - 1) / 2]
+          : (perDayCounts[perDayCounts.length / 2 - 1] + perDayCounts[perDayCounts.length / 2]) / 2)
+      : 0,
+    perDayMax:    perDayCounts.length ? perDayCounts[perDayCounts.length - 1] : 0,
+    fwd1h:  at('fwd_return_1h'),
+    fwd4h:  at('fwd_return_4h'),
+    fwdEod: at('fwd_return_eod'),
   };
 }
 
@@ -100,16 +151,34 @@ export function rollingBand(values, window = 14, mult = 1) {
 }
 
 /**
- * Lift of a condition over the unconditional base rate, per horizon.
- * This -- not the conditional mean -- is the number that constitutes evidence.
+ * Lift over the unconditional base rate, per horizon, at BOTH weightings.
+ * The lift -- not the conditional mean -- is what constitutes evidence, since
+ * a directional window makes every condition look profitable.
  */
 export function computeLift(group, base) {
   const d = (a, b) => (a == null || b == null ? null : a - b);
-  return {
-    fwd1h:  d(group.fwd1h,  base.fwd1h),
-    fwd4h:  d(group.fwd4h,  base.fwd4h),
-    fwdEod: d(group.fwdEod, base.fwdEod),
-  };
+  const pair = k => ({ trade: d(group[k]?.trade, base[k]?.trade), day: d(group[k]?.day, base[k]?.day) });
+  return { fwd1h: pair('fwd1h'), fwd4h: pair('fwd4h'), fwdEod: pair('fwdEod') };
+}
+
+/**
+ * Do the two weightings tell the same story?
+ *
+ * Disagreement means the rule's firing rate is correlated with its outcome,
+ * which is a real property of the rule and not a rounding artefact. Trade-
+ * weighted is the one a trader receives, so it wins -- but the divergence is
+ * worth surfacing loudly, because a rule that fires hardest when it is wrong
+ * behaves very differently from one that does not.
+ */
+export function weightingDisagreement(lift) {
+  const out = [];
+  for (const [k, v] of Object.entries(lift)) {
+    if (v.trade == null || v.day == null) continue;
+    const signFlip = (v.trade > 0) !== (v.day > 0) && Math.abs(v.trade) > 0.01 && Math.abs(v.day) > 0.01;
+    const inflated = Math.abs(v.day) > 2 * Math.abs(v.trade) && Math.abs(v.day - v.trade) > 0.5;
+    if (signFlip || inflated) out.push({ horizon: k, trade: v.trade, day: v.day, signFlip });
+  }
+  return out;
 }
 
 // ── Named conditions ─────────────────────────────────────────────────────
@@ -176,24 +245,44 @@ export function report(label, rows, predicate) {
   const g    = summarizeGroup(hit);
   const lift = computeLift(g, base);
 
+  const disagree = weightingDisagreement(lift);
+
   console.log(`\n=== ${label} ===`);
   console.log(`window        : ${rows[0]?.timestamp?.slice(0, 10)} .. ${rows[rows.length - 1]?.timestamp?.slice(0, 10)}`);
-  console.log(`${'group'.padEnd(14)}${'n'.padStart(7)}${'days'.padStart(6)}${'fwd+1h'.padStart(10)}${'fwd+4h'.padStart(10)}${'fwd+eod'.padStart(10)}`);
-  console.log(`${'base (all)'.padEnd(14)}${String(base.n).padStart(7)}${String(base.days).padStart(6)}${f(base.fwd1h).padStart(10)}${f(base.fwd4h).padStart(10)}${f(base.fwdEod).padStart(10)}`);
-  console.log(`${'condition'.padEnd(14)}${String(g.n).padStart(7)}${String(g.days).padStart(6)}${f(g.fwd1h).padStart(10)}${f(g.fwd4h).padStart(10)}${f(g.fwdEod).padStart(10)}`);
-  console.log(`${'LIFT'.padEnd(14)}${''.padStart(7)}${''.padStart(6)}${f(lift.fwd1h).padStart(10)}${f(lift.fwd4h).padStart(10)}${f(lift.fwdEod).padStart(10)}`);
+  console.log(`${''.padEnd(22)}${'fwd+1h'.padStart(10)}${'fwd+4h'.padStart(10)}${'fwd+eod'.padStart(10)}`);
+  for (const [w, wl] of [['trade', 'TRADE-weighted'], ['day', 'day-weighted']]) {
+    console.log(`  ${(wl + ' base').padEnd(20)}${f(base.fwd1h[w]).padStart(10)}${f(base.fwd4h[w]).padStart(10)}${f(base.fwdEod[w]).padStart(10)}`);
+    console.log(`  ${(wl + ' LIFT').padEnd(20)}${f(lift.fwd1h[w]).padStart(10)}${f(lift.fwd4h[w]).padStart(10)}${f(lift.fwdEod[w]).padStart(10)}`);
+  }
 
-  console.log(`\nsample: ${g.n} observations across ${g.days} day(s).`);
+  console.log(`\nsample: ${g.n} observations across ${g.days} day(s)` +
+              `  (median ${g.perDayMedian}/day, max ${g.perDayMax})`);
+  console.log(`TRADE-weighted is what you receive taking every signal. Day-weighted removes`);
+  console.log(`within-day autocorrelation but assumes firing rate is unrelated to outcome.`);
+
+  if (disagree.length) {
+    console.log(`\n  🚩 THE TWO WEIGHTINGS DISAGREE (${disagree.map(d => d.horizon).join(', ')}).`);
+    for (const d of disagree) {
+      console.log(`     ${d.horizon}: trade ${f(d.trade)} vs day ${f(d.day)}${d.signFlip ? '  — OPPOSITE SIGNS' : ''}`);
+    }
+    console.log(`     This rule fires at a rate correlated with its own outcome — typically`);
+    console.log(`     many times on the days it fails and few on the days it works. Believe`);
+    console.log(`     the TRADE-weighted number, and confirm with a trade simulation before`);
+    console.log(`     acting. (This exact pattern made the range-position rule look like a`);
+    console.log(`     +3.50 edge when it actually loses 1.02 per trade.)`);
+  }
   if (g.days < 30) {
-    console.log(`  ⚠️  ${g.days} days is not a sample. Rows inside one day are overlapping`);
+    console.log(`\n  ⚠️  ${g.days} days is not a sample. Rows inside one day are overlapping`);
     console.log(`      views of the same move — treat this as a hint, not evidence.`);
   }
-  if (base.fwd4h != null && Math.abs(base.fwd4h) > 3) {
-    console.log(`  ⚠️  base rate is ${f(base.fwd4h)} pts at +4h — the window itself is directional.`);
+  if (base.fwd4h.trade != null && Math.abs(base.fwd4h.trade) > 3) {
+    console.log(`\n  ⚠️  base rate is ${f(base.fwd4h.trade)} pts at +4h — the window itself is directional.`);
     console.log(`      Every condition will look good on one side of it. Read the LIFT only.`);
   }
   console.log(`\nForward returns are price POINTS, signed. Negate the lift for a SHORT idea.`);
-  return { base, condition: g, lift };
+  console.log(`A positive lift is NOT a P&L estimate — stops and spread typically remove`);
+  console.log(`two thirds of it. Simulate before building.`);
+  return { base, condition: g, lift, disagree };
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────

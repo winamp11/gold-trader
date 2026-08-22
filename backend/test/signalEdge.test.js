@@ -14,8 +14,19 @@ import {
   summarizeGroup,
   rollingBand,
   computeLift,
+  weightingDisagreement,
   CONDITIONS,
 } from '../analysis/signalEdge.js';
+
+// A rule that fires 4x on days it loses and 1x on days it wins. Trade-weighted
+// it loses; day-weighted it wins. This is not a contrived shape — it is the
+// real behaviour of the range-position rule, which sits at the bottom of the
+// range all day when the day trends down and only touches it briefly when the
+// day reverts.
+const firesMostWhenWrong = [
+  ...[1, 2, 3, 4].map(i => ({ timestamp: `2026-08-0${i <= 4 ? 1 : 1}T0${i}:00:00Z`, fwd_return_4h: -10 })),
+  { timestamp: '2026-08-02T01:00:00Z', fwd_return_4h: +20 },
+];
 
 describe('uniqueDays', () => {
   test('REGRESSION: rows within one day count as one sample', () => {
@@ -47,24 +58,76 @@ describe('summarizeGroup', () => {
     const s = summarizeGroup(rows);
     assert.equal(s.n, 2);
     assert.equal(s.days, 2);
-    assert.equal(s.fwd1h, 3);
-    assert.equal(s.fwd4h, 15);
+    assert.equal(s.fwd1h.trade, 3);
+    assert.equal(s.fwd4h.trade, 15);
+  });
+
+  test('one row per day makes both weightings identical', () => {
+    const s = summarizeGroup(rows);
+    assert.equal(s.fwd4h.trade, s.fwd4h.day);
+  });
+
+  test('REGRESSION: the two weightings diverge when firing rate tracks outcome', () => {
+    // The defect this tool shipped with. Four losing rows on one day and one
+    // winning row on another: a trader takes all five and loses, but weighting
+    // days equally averages -10 against +20 and shows a gain.
+    const s = summarizeGroup(firesMostWhenWrong);
+    assert.equal(s.n, 5);
+    assert.equal(s.days, 2);
+    assert.equal(s.fwd4h.trade, -4, 'trade-weighted: (4x -10 + 20) / 5');
+    assert.equal(s.fwd4h.day, 5,   'day-weighted: (-10 + 20) / 2');
+    assert.ok(s.fwd4h.day > 0 && s.fwd4h.trade < 0, 'opposite conclusions from one dataset');
+  });
+
+  test('exposes signals-per-day, the mechanism behind the divergence', () => {
+    const s = summarizeGroup(firesMostWhenWrong);
+    assert.equal(s.perDayMax, 4);
+    assert.equal(s.perDayMedian, 2.5, "median of [1,4] — averaged, not the upper element");
   });
 
   test('an unlabeled horizon is null, never 0', () => {
     // A horizon with no matured rows is unknown. Reporting 0 would read as
     // "no forward move", which is a claim the data does not make.
     const s = summarizeGroup([{ timestamp: '2026-08-17T02:00:00Z', fwd_return_1h: 3 }]);
-    assert.equal(s.fwd1h, 3);
-    assert.equal(s.fwd4h, null);
-    assert.equal(s.fwdEod, null);
+    assert.equal(s.fwd1h.trade, 3);
+    assert.equal(s.fwd4h.trade, null);
+    assert.equal(s.fwdEod.day, null);
   });
 
   test('an empty group is all nulls, not zeros', () => {
     const s = summarizeGroup([]);
     assert.equal(s.n, 0);
     assert.equal(s.days, 0);
-    assert.equal(s.fwd4h, null);
+    assert.equal(s.fwd4h.trade, null);
+    assert.equal(s.fwd4h.day, null);
+  });
+});
+
+describe('weightingDisagreement', () => {
+  test('REGRESSION: opposite signs are flagged', () => {
+    const d = weightingDisagreement({
+      fwd1h:  { trade: null, day: null },
+      fwd4h:  { trade: -1.02, day: +3.50 },   // the real range-position numbers
+      fwdEod: { trade: null, day: null },
+    });
+    assert.equal(d.length, 1);
+    assert.equal(d[0].horizon, 'fwd4h');
+    assert.equal(d[0].signFlip, true);
+  });
+
+  test('day-weighting inflating a real edge is flagged even without a sign flip', () => {
+    const d = weightingDisagreement({ fwd4h: { trade: +1.0, day: +5.0 }, fwd1h: {}, fwdEod: {} });
+    assert.equal(d.length, 1);
+    assert.equal(d[0].signFlip, false);
+  });
+
+  test('agreement is silent', () => {
+    assert.deepEqual(weightingDisagreement({ fwd4h: { trade: +3.1, day: +3.4 }, fwd1h: {}, fwdEod: {} }), []);
+  });
+
+  test('tiny values near zero do not trip the sign check', () => {
+    // -0.001 vs +0.002 is agreement on "nothing", not a contradiction.
+    assert.deepEqual(weightingDisagreement({ fwd4h: { trade: -0.001, day: 0.002 }, fwd1h: {}, fwdEod: {} }), []);
   });
 });
 
@@ -127,18 +190,30 @@ describe('computeLift', () => {
     // because the base rate was +8.22 pts — the market only went up. A tool
     // that reported the conditional mean alone would have called every one of
     // them an edge.
-    const base  = { fwd1h: 1.77, fwd4h: 8.22, fwdEod: 12.0 };
-    const group = { fwd1h: 1.40, fwd4h: 6.72, fwdEod: 11.0 };
+    const base  = { fwd1h: { trade: 1.77 }, fwd4h: { trade: 8.22 }, fwdEod: { trade: 12.0 } };
+    const group = { fwd1h: { trade: 1.40 }, fwd4h: { trade: 6.72 }, fwdEod: { trade: 11.0 } };
     const lift  = computeLift(group, base);
-    assert.ok(group.fwd4h > 0, 'conditional mean is positive');
-    assert.ok(lift.fwd4h < 0, 'but the lift is negative — it underperforms doing nothing');
-    assert.equal(Number(lift.fwd4h.toFixed(2)), -1.50);
+    assert.ok(group.fwd4h.trade > 0, 'conditional mean is positive');
+    assert.ok(lift.fwd4h.trade < 0, 'but the lift is negative — it underperforms doing nothing');
+    assert.equal(Number(lift.fwd4h.trade.toFixed(2)), -1.50);
+  });
+
+  test('lift is computed for both weightings independently', () => {
+    const lift = computeLift(
+      { fwd4h: { trade: -1.02, day: +3.50 }, fwd1h: {}, fwdEod: {} },
+      { fwd4h: { trade: 0, day: 0 }, fwd1h: {}, fwdEod: {} }
+    );
+    assert.equal(lift.fwd4h.trade, -1.02);
+    assert.equal(lift.fwd4h.day, 3.50);
   });
 
   test('a missing horizon propagates as null, not as a lift of 0', () => {
-    const lift = computeLift({ fwd1h: 2, fwd4h: null, fwdEod: null }, { fwd1h: 1, fwd4h: 5, fwdEod: 5 });
-    assert.equal(lift.fwd1h, 1);
-    assert.equal(lift.fwd4h, null);
+    const lift = computeLift(
+      { fwd1h: { trade: 2 }, fwd4h: { trade: null }, fwdEod: {} },
+      { fwd1h: { trade: 1 }, fwd4h: { trade: 5 }, fwdEod: { trade: 5 } }
+    );
+    assert.equal(lift.fwd1h.trade, 1);
+    assert.equal(lift.fwd4h.trade, null);
   });
 });
 
