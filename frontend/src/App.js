@@ -12,10 +12,7 @@ const API = process.env.REACT_APP_API_URL || '';
 const C = {
   mech:    '#4d9de0',
   overlay: '#f0a030',
-  solo:    '#48bb78',
   hybrid:  '#38bdf8',
-  mechPrime:   '#e879f9',
-  mechSession: '#fb7185',
   win:     '#22c55e',
   loss:    '#ef4444',
   veto:    '#a78bfa',
@@ -82,20 +79,14 @@ function sessionLabel(ts) {
 function accountColor(name) {
   if (name === 'mechanical')          return C.mech;
   if (name === 'claude_overlay')      return C.overlay;
-  if (name === 'claude_solo')         return C.solo;
   if (name === 'claude_hybrid')       return C.hybrid;
-  if (name === 'mechanical_prime')    return C.mechPrime;
-  if (name === 'mechanical_session')  return C.mechSession;
   return '#888';
 }
 
 function accountLabel(name) {
   if (name === 'mechanical')          return 'Mechanical';
   if (name === 'claude_overlay')      return 'Overlay';
-  if (name === 'claude_solo')         return 'Solo';
   if (name === 'claude_hybrid')       return 'Hybrid';
-  if (name === 'mechanical_prime')    return 'Mech Prime';
-  if (name === 'mechanical_session')  return 'Mech Session';
   return name;
 }
 
@@ -384,7 +375,7 @@ const CustomTooltip = ({ active, payload, label }) => {
   );
 };
 
-const EQUITY_LINE_KEYS = ['mechanical', 'claude_overlay', 'claude_hybrid', 'mechanical_prime', 'mechanical_session'];
+const EQUITY_LINE_KEYS = ['mechanical', 'claude_overlay', 'claude_hybrid'];
 
 function firstOfMonthStr() {
   const d = new Date();
@@ -449,8 +440,6 @@ function EquityChart({ equity, range }) {
         <Line dataKey="mechanical"     stroke={C.mech}    strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.mech    }} connectNulls />
         <Line dataKey="claude_overlay" stroke={C.overlay} strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.overlay }} connectNulls />
         <Line dataKey="claude_hybrid"  stroke={C.hybrid}  strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.hybrid  }} connectNulls />
-        <Line dataKey="mechanical_prime"   stroke={C.mechPrime}   strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.mechPrime   }} connectNulls />
-        <Line dataKey="mechanical_session" stroke={C.mechSession} strokeWidth={2} dot={{ r: 3, strokeWidth: 0, fill: C.mechSession }} connectNulls />
       </LineChart>
     </ResponsiveContainer>
   );
@@ -873,228 +862,6 @@ function HybridPanel({ status, account, schema, onConfigSaved, positions, trades
   );
 }
 
-// ─── Mechanical / Prime / Session panel ────────────────────────────────────
-// Deliberately compact -- comparison table + a small live-state gauge row
-// per variant, NOT full duplicate AccountPanels (no Open/History/Journal
-// sections here; that's what the comparison table is for).
-
-const MECH_VARIANT_LABELS = { mechanical: 'Mechanical', mechanical_prime: 'Prime', mechanical_session: 'Session' };
-const THREE_HOUR_WINDOW_KEYS = ['06-09', '09-12', '12-15', '15-18', '18-21'];
-
-function MechVariantGauges({ status, account }) {
-  const s = status?.[account];
-  if (!s) return <div className="section-empty">Loading…</div>;
-  const riskTone = s.risk_state === 'PAUSED' ? 'bad' : (s.risk_state === 'DEFENSIVE' || s.risk_state === 'CAUTION') ? 'warn' : 'ok';
-  return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, padding: '8px 12px' }}>
-      <Gauge label="Risk state" value={s.risk_state}
-        detail={`${(s.allowed_risk_pct ?? 0).toFixed(2)}% allowed · ${s.consecutive_losses} losses`}
-        tone={riskTone} />
-      <Gauge label="Day P&L" value={s.day_pnl == null ? '—' : pnlStr(s.day_pnl)}
-        detail={`halt at -${s.daily_max_loss_pct}%${s.daily_max_loss_hit ? ' · HIT' : ''}`}
-        tone={s.daily_max_loss_hit ? 'bad' : (s.day_pnl ?? 0) < 0 ? 'warn' : 'ok'} />
-      <Gauge label="Open risk" value={`${(s.open_risk_pct ?? 0).toFixed(2)}%`}
-        detail={`of ${s.risk_budget_pct}% budget · ${s.open_positions} open`}
-        tone={s.open_risk_pct > s.risk_budget_pct * 0.8 ? 'warn' : 'ok'} />
-      <Gauge label="Give-back" value={s.giveback_locked ? 'LOCKED' : s.giveback_armed ? 'armed' : 'not armed'}
-        detail={s.giveback_floor != null ? `floor $${s.giveback_floor.toFixed(0)}` : `window ${s.entry_window}`}
-        tone={s.giveback_locked ? 'bad' : s.giveback_armed ? 'warn' : 'ok'} />
-    </div>
-  );
-}
-
-function MechanicalVariantsPanel({ dateRange }) {
-  const [status, setStatus]   = useState(null);
-  const [comparison, setComparison] = useState(null);
-  const [error, setError]     = useState(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetch(`${API}/api/mechanical-variants/status`)
-      .then(r => r.json())
-      .then(d => { if (!cancelled) setStatus(d); })
-      .catch(() => {});
-    const id = setInterval(() => {
-      fetch(`${API}/api/mechanical-variants/status`).then(r => r.json()).then(d => { if (!cancelled) setStatus(d); }).catch(() => {});
-    }, 60000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    const params = new URLSearchParams();
-    if (dateRange?.start) params.set('start', dateRange.start);
-    if (dateRange?.end)   params.set('end', dateRange.end);
-    fetch(`${API}/api/mechanical-variants/comparison?${params.toString()}`)
-      .then(r => r.json())
-      .then(d => { if (!cancelled) { setComparison(d); setError(null); } })
-      .catch(() => { if (!cancelled) setError('failed to load'); });
-    return () => { cancelled = true; };
-  }, [dateRange?.start, dateRange?.end]);
-
-  const accounts = ['mechanical', 'mechanical_prime', 'mechanical_session'];
-  const rows = comparison?.accounts;
-
-  return (
-    <div className="account-panel" style={{ borderLeftColor: '#e879f9' }}>
-      <div className="panel-headline">
-        <div className="panel-headline__top">
-          <span className="panel-headline__dot" style={{ background: '#e879f9' }} />
-          <span className="panel-headline__name">Mechanical Prime / Session</span>
-        </div>
-      </div>
-
-      <div style={{ padding: '2px 12px 0' }}>
-        <div style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text3)', margin: '6px 0 2px' }}>Prime — 15:00-18:00 UAE</div>
-        <MechVariantGauges status={status} account="mechanical_prime" />
-        <div style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text3)', margin: '6px 0 2px' }}>Session — 09:00-21:00 UAE</div>
-        <MechVariantGauges status={status} account="mechanical_session" />
-      </div>
-
-      <CollapsibleSection label="Comparison" defaultOpen={true}>
-        {error && <div className="section-empty">{error}</div>}
-        {!error && !rows && <div className="section-empty">Loading…</div>}
-        {rows && (
-          <div style={{ overflowX: 'auto', padding: '4px 12px 10px' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'var(--mono)', fontSize: 10 }}>
-              <thead>
-                <tr style={{ color: 'var(--text3)', textAlign: 'right' }}>
-                  <th style={{ textAlign: 'left', padding: '3px 6px' }}>Account</th>
-                  <th style={{ padding: '3px 6px' }}>Equity</th>
-                  <th style={{ padding: '3px 6px' }}>Net P&L</th>
-                  <th style={{ padding: '3px 6px' }}>Return</th>
-                  <th style={{ padding: '3px 6px' }}>Trades</th>
-                  <th style={{ padding: '3px 6px' }}>WR</th>
-                  <th style={{ padding: '3px 6px' }}>PF</th>
-                  <th style={{ padding: '3px 6px' }}>Avg P&L</th>
-                  <th style={{ padding: '3px 6px' }}>Expectancy</th>
-                  <th style={{ padding: '3px 6px' }}>Max DD</th>
-                  <th style={{ padding: '3px 6px' }}>Cur DD</th>
-                  <th style={{ padding: '3px 6px' }}>Avg Win</th>
-                  <th style={{ padding: '3px 6px' }}>Avg Loss</th>
-                  <th style={{ padding: '3px 6px' }}>Largest Win</th>
-                  <th style={{ padding: '3px 6px' }}>Largest Loss</th>
-                  <th style={{ padding: '3px 6px' }}>Cur Losses</th>
-                  <th style={{ padding: '3px 6px' }}>Worst Streak</th>
-                </tr>
-              </thead>
-              <tbody>
-                {accounts.map(a => {
-                  const r = rows[a]?.comparison;
-                  if (!r) return null;
-                  return (
-                    <tr key={a} style={{ borderTop: '1px solid var(--border)' }}>
-                      <td style={{ padding: '3px 6px', color: 'var(--text2)' }}>{MECH_VARIANT_LABELS[a]}</td>
-                      <td style={{ padding: '3px 6px', textAlign: 'right' }}>{usd(r.current_equity, 0)}</td>
-                      <td style={{ padding: '3px 6px', textAlign: 'right', color: (r.net_pnl ?? 0) >= 0 ? 'var(--pos)' : 'var(--neg)' }}>{bpUsd(r.net_pnl)}</td>
-                      <td style={{ padding: '3px 6px', textAlign: 'right' }}>{r.return_pct == null ? '—' : `${r.return_pct.toFixed(1)}%`}</td>
-                      <td style={{ padding: '3px 6px', textAlign: 'right' }}>{r.closed_trades}</td>
-                      <td style={{ padding: '3px 6px', textAlign: 'right' }}>{r.win_rate == null ? '—' : `${r.win_rate.toFixed(0)}%`}</td>
-                      <td style={{ padding: '3px 6px', textAlign: 'right' }}>{r.profit_factor == null ? '—' : r.profit_factor === Infinity ? '∞' : r.profit_factor.toFixed(2)}</td>
-                      <td style={{ padding: '3px 6px', textAlign: 'right' }}>{bpUsd(r.avg_pnl)}</td>
-                      <td style={{ padding: '3px 6px', textAlign: 'right' }}>{r.expectancy_r == null ? '—' : `${r.expectancy_r.toFixed(2)}R`}</td>
-                      <td style={{ padding: '3px 6px', textAlign: 'right' }}>{bpUsd(-Math.abs(r.max_drawdown || 0))}</td>
-                      <td style={{ padding: '3px 6px', textAlign: 'right' }}>{bpUsd(-Math.abs(r.current_drawdown || 0))}</td>
-                      <td style={{ padding: '3px 6px', textAlign: 'right' }}>{bpUsd(r.avg_winner)}</td>
-                      <td style={{ padding: '3px 6px', textAlign: 'right' }}>{bpUsd(r.avg_loser)}</td>
-                      <td style={{ padding: '3px 6px', textAlign: 'right' }}>{bpUsd(r.largest_winner)}</td>
-                      <td style={{ padding: '3px 6px', textAlign: 'right' }}>{bpUsd(r.largest_loss)}</td>
-                      <td style={{ padding: '3px 6px', textAlign: 'right' }}>{r.current_consecutive_losses}</td>
-                      <td style={{ padding: '3px 6px', textAlign: 'right' }}>{r.worst_losing_streak}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </CollapsibleSection>
-
-      <CollapsibleSection label="3-hour window breakdown">
-        {rows && (
-          <div style={{ overflowX: 'auto', padding: '4px 12px 10px' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'var(--mono)', fontSize: 10 }}>
-              <thead>
-                <tr style={{ color: 'var(--text3)', textAlign: 'right' }}>
-                  <th style={{ textAlign: 'left', padding: '3px 6px' }}>Account</th>
-                  {THREE_HOUR_WINDOW_KEYS.map(w => <th key={w} style={{ padding: '3px 6px' }}>{w} UAE</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {accounts.map(a => {
-                  const buckets = rows[a]?.time_buckets?.by_3h_window;
-                  if (!buckets) return null;
-                  return (
-                    <tr key={a} style={{ borderTop: '1px solid var(--border)' }}>
-                      <td style={{ padding: '3px 6px', color: 'var(--text2)' }}>{MECH_VARIANT_LABELS[a]}</td>
-                      {THREE_HOUR_WINDOW_KEYS.map(w => {
-                        const b = buckets[w];
-                        return (
-                          <td key={w} style={{ padding: '3px 6px', textAlign: 'right' }} title={`${b?.n ?? 0} trades`}>
-                            {b && b.n > 0 ? `${bpPct(b.win_rate)} · ${bpUsd(b.net_pnl)}` : '—'}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--text3)', marginTop: 6 }}>
-              win rate · net P&L per window. Hover a cell for its trade count — small samples shouldn't be over-read.
-            </div>
-          </div>
-        )}
-      </CollapsibleSection>
-
-      <CollapsibleSection label="Safety-rule value (Prime/Session)">
-        {rows && (
-          <div style={{ overflowX: 'auto', padding: '4px 12px 10px' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'var(--mono)', fontSize: 10 }}>
-              <thead>
-                <tr style={{ color: 'var(--text3)', textAlign: 'right' }}>
-                  <th style={{ textAlign: 'left', padding: '3px 6px' }}>Account</th>
-                  <th style={{ padding: '3px 6px' }}>Time filter</th>
-                  <th style={{ padding: '3px 6px' }}>Loss cluster</th>
-                  <th style={{ padding: '3px 6px' }}>Daily loss limit</th>
-                  <th style={{ padding: '3px 6px' }}>Give-back lock</th>
-                  <th style={{ padding: '3px 6px' }}>Position sizing</th>
-                </tr>
-              </thead>
-              <tbody>
-                {['mechanical_prime', 'mechanical_session'].map(a => {
-                  const attr = rows[a]?.attribution;
-                  if (!attr) return null;
-                  const cell = m => (
-                    <td style={{ padding: '3px 6px', textAlign: 'right', color: (m?.value ?? 0) >= 0 ? 'var(--pos)' : 'var(--neg)' }}
-                        title={`${m?.n_matured ?? 0}/${m?.n_contributing ?? 0} matured`}>
-                      {bpUsd(m?.value)}
-                    </td>
-                  );
-                  return (
-                    <tr key={a} style={{ borderTop: '1px solid var(--border)' }}>
-                      <td style={{ padding: '3px 6px', color: 'var(--text2)' }}>{MECH_VARIANT_LABELS[a]}</td>
-                      {cell(attr.TIME_FILTER_VALUE)}
-                      {cell(attr.LOSS_CLUSTER_VALUE)}
-                      {cell(attr.DAILY_LOSS_LIMIT_VALUE)}
-                      {cell(attr.GIVEBACK_LOCK_VALUE)}
-                      {cell(attr.POSITION_SIZING_VALUE)}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--text3)', marginTop: 6 }}>
-              positive = the rule helped (avoided more than it missed, or dynamic sizing beat flat 1%) · negative = it cost more than it saved.
-              Hover a cell for how many of its underlying decisions have actually matured — early numbers are noisy.
-            </div>
-          </div>
-        )}
-      </CollapsibleSection>
-    </div>
-  );
-}
-
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -1276,8 +1043,6 @@ export default function App() {
           onConfigSaved={cfg => setHybridStatus(s => s ? { ...s, config: cfg } : s)}
           dateRange={dateRange}
         />
-
-        <MechanicalVariantsPanel dateRange={dateRange} />
 
         <MarketPanel snapshot={snapshot} missed={missed} />
       </main>

@@ -27,8 +27,6 @@ import { fileURLToPath } from 'node:url';
 
 import {
   CONFIG_SCHEMA,
-  MECHANICAL_PRIME_SCHEMA,
-  MECHANICAL_SESSION_SCHEMA,
   configFingerprint,
 } from '../botConfig.js';
 
@@ -63,10 +61,11 @@ function consumersOf(key) {
   return SOURCES.filter(s => re.test(s.source)).map(s => s.rel);
 }
 
+// mechanical_prime / mechanical_session were retired on 2026-08-22, taking
+// their schemas with them. Hybrid is the only account with live-editable
+// config now, so it is the only one whose keys can go stale.
 const SCHEMAS = [
   ['hybrid (CONFIG_SCHEMA)', CONFIG_SCHEMA],
-  ['mechanical_prime', MECHANICAL_PRIME_SCHEMA],
-  ['mechanical_session', MECHANICAL_SESSION_SCHEMA],
 ];
 
 describe('bot config settings are actually consumed', () => {
@@ -103,15 +102,19 @@ describe('bot config settings are actually consumed', () => {
     }
   });
 
-  test('the per-trade risk cap specifically is wired into the variant pipeline', () => {
-    // Pinned separately from the generic sweep above: this is the setting
-    // that was dead, and the sweep would still pass if the key survived only
-    // in a comment.
+  test('the per-trade risk cap specifically is wired into hybrid sizing', () => {
+    // Pinned separately from the generic sweep above: this is the setting that
+    // was once declared and dead, and the sweep would still pass if the key
+    // survived only in a comment.
+    //
+    // Until 2026-08-22 this checked applyPerTradeRiskCap in the mechanical
+    // variant pipeline. That pipeline is retired; hybrid is now the only
+    // consumer, and it applies the cap as the third argument to clampRiskUsd.
     const server = SOURCES.find(s => s.rel === 'server.js').source;
     assert.match(
       server,
-      /applyPerTradeRiskCap\(\s*RISK_STATE_PCT\[[^\]]+\],\s*cfg\.maxRiskPerTradePct\s*\)/,
-      'server.js no longer applies maxRiskPerTradePct to the risk-state percentage'
+      /clampRiskUsd\([^)]*cfg\.maxRiskPerTradePct[^)]*\)/,
+      'server.js no longer applies maxRiskPerTradePct when sizing a hybrid entry'
     );
   });
 });
@@ -125,8 +128,8 @@ describe('config fingerprinting', () => {
   });
 
   test('any value change produces a different fingerprint', () => {
-    const base = { entryWindowStartHour: 15, entryWindowEndHour: 18, maxRiskPerTradePct: 1.0 };
-    assert.notEqual(configFingerprint(base), configFingerprint({ ...base, entryWindowEndHour: 19 }));
+    const base = { entryIntervalMin: 10, maxOpenPositions: 3, maxRiskPerTradePct: 1.0 };
+    assert.notEqual(configFingerprint(base), configFingerprint({ ...base, entryIntervalMin: 15 }));
     assert.notEqual(configFingerprint(base), configFingerprint({ ...base, maxRiskPerTradePct: 0.5 }));
   });
 

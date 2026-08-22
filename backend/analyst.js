@@ -1,4 +1,4 @@
-// analyst.js — nightly rulebook analysis for claude_overlay and claude_solo.
+// analyst.js — nightly rulebook analysis for claude_overlay.
 // Reads journal win/loss entries joined to trades and signals,
 // writes results to analyst_rulebook and analyst_combinations.
 // Call runAnalysis(pool) after each trading session closes.
@@ -671,23 +671,6 @@ export function formatRulebookPrompt(rulebookRows, combinationRows) {
     if (!byTag[r.tag]) byTag[r.tag] = {};
     byTag[r.tag][r.account_name] = r;
   }
-  const crossTags = Object.entries(byTag).filter(([, accts]) =>
-    accts['claude_overlay'] && accts['claude_solo']
-  );
-  if (crossTags.length > 0) {
-    lines.push('');
-    lines.push('CROSS-ACCOUNT PATTERNS:');
-    for (const [tag, accts] of crossTags) {
-      const s = accts['claude_solo'];
-      const o = accts['claude_overlay'];
-      const agree = (s.win_rate >= 0.5) === (o.win_rate >= 0.5) ? 'AGREE' : 'DISAGREE';
-      lines.push(
-        `[${tag}] solo: ${(s.win_rate * 100).toFixed(0)}% over ${s.n_total} | ` +
-        `overlay: ${(o.win_rate * 100).toFixed(0)}% over ${o.n_total} | ${agree}`
-      );
-    }
-  }
-
   // Top 5 combinations
   if (combinationRows.length > 0) {
     lines.push('');

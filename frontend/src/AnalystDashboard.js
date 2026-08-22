@@ -6,19 +6,16 @@ const API = process.env.REACT_APP_API_URL || '';
 const C = {
   mech:    '#4d9de0',
   overlay: '#f0a030',
-  solo:    '#48bb78',
 };
 
 function accountColor(name) {
   if (name === 'mechanical')     return C.mech;
   if (name === 'claude_overlay') return C.overlay;
-  if (name === 'claude_solo')    return C.solo;
   return '#888';
 }
 
 function accountShort(name) {
   if (name === 'claude_overlay') return 'OVERLAY';
-  if (name === 'claude_solo')    return 'SOLO';
   if (name === 'mechanical')     return 'MECH';
   return name.toUpperCase();
 }
@@ -660,14 +657,12 @@ export default function AnalystDashboard({ onBack }) {
   const combos  = rulebook?.combinations || [];
 
   const filteredRows = allRows.filter(r => {
-    if (filter === 'solo')       return r.account_name === 'claude_solo';
     if (filter === 'overlay')    return r.account_name === 'claude_overlay';
     if (filter === 'sufficient') return r.sample_confidence === 'sufficient';
     if (filter === 'early')      return r.sample_confidence === 'early';
     return true;
   });
 
-  const soloPins    = pins.filter(p => p.portfolio_id === 3 && p.active);
   const overlayPins = pins.filter(p => p.portfolio_id === 2 && p.active);
 
   return (
@@ -729,7 +724,7 @@ export default function AnalystDashboard({ onBack }) {
             <div className="summary-card__label">Pins active</div>
             <div className="summary-card__val">{pins.filter(p => p.active).length}</div>
             <div className="summary-card__sub">
-              solo {soloPins.length} · overlay {overlayPins.length}
+              overlay {overlayPins.length}
             </div>
           </div>
         </div>
@@ -747,7 +742,7 @@ export default function AnalystDashboard({ onBack }) {
         {/* Rulebook (tag-based, with condition combinations folded in) */}
         <Section id="rulebook" title="Rulebook" count={`${filteredRows.length} patterns`}>
           <div className="analyst-filters">
-            {['all', 'solo', 'overlay', 'sufficient', 'early'].map(f => (
+            {['all', 'overlay', 'sufficient', 'early'].map(f => (
               <button
                 key={f}
                 className={`filter-tab ${filter === f ? 'filter-tab--active' : ''}`}
@@ -798,7 +793,6 @@ export default function AnalystDashboard({ onBack }) {
         {/* Pinned lessons */}
         <Section id="pins" title="Pinned lessons" count={`${pins.filter(p => p.active).length} active`}>
           <div className="pins-grid">
-            <PinnedCol label="Solo" color={C.solo} pins={soloPins} />
             <PinnedCol label="Overlay" color={C.overlay} pins={overlayPins} />
           </div>
         </Section>

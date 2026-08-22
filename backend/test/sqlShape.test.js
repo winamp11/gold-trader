@@ -186,7 +186,9 @@ describe('SQL write paths', () => {
     );
     const tables = new Set(STATIC_INSERTS.map(i => i.table));
     for (const required of [
-      'mechanical_variant_decisions',
+      // mechanical_variant_decisions is no longer INSERTed into -- the
+      // variants were retired 2026-08-22 -- but the TABLE and its historical
+      // rows remain, as does the outcomes writer used by nothing else.
       'mechanical_variant_decision_outcomes',
       'hybrid_decisions',
       'hybrid_skips',

@@ -30,8 +30,6 @@ export function configFingerprint(config) {
 }
 
 export const HYBRID_BOT = 'claude_hybrid';
-export const MECHANICAL_PRIME_BOT   = 'mechanical_prime';
-export const MECHANICAL_SESSION_BOT = 'mechanical_session';
 
 // group is used by the UI to section the form.
 export const CONFIG_SCHEMA = [
@@ -129,48 +127,3 @@ export async function saveBotConfig(pool, config, botName = HYBRID_BOT, schema =
   `, [botName, JSON.stringify(clean), new Date().toISOString()]);
   return clean;
 }
-
-// ── mechanical_prime / mechanical_session ────────────────────────────────
-// Same risk envelope for both -- only the entry window differs -- so the
-// shared fields are built once and reused, matching the "one engine, two
-// configs" principle the risk math itself follows. The risk-STATE
-// percentages (NORMAL 1.00% / CAUTION 0.50% / DEFENSIVE 0.25% / PAUSED 0%)
-// are deliberately NOT here: they live as named constants in
-// mechanicalRiskEngine.js, not in a live-editable dashboard field, so
-// nothing can quietly turn the loss-cluster throttle into a suggestion.
-function variantRiskFields() {
-  return [
-    { key: 'maxRiskPerTradePct',   label: 'Max risk per trade',    unit: '%', def: 1.00, min: 0.1, max: 2,  step: 0.05, group: 'Risk',
-      help: 'Ceiling for any single position at NORMAL risk state, before the loss-cluster throttle or open-risk headroom clamp.' },
-    { key: 'maxTotalRiskPct',      label: 'Max total open risk',   unit: '%', def: 3.00, min: 0.5, max: 10, step: 0.1,  group: 'Risk',
-      help: 'Combined risk across all open positions for this account.' },
-    { key: 'maxOpenPositions',     label: 'Max open positions',    unit: '',  def: 3,    min: 1,   max: 5,  step: 1,    group: 'Risk',
-      help: 'Hard cap on simultaneous open positions.' },
-    { key: 'dailyMaxLossPct',      label: 'Daily max loss',        unit: '%', def: 3.0,  min: 0.5, max: 10, step: 0.1,  group: 'Risk',
-      help: 'Stop opening new trades for the rest of the UAE day at this daily loss.' },
-    { key: 'dailyProfitTargetPct', label: 'Give-back arms above',  unit: '%', def: 2.5,  min: 0.5, max: 20, step: 0.1,  group: 'Give-back',
-      help: 'Profit-protection mode activates once daily equity first reaches this.' },
-    { key: 'giveBackPct',          label: 'Give-back lock trigger', unit: '%', def: 30,  min: 5,   max: 90, step: 1,    group: 'Give-back',
-      help: 'Lock out new trades for the day once equity gives back this much of the day\'s peak profit.' },
-    { key: 'atrMultMin',           label: 'Stop: min ATR multiple', unit: '×', def: 0.75, min: 0.25, max: 5, step: 0.05, group: 'Entries',
-      help: 'Lower safety clamp on Mechanical\'s proposed stop distance. Target is never touched.' },
-    { key: 'atrMultMax',           label: 'Stop: max ATR multiple', unit: '×', def: 3.0,  min: 0.5,  max: 10, step: 0.05, group: 'Entries',
-      help: 'Upper safety clamp on Mechanical\'s proposed stop distance. Target is never touched.' },
-  ];
-}
-
-export const MECHANICAL_PRIME_SCHEMA = [
-  { key: 'entryWindowStartHour', label: 'Entry window start', unit: 'UAE hr', def: 15, min: 0, max: 23, step: 1, group: 'Entry window',
-    help: 'No NEW mechanical_prime entries before this hour. Existing positions still manage normally.' },
-  { key: 'entryWindowEndHour',   label: 'Entry window end',   unit: 'UAE hr', def: 18, min: 1, max: 24, step: 1, group: 'Entry window',
-    help: 'No NEW mechanical_prime entries at/after this hour.' },
-  ...variantRiskFields(),
-];
-
-export const MECHANICAL_SESSION_SCHEMA = [
-  { key: 'entryWindowStartHour', label: 'Entry window start', unit: 'UAE hr', def: 9,  min: 0, max: 23, step: 1, group: 'Entry window',
-    help: 'No NEW mechanical_session entries before this hour. Existing positions still manage normally.' },
-  { key: 'entryWindowEndHour',   label: 'Entry window end',   unit: 'UAE hr', def: 21, min: 1, max: 24, step: 1, group: 'Entry window',
-    help: 'No NEW mechanical_session entries at/after this hour.' },
-  ...variantRiskFields(),
-];

@@ -78,8 +78,11 @@ describe('forceClosePortfolio callers state their cause', () => {
     // The default exists only so the signature stays compatible; every real
     // call site must name its cause, or the four causes silently merge again.
     const server = read('server.js');
+    // Was >= 4 until 2026-08-22, when prop_sim's hard halt and the mechanical
+    // variants were retired. The count is not the point -- naming the cause is
+    // -- so the floor tracks the call sites that actually remain.
     const calls = [...server.matchAll(/forceClosePortfolio\(([^)]*)\)/g)].map(m => m[1]);
-    assert.ok(calls.length >= 4, `expected at least 4 call sites, found ${calls.length}`);
+    assert.ok(calls.length >= 2, `expected at least 2 call sites, found ${calls.length}`);
     for (const args of calls) {
       assert.match(
         args, /EXIT_REASONS\./,

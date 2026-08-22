@@ -319,7 +319,7 @@ export async function reflectDaily(pool, { dryRun = false, limit = BATCH_LIMIT, 
 export async function reflect(tracking, outcome, pnl) {
   try {
     if (REFLECT_MODE === 'daily') return;   // handled by the 21:15 UAE batch run
-    const CLAUDE_ACCOUNTS = ['claude_overlay', 'claude_solo'];
+    const CLAUDE_ACCOUNTS = ['claude_overlay'];   // solo retired 2026-08-22
     if (!CLAUDE_ACCOUNTS.includes(tracking.portfolioName)) return;
 
     const { entryType, exitType } = classifyOutcome(outcome, pnl);
@@ -369,7 +369,7 @@ export async function reflect(tracking, outcome, pnl) {
 export async function reflectVeto(shadow, wouldBeOutcome, wouldBePnl) {
   try {
     if (REFLECT_MODE === 'daily') return;   // handled by the 21:15 UAE batch run
-    const CLAUDE_ACCOUNTS = ['claude_overlay', 'claude_solo'];
+    const CLAUDE_ACCOUNTS = ['claude_overlay'];   // solo retired 2026-08-22
     if (!CLAUDE_ACCOUNTS.includes(shadow.portfolioName)) return;
 
     const wouldHaveWon  = wouldBePnl != null ? wouldBePnl > 0 : wouldBeOutcome === 'TARGET_HIT';

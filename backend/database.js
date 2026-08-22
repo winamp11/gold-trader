@@ -125,18 +125,16 @@ class DatabaseService {
     await this.pool.query(`
       INSERT INTO portfolios (name, starting_balance, current_balance) VALUES
         ('mechanical',     100000, 100000),
-        ('claude_overlay', 100000, 100000),
-        ('claude_solo',    100000, 100000)
+        ('claude_overlay', 100000, 100000)
       ON CONFLICT (name) DO NOTHING
     `);
 
-    // FTMO-style prop-firm simulation account: reuses the overlay's decisions
-    // through a strict risk envelope (see PROP config in server.js).
-    await this.pool.query(`
-      INSERT INTO portfolios (name, starting_balance, current_balance) VALUES
-        ('prop_sim', 100000, 100000)
-      ON CONFLICT (name) DO NOTHING
-    `);
+    // claude_solo, prop_sim, mechanical_prime and mechanical_session were
+    // retired from the trading path on 2026-08-22 and are no longer seeded.
+    // Their rows -- portfolios, trades, journal, decisions -- are deliberately
+    // left in place: they are the record of those experiments, and every
+    // conclusion drawn from them still rests on that data. Nothing writes to
+    // them any more. See RETIRED_ACCOUNTS in server.js for why each stopped.
 
     // Hybrid bot: overlay's judgment + forward-rulebook evidence, under a
     // live-editable risk envelope (see botConfig.js).
@@ -146,16 +144,6 @@ class DatabaseService {
       ON CONFLICT (name) DO NOTHING
     `);
 
-    // mechanical_prime / mechanical_session: same Mechanical signal as the
-    // unchanged `mechanical` control, filtered to a historically-strong
-    // entry window and sized by the deterministic risk engine in
-    // mechanicalRiskEngine.js (see server.js). Not a second strategy.
-    await this.pool.query(`
-      INSERT INTO portfolios (name, starting_balance, current_balance) VALUES
-        ('mechanical_prime',   100000, 100000),
-        ('mechanical_session', 100000, 100000)
-      ON CONFLICT (name) DO NOTHING
-    `);
 
     // Highest balance recorded at any day boundary — anchor for FTMO's
     // trailing Maximum Loss rule (limit = high water − 10% of initial).
@@ -1495,38 +1483,6 @@ class DatabaseService {
   // on purpose; a row's trade_id is known synchronously at insert time
   // (openPosition() returns the new trade id), so there is never a reason
   // to write back to a row after it's created.
-
-  async saveMechanicalVariantDecision(d) {
-    const r = await this.pool.query(`
-      INSERT INTO mechanical_variant_decisions (
-        account, signal_id, cycle_ts_utc, cycle_ts_uae, uae_weekday, uae_hour,
-        direction, signal_entry, signal_stop, signal_target, mech_tag, mech_reasoning,
-        h4_rsi, h1_rsi, h4_macd_hist, h1_macd_hist, h4_adx, h1_adx, h1_atr, h4_atr,
-        clamped_stop, atr_mult_applied,
-        session_permitted, risk_state_before, risk_state_after, state_transition_reason,
-        allowed_risk_pct, equity, day_start_equity, day_pnl,
-        open_risk_pct_before, open_position_count, consecutive_losses,
-        final_action, reason_code, lots, risk_usd, theoretical_1pct_lots, trade_id,
-        config_version, config_snapshot
-      ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
-        $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,
-        $40,$41
-      ) RETURNING id
-    `, [
-      d.account, d.signalId ?? null, d.cycleTsUtc, d.cycleTsUae, d.uaeWeekday, d.uaeHour,
-      d.direction, d.signalEntry, d.signalStop, d.signalTarget, d.mechTag ?? null, d.mechReasoning ?? null,
-      d.h4Rsi ?? null, d.h1Rsi ?? null, d.h4MacdHist ?? null, d.h1MacdHist ?? null,
-      d.h4Adx ?? null, d.h1Adx ?? null, d.h1Atr ?? null, d.h4Atr ?? null,
-      d.clampedStop ?? null, d.atrMultApplied ?? null,
-      d.sessionPermitted, d.riskStateBefore, d.riskStateAfter, d.stateTransitionReason ?? null,
-      d.allowedRiskPct, d.equity, d.dayStartEquity, d.dayPnl,
-      d.openRiskPctBefore, d.openPositionCount, d.consecutiveLosses,
-      d.finalAction, d.reasonCode ?? null, d.lots ?? null, d.riskUsd ?? null, d.theoretical1pctLots, d.tradeId ?? null,
-      d.configVersion ?? null, d.configSnapshot ?? null,
-    ]);
-    return r.rows[0].id;
-  }
 
   // REJECT rows with no linked outcome yet -- EXECUTE/REDUCE rows already
   // have real ground truth via trade_id -> trades, so only pure rejections

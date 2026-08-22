@@ -3,7 +3,6 @@ import { EXIT_REASONS, isForcedExit } from './exitReasons.js';
 import { isTradingHours } from './tradingHours.js';
 import { reflect, reflectVeto } from './deciders/reflector.js';
 import { VALUE_PER_LOT, SPREAD_POINTS } from './contractSpec.js';
-import { handleMechanicalVariantTradeClosed } from './mechanicalVariantState.js';
 
 class OutcomeTracker {
   constructor() {
@@ -219,8 +218,6 @@ class OutcomeTracker {
         await database.upsertDailyPnl(today, portfolio.id, pnl, pnl > 0);
         const newBalance = portfolio.current_balance + pnl;
         console.log(`💰 [${portfolio.name}] P&L ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} → $${newBalance.toFixed(2)}`);
-        // No-op for any portfolio other than mechanical_prime/mechanical_session.
-        await handleMechanicalVariantTradeClosed(portfolio.name, pnl);
       }
     }
 

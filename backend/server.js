@@ -11,7 +11,6 @@ import { isTradingHours, getNextTradingTime, getSession, uaeTime } from './tradi
 
 import { decide as mechanicalDecide }    from './deciders/mechanicalDecider.js';
 import { decide as claudeOverlayDecide } from './deciders/claudeOverlayDecider.js';
-import { decide as claudeSoloDecide }    from './deciders/claudeSoloDecider.js';
 import { decide as claudeHybridDecide }  from './deciders/claudeHybridDecider.js';
 import {
   reflectDaily, normalizeReflectMin, shouldReflectNow,
@@ -25,22 +24,8 @@ import { runAnalysis, formatRulebookPrompt, adxBucket, rsiBucket } from './analy
 import { runForwardLabeling } from './forwardLabeler.js';
 import { runHybridMaturation } from './hybridMaturation.js';
 import { computeBranchAnalytics } from './hybridAnalytics.js';
-import { runMechanicalVariantMaturation } from './mechanicalVariantMaturation.js';
-import { computeComparisonMetrics, computeTimeBuckets, computeAttributionMetrics } from './mechanicalVariantAnalytics.js';
 import { getM1CacheMetrics, cleanupOldM1Candles } from './m1CandleCache.js';
-import {
-  CONFIG_SCHEMA, getBotConfig, saveBotConfig, HYBRID_BOT,
-  MECHANICAL_PRIME_BOT, MECHANICAL_SESSION_BOT, MECHANICAL_PRIME_SCHEMA, MECHANICAL_SESSION_SCHEMA,
-  configFingerprint,
-} from './botConfig.js';
-import {
-  RISK_STATE_PCT, applyPerTradeRiskCap,
-  isWithinEntryWindow, isMaxPositionsReached, calculateLotsForRisk, clampToOpenRiskHeadroom, clampStopToAtrBand,
-  evaluateDailyGuards, checkRecoveryEvidence, applyEvidenceBasedRecovery,
-} from './mechanicalRiskEngine.js';
-import {
-  MECH_VARIANT_ACCOUNTS, mechVariantState, ensureMechVariantDay, persistMechVariantState,
-} from './mechanicalVariantState.js';
+import { CONFIG_SCHEMA, getBotConfig, saveBotConfig, HYBRID_BOT, configFingerprint } from './botConfig.js';
 import { classifyRulebookQualification, classifyOverlayStatus, classifyBranch, clampRiskUsd } from './hybridBranchClassifier.js';
 
 dotenv.config();
@@ -67,37 +52,31 @@ let wasInTradingHours  = false;
 const circuitBreakerState = {};
 let currentSessionDate    = null;  // UAE date of the last initSessionDay() call
 
-// ── FTMO prop-firm simulation (portfolio 'prop_sim') ───────────────────────
-// Reuses the overlay's decision each cycle (no extra Claude calls) through a
-// strict risk envelope modeled on FTMO 1-Step rules. Halt thresholds sit at
-// 80% of FTMO's limits as a slippage/spread buffer.
-// FTMO's day boundary is 00:00 CE(S)T; all positions are flat by 21:00 UAE
-// (19:00 CEST), so the day-start balance equals the midnight balance and the
-// session day maps 1:1 onto the FTMO day.
-const PROP = {
-  name:                'prop_sim',
-  initialCapital:      100000,
-  riskPerTrade:        500,     // 0.5% of INITIAL capital (FTMO limits are % of initial)
-  maxOpenPositions:    3,
-  dailyLossHalt:       2400,    // halt day at −$2,400 (FTMO Max Daily Loss: 3% = $3,000)
-  totalDrawdownHalt:   8000,    // permanent halt at high-water −$8,000 (FTMO Max Loss: 10% = $10,000)
-  dailyProfitGovernor: 2000,    // no new entries after +$2,000 closed on the day (Best Day rule ≤50%)
-
-  // Rulebook-executor gates: prop trades ONLY forward_rulebook buckets that
-  // earned it. Trades the exact thing the label measured: market entry,
-  // 4h hold, disaster stop far enough that realized ≈ measured.
-  rule: {
-    minSamples:      100,      // bucket n_total floor
-    minPctUp:        58,       // LONG when pct_up_4h ≥ 58; SHORT when ≤ 42
-    minAvgMove:      5,        // |avg_fwd_4h| floor in points (spread is 0.30)
-    holdHours:       4,        // exit horizon = the label's horizon
-    stopExcursionX:  2.5,      // disaster stop = 2.5× the bucket's avg adverse excursion
-    minStopPoints:   15,
-    // Entries allowed for the full trading window; late positions simply get
-    // WINDOW_CLOSE'd at 21:00 UAE before completing the 4h hold.
-  },
-};
-let propHardHalted = null;      // ISO date string when the trailing Max Loss guard fired, else null
+// ── RETIRED ACCOUNTS ──────────────────────────────────────────────────────
+// Removed from the trading path on 2026-08-22. Their portfolios, trades,
+// journal entries and decision rows are all UNTOUCHED -- they are the record
+// of the experiments, and every conclusion drawn from them stands. What is
+// gone is execution: none of these place orders, consume an LLM call, or
+// write a new row.
+//
+//   claude_solo         disabled 2026-08-09. 61 trades, 0.80 profit factor in
+//                       both halves, no trend, no signal distinct from the
+//                       mechanical/overlay RSI/MACD family.
+//   prop_sim            FTMO simulation, stopped trading on request.
+//   mechanical_prime    the loss-cluster throttle they existed to test is
+//   mechanical_session  structurally negative: losses are taken at FULL size
+//                       (the first four of a streak), then recovery wins come
+//                       back at 25% and climb one step per win. Full-size
+//                       losses, quarter-size wins, on a signal near 50/50.
+//                       That is arithmetic, not variance -- prime -4,088 and
+//                       session -5,421 against a control at +15,304. They also
+//                       took ZERO chop-bucket trades: their entry windows put
+//                       100% of their volume in the ADX bands where mechanical
+//                       bleeds worst.
+//
+// The finding is the point. Position-sizing rules reduce variance
+// symmetrically; they do not create edge, and an asymmetric one destroys it.
+const RETIRED_ACCOUNTS = new Set(['claude_solo', 'prop_sim', 'mechanical_prime', 'mechanical_session']);
 
 // ── Hybrid bot day state ──────────────────────────────────────────────────
 // peakProfit drives the give-back rule; stoppedReason latches the day off
@@ -371,12 +350,6 @@ let prevDayCache = { date: null, high: null, low: null };
 const SOLO_INTERVAL_MS = (parseInt(process.env.SOLO_INTERVAL_MIN) || 15) * 60 * 1000;
 let lastSoloCallMs = 0;
 
-// Disabled 2026-08-09: two months live (61 trades) showed a flat 0.80
-// profit factor in both the first and second half, no improvement trend,
-// and no signal distinct from mechanical/overlay's shared RSI/MACD family
-// -- not worth the token spend right now. Decider file, portfolio balance,
-// and trade history are untouched. Flip back to true to resume.
-const SOLO_ENABLED = false;
 
 function updateSessionRange(price) {
   const today = uaeDate();
@@ -516,179 +489,6 @@ async function openPosition({ portfolio, decision, signalId, currentPrice, isSig
   return tradeId;
 }
 
-// ── Helper: evaluate one mechanical_prime/mechanical_session cycle ────────
-// Consumes the SAME mechDecision object mechanical itself already got this
-// cycle -- never a second mechanicalDecide() call, never a second copy of
-// the RSI/MACD/ADX/ATR entry logic. Every path through this function ends
-// in exactly one INSERT into mechanical_variant_decisions (never an
-// UPDATE), whether the signal was executed, reduced, or rejected. No AI
-// component is in this call path at all -- it is pure deterministic gating
-// over mechanicalRiskEngine.js's pure functions.
-async function evaluateMechanicalVariant({ account, portfolio, cfg, mechDecision, marketData, signalId, currentPrice, currentSession }) {
-  if (mechDecision.action !== 'TRADE') return; // RED cycles need no gating, mirrors mechanical's own executor
-
-  const today  = uaeDate();
-  // Mark-to-market equity, not the realized balance. The daily max-loss and
-  // give-back guards exist to stop the account while a bad day is happening;
-  // measuring them off realized balance alone means three open losers do not
-  // register at all until they close, so the -3% guard can only ever fire
-  // after the damage is already booked. hybrid has always marked to market
-  // here (see the dashboard/circuit-breaker paths) -- prime/session were the
-  // outlier. Sizing and the decision journal use the same number, so every
-  // percentage in a decision row shares one basis.
-  const equity = portfolio.current_balance + computeUnrealizedPnl(portfolio.id, currentPrice);
-  await ensureMechVariantDay(account, today, equity);
-  const state = mechVariantState[account];
-
-  const { mins: uaeMinutes, day: uaeWeekday, uaeDate: uaeDateObj } = uaeTime();
-  const uaeHour = uaeDateObj.getUTCHours();
-  const nowUtc  = new Date();
-
-  const riskStateBefore = state.riskState;
-
-  // Daily guards recomputed fresh from live equity every cycle -- pure,
-  // monotonic for the day (never un-trips once tripped).
-  const guard = evaluateDailyGuards({
-    dayStartEquity: state.dayStartEquity, currentEquity: equity, dayPeakEquity: state.dayPeakEquity,
-    givebackArmed: state.givebackArmed, givebackLocked: state.givebackLocked, dailyMaxLossHit: state.dailyMaxLossHit,
-    dailyMaxLossPct: cfg.dailyMaxLossPct, dailyProfitTargetPct: cfg.dailyProfitTargetPct, giveBackPct: cfg.giveBackPct,
-  });
-  state.dayPeakEquity = guard.dayPeakEquity;
-  state.givebackArmed = guard.givebackArmed;
-  state.givebackLocked = guard.givebackLocked;
-  state.dailyMaxLossHit = guard.dailyMaxLossHit;
-  let stateTransitionReason = guard.event;
-
-  // Evidence-gated PAUSED -> DEFENSIVE check. Deterministic numerical
-  // conditions only -- see mechanicalRiskEngine.checkRecoveryEvidence.
-  if (state.riskState === 'PAUSED') {
-    const recent = await fetchRecentSignalsForRecovery(12);
-    const evidence = checkRecoveryEvidence(recent);
-    const recovery = applyEvidenceBasedRecovery({ currentState: state.riskState, eligible: evidence.eligible });
-    if (recovery.transitioned) {
-      console.log(`🔓 [${account}] RISK_RESUME: ${evidence.reasons.join(', ')}`);
-      state.riskState = recovery.newState;
-      stateTransitionReason = stateTransitionReason ?? `${recovery.reason}(${evidence.reasons.join('+')})`;
-    }
-  }
-  if (stateTransitionReason) await persistMechVariantState(account);
-
-  const riskStateAfter  = state.riskState;
-  // The risk state sets the ceiling; the configurable per-trade cap can only
-  // lower it further. Journalled as the EFFECTIVE percentage actually used
-  // for sizing, not the raw state percentage, so the decision record matches
-  // what was traded.
-  const allowedRiskPct  = applyPerTradeRiskCap(RISK_STATE_PCT[riskStateAfter], cfg.maxRiskPerTradePct);
-  const sessionPermitted = isWithinEntryWindow(uaeMinutes, cfg.entryWindowStartHour, cfg.entryWindowEndHour);
-  const openPositions    = outcomeTracker.getOpenPositionsForPortfolio(portfolio.id);
-  const openRiskUsdBefore = computeOpenRiskUsd(portfolio.id);
-  const openRiskPctBefore = equity > 0 ? (openRiskUsdBefore / equity) * 100 : 0;
-  const theoretical = calculateLotsForRisk({ equity, riskPct: 1.00, entry: mechDecision.entry, stop: mechDecision.stop });
-
-  // Computed BEFORE the rejection gates, not after. It is a pure function of
-  // the signal and ATR, so running it early has no side effect -- but every
-  // REJECT row now records the geometry this account would actually have
-  // traded. Previously the early gates (window, pause, daily loss, give-back,
-  // max positions) all returned before the clamp ran, leaving clamped_stop
-  // null; maturation then fell back to Mechanical's raw stop. Since
-  // maturation only ever runs on REJECT rows, that meant essentially every
-  // counterfactual was resolved against a stop this account would never have
-  // used, which is exactly the number TIME_FILTER_VALUE and LOSS_CLUSTER_
-  // VALUE are computed from. The INVALID_STOP gate itself stays in its
-  // original position below so reason codes remain comparable with history.
-  const clamp = clampStopToAtrBand({
-    direction: mechDecision.direction, entry: mechDecision.entry, rawStop: mechDecision.stop,
-    h1Atr: marketData.h1?.atr, atrMultMin: cfg.atrMultMin, atrMultMax: cfg.atrMultMax,
-  });
-
-  const base = {
-    account, signalId, cycleTsUtc: nowUtc.toISOString(), cycleTsUae: uaeDateObj.toISOString(),
-    uaeWeekday, uaeHour,
-    direction: mechDecision.direction, signalEntry: mechDecision.entry, signalStop: mechDecision.stop, signalTarget: mechDecision.target,
-    mechTag: mechDecision.tag ?? null, mechReasoning: mechDecision.reasoning ?? null,
-    h4Rsi: marketData.h4?.rsi ?? null, h1Rsi: marketData.h1?.rsi ?? null,
-    h4MacdHist: marketData.h4?.macd_hist ?? null, h1MacdHist: marketData.h1?.macd_hist ?? null,
-    h4Adx: marketData.h4?.adx ?? null, h1Adx: marketData.h1?.adx ?? null,
-    h1Atr: marketData.h1?.atr ?? null, h4Atr: marketData.h4?.atr ?? null,
-    sessionPermitted, riskStateBefore, riskStateAfter, stateTransitionReason,
-    allowedRiskPct, equity, dayStartEquity: state.dayStartEquity, dayPnl: guard.dayPnl,
-    openRiskPctBefore, openPositionCount: openPositions.length, consecutiveLosses: state.consecutiveLosses,
-    theoretical1pctLots: theoretical.lots,
-    // Which configuration produced this decision. Stamped on every row,
-    // including rejections, so any slice of the dataset can be checked for
-    // whether it spans more than one treatment before it is aggregated.
-    configVersion: configFingerprint(cfg),
-    configSnapshot: JSON.stringify(cfg),
-  };
-
-  const reject = (reasonCode, extra = {}) => database.saveMechanicalVariantDecision({
-    ...base,
-    clampedStop: extra.clampedStop ?? clamp?.stop ?? null,
-    atrMultApplied: extra.atrMultApplied ?? clamp?.atrMultApplied ?? null,
-    finalAction: 'REJECT', reasonCode, lots: null, riskUsd: null, tradeId: null,
-  });
-
-  // ── Mandatory pipeline, in order, no bypass ──────────────────────────
-  if (!sessionPermitted) {
-    return reject(account === MECHANICAL_PRIME_BOT ? 'OUTSIDE_PRIME_WINDOW' : 'OUTSIDE_SESSION_WINDOW');
-  }
-  if (riskStateAfter === 'PAUSED') {
-    return reject('LOSS_CLUSTER_PAUSE');
-  }
-  if (state.dailyMaxLossHit) {
-    return reject('DAILY_MAX_LOSS');
-  }
-  if (state.givebackLocked) {
-    return reject('DAILY_GIVEBACK_LOCK');
-  }
-  if (isMaxPositionsReached(openPositions.length, cfg.maxOpenPositions)) {
-    return reject('MAX_POSITIONS');
-  }
-
-  if (!clamp) {
-    return reject('INVALID_STOP');
-  }
-
-  const requested = calculateLotsForRisk({ equity, riskPct: allowedRiskPct, entry: mechDecision.entry, stop: clamp.stop });
-  if (requested.lots <= 0) {
-    return reject('POSITION_TOO_SMALL', { clampedStop: clamp.stop, atrMultApplied: clamp.atrMultApplied });
-  }
-
-  const headroom = clampToOpenRiskHeadroom({
-    requestedRiskUsd: requested.riskUsd, existingOpenRiskUsd: openRiskUsdBefore, equity, maxTotalRiskPct: cfg.maxTotalRiskPct,
-  });
-  if (headroom.allowedRiskUsd <= 0) {
-    return reject('MAX_OPEN_RISK', { clampedStop: clamp.stop, atrMultApplied: clamp.atrMultApplied });
-  }
-
-  let finalLots = requested.lots, finalRiskUsd = requested.riskUsd, finalAction = 'EXECUTE';
-  if (headroom.reduced) {
-    const headroomPct = (headroom.allowedRiskUsd / equity) * 100;
-    const reduced = calculateLotsForRisk({ equity, riskPct: headroomPct, entry: mechDecision.entry, stop: clamp.stop });
-    if (reduced.lots <= 0) {
-      return reject('MAX_OPEN_RISK', { clampedStop: clamp.stop, atrMultApplied: clamp.atrMultApplied });
-    }
-    finalLots = reduced.lots; finalRiskUsd = reduced.riskUsd; finalAction = 'REDUCE';
-  }
-
-  if (!(finalLots > 0) || !(clamp.distance > 0)) {
-    return reject('INVALID_STOP', { clampedStop: clamp.stop, atrMultApplied: clamp.atrMultApplied });
-  }
-
-  const decision = {
-    action: 'TRADE', direction: mechDecision.direction, entry: mechDecision.entry,
-    stop: clamp.stop, target: mechDecision.target, lots: finalLots,
-    reasoning: mechDecision.reasoning, tag: account,
-  };
-  const tradeId = await openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
-
-  return database.saveMechanicalVariantDecision({
-    ...base, clampedStop: clamp.stop, atrMultApplied: clamp.atrMultApplied,
-    finalAction, reasonCode: finalAction === 'REDUCE' ? 'MAX_OPEN_RISK' : null,
-    lots: finalLots, riskUsd: finalRiskUsd, tradeId,
-  });
-}
-
 // ── Helper: open a veto shadow for one portfolio ───────────────────────────
 async function openVetoShadow({ portfolio, decision, currentPrice, session = null }) {
   const shadowId = await database.saveVetoShadow({
@@ -824,13 +624,6 @@ async function initSessionDay() {
     circuitBreakerState[p.id] = { halted: haltedToday, haltedOnDate: haltedToday ? today : null, dayStartBalance };
     if (haltedToday) console.log(`🛑 [CIRCUIT BREAKER] ${p.name} still halted (restored)`);
 
-    // FTMO trailing Max Loss anchor: high water = highest day-boundary balance
-    // (or initial capital if higher). Positions are flat overnight, so the
-    // day-start balance IS the midnight balance.
-    if (isNewDay && p.name === PROP.name) {
-      const hw = Math.max(p.high_water_balance ?? PROP.initialCapital, p.current_balance);
-      if (hw !== p.high_water_balance) await database.setHighWaterBalance(p.id, hw);
-    }
   }
   currentSessionDate = today;
   if (isNewDay) {
@@ -850,19 +643,18 @@ async function checkCircuitBreakers(currentPrice) {
 
   const portfolios = await database.getAllPortfolios();
   for (const p of portfolios) {
+    if (RETIRED_ACCOUNTS.has(p.name)) continue;   // no execution, nothing to halt
     const state = circuitBreakerState[p.id];
     if (!state || state.halted) continue;
 
     const realized   = p.current_balance - state.dayStartBalance;
     const unrealized = computeUnrealizedPnl(p.id, currentPrice);
     const dayPnl     = realized + unrealized;
-    const isProp     = p.name === PROP.name;
-    // prop_sim halts at FTMO's Max Daily Loss (with buffer); others keep -10%
-    const threshold  = isProp ? -PROP.dailyLossHalt : -(state.dayStartBalance * 0.10);
+    const threshold  = -(state.dayStartBalance * 0.10);
 
     if (dayPnl <= threshold) {
       console.log(
-        `🛑 [CIRCUIT BREAKER] ${p.name} hit ${isProp ? 'FTMO daily-loss' : '-10%'} day loss` +
+        `🛑 [CIRCUIT BREAKER] ${p.name} hit -10% day loss` +
         ` (realized $${realized.toFixed(2)} + unrealized $${unrealized.toFixed(2)} = $${dayPnl.toFixed(2)},` +
         ` threshold $${threshold.toFixed(2)}) — flattened and halted until next session`
       );
@@ -873,21 +665,6 @@ async function checkCircuitBreakers(currentPrice) {
       console.log(`🛑 [CIRCUIT BREAKER] ${p.name} — ${closed} position(s)/shadow(s) closed, halted for session day ${today}`);
     }
 
-    // FTMO trailing Max Loss (10% of initial below high-water): permanent halt.
-    if (isProp && !propHardHalted) {
-      const equity     = p.current_balance + unrealized;
-      const highWater  = p.high_water_balance ?? PROP.initialCapital;
-      const totalLimit = highWater - PROP.totalDrawdownHalt;
-      if (equity <= totalLimit) {
-        console.log(
-          `🛑 [PROP HARD HALT] ${p.name} equity $${equity.toFixed(2)} ≤ trailing limit $${totalLimit.toFixed(2)}` +
-          ` (high water $${highWater.toFixed(2)} − $${PROP.totalDrawdownHalt}) — account permanently halted`
-        );
-        await outcomeTracker.forceClosePortfolio(p.id, currentPrice, EXIT_REASONS.PROP_HARD_HALT);
-        propHardHalted = today;
-        await database.setServiceState('prop_hard_halt', JSON.stringify({ date: today, equity, limit: totalLimit }));
-      }
-    }
   }
 }
 
@@ -950,11 +727,9 @@ async function generateSignalIfTradingHours() {
     // Load all three portfolios fresh from DB (balances may have changed)
     const mechPortfolio    = await database.getPortfolioByName('mechanical');
     const overlayPortfolio = await database.getPortfolioByName('claude_overlay');
-    const soloPortfolio    = await database.getPortfolioByName('claude_solo');
 
     // Each Claude account reads its own recent lessons; mechanical gets none.
     const overlayLessons = await database.getRecentLessons(overlayPortfolio.id);
-    const soloLessons    = await database.getRecentLessons(soloPortfolio.id);
 
     // ── Mechanical decider — pure market-analysis proposal ─────────────────
     // mechDecision reflects technical analysis ONLY — no position/budget gating.
@@ -1031,37 +806,8 @@ async function generateSignalIfTradingHours() {
       });
     }
 
-    // ── mechanical_prime / mechanical_session ─────────────────────────────
-    // Consume the SAME mechDecision computed above -- no second signal call,
-    // no duplicated indicator logic. mechanical itself is completely
-    // unmodified above this point. Gated first by the same generic -10%
-    // circuit breaker every other account already has (checkCircuitBreakers
-    // iterates all portfolios automatically), then by the full deterministic
-    // pipeline in evaluateMechanicalVariant.
-    // Each account's evaluation is isolated in its own try/catch: a failure
-    // evaluating mechanical_prime must never prevent mechanical_session from
-    // getting its turn, and neither may ever be allowed to abort the rest of
-    // this cycle (overlay/solo/hybrid, below) by throwing out of this loop.
-    for (const account of MECH_VARIANT_ACCOUNTS) {
-      try {
-        const portfolio = await database.getPortfolioByName(account);
-        if (isHaltedToday(portfolio.id)) {
-          console.log(`🛑 [${account}] Circuit breaker active — skipping this cycle`);
-          continue;
-        }
-        const schema = account === MECHANICAL_PRIME_BOT ? MECHANICAL_PRIME_SCHEMA : MECHANICAL_SESSION_SCHEMA;
-        const cfg = await getBotConfig(database.pool, account, schema);
-        await evaluateMechanicalVariant({
-          account, portfolio, cfg, mechDecision, marketData, signalId, currentPrice, currentSession,
-        });
-      } catch (err) {
-        console.error(`❌ [${account}] evaluation failed (non-fatal, rest of cycle continues): ${err.message}`);
-      }
-    }
-
     // ── Each Claude account queries its OWN open positions only ──────────
     const overlayOpenPositions = outcomeTracker.getOpenPositionsForPortfolio(overlayPortfolio.id);
-    const soloOpenPositions    = outcomeTracker.getOpenPositionsForPortfolio(soloPortfolio.id);
 
     // ── Claude Overlay decider ────────────────────────────────────────────
     // Always receives mechDecision regardless of mechanical's execution status.
@@ -1084,37 +830,6 @@ async function generateSignalIfTradingHours() {
         }
       } else if (overlayDecision.action === 'VETO') {
         await openVetoShadow({ portfolio: overlayPortfolio, decision: overlayDecision, currentPrice, session: currentSession });
-      }
-    }
-
-    // ── prop_sim (FTMO simulation) retired ────────────────────────────────
-    // Stopped trading on request. Its portfolio row, trades and endpoints are
-    // deliberately preserved as the historical record of that experiment.
-
-    // ── Claude Solo decider ───────────────────────────────────────────────
-    let soloDecision;
-    if (!SOLO_ENABLED) {
-      soloDecision = { action: 'NO_TRADE', direction: null, entry: null, stop: null, target: null, lots: null, reasoning: 'solo disabled', tag: 'solo_disabled' };
-    } else if (isHaltedToday(soloPortfolio.id)) {
-      console.log(`🛑 [SOLO] Circuit breaker active — skipping Claude call this cycle`);
-      soloDecision = { action: 'NO_TRADE', direction: null, entry: null, stop: null, target: null, lots: null, reasoning: 'circuit breaker halt', tag: 'circuit_breaker_halt' };
-    } else if (SOLO_INTERVAL_MS - (Date.now() - lastSoloCallMs) > 0) {
-      const soloDueMs = SOLO_INTERVAL_MS - (Date.now() - lastSoloCallMs);
-      console.log(`⏭️  [SOLO] throttled — next evaluation in ${Math.ceil(soloDueMs / 60000)} min (every ${SOLO_INTERVAL_MS / 60000} min)`);
-      soloDecision = { action: 'NO_TRADE', direction: null, entry: null, stop: null, target: null, lots: null, reasoning: `throttled — solo evaluates every ${SOLO_INTERVAL_MS / 60000} min`, tag: 'solo_throttled' };
-    } else {
-      lastSoloCallMs = Date.now();
-      soloDecision = await claudeSoloDecide(
-        marketData, atr, soloPortfolio, soloLessons, soloOpenPositions, null, currentSession
-      );
-      if (soloDecision.action === 'TRADE') {
-        if (soloOpenPositions.length >= 3) {
-          console.log(`⏸️  [SOLO] Position cap: ${soloOpenPositions.length}/3 open — no new position this cycle`);
-        } else {
-          await openPosition({ portfolio: soloPortfolio, decision: soloDecision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
-        }
-      } else if (soloDecision.action === 'VETO') {
-        await openVetoShadow({ portfolio: soloPortfolio, decision: soloDecision, currentPrice, session: currentSession });
       }
     }
 
@@ -1457,7 +1172,7 @@ async function generateSignalIfTradingHours() {
     await database.updateSignalDecisions(
       signalId,
       decisionLabel(overlayDecision),
-      decisionLabel(soloDecision)
+      null   // solo retired 2026-08-22; column kept for the historical record
     );
 
     // Cache the mechanical signal for /api/signal
@@ -1467,10 +1182,9 @@ async function generateSignalIfTradingHours() {
     lastCycleDecisions = {
       mechanical: { action: mechDecision.action,    tag: mechDecision.tag    ?? null, reasoning: mechDecision.reasoning ?? null },
       overlay:    { action: overlayDecision.action,  tag: overlayDecision.tag  ?? null, reasoning: overlayDecision.reasoning ?? null },
-      solo:       { action: soloDecision.action,     tag: soloDecision.tag     ?? null, reasoning: soloDecision.reasoning ?? null },
     };
 
-    console.log(`✅ [CYCLE] mech=${mechDecision.action}, overlay=${overlayDecision.action}, solo=${soloDecision.action}`);
+    console.log(`✅ [CYCLE] mech=${mechDecision.action}, overlay=${overlayDecision.action}`);
   } catch (error) {
     console.error('❌ [CYCLE] Error:', error.message);
   }
@@ -1702,8 +1416,6 @@ function startForwardLabeler() {
   setInterval(() => runForwardLabeling(database.pool), 60 * 60 * 1000);
   setTimeout(() => runHybridMaturation(database.pool), 3 * 60 * 1000);
   setInterval(() => runHybridMaturation(database.pool), 60 * 60 * 1000);
-  setTimeout(() => runMechanicalVariantMaturation(database.pool), 4 * 60 * 1000);
-  setInterval(() => runMechanicalVariantMaturation(database.pool), 60 * 60 * 1000);
 }
 
 // ── M1 candle cache retention — once per UAE day ──────────────────────────
@@ -1845,7 +1557,7 @@ app.get('/api/export-all', async (req, res) => {
 
 // Trades export — each executed trade joined to its originating signal's at-signal columns.
 // ?format=csv → RFC-4180 CSV download  (default: JSON)
-// ?account=mechanical|claude_overlay|claude_solo → filter to one account
+// ?account=mechanical|claude_overlay|claude_hybrid → filter to one account
 app.get('/api/export-trades', async (req, res) => {
   try {
     const params = [];
@@ -2250,18 +1962,6 @@ app.get('/api/hybrid/branch-analytics', async (req, res) => {
   }
 });
 
-// Manual mechanical-variant maturation trigger. No ?max_calls param anymore
-// -- the API budget is shared/internal to m1CandleCache.js now, not
-// assigned per caller. Call repeatedly until remaining=0.
-app.post('/api/mechanical-variants/maturation/run', async (req, res) => {
-  try {
-    const result = await runMechanicalVariantMaturation(database.pool);
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // Snapshot of the shared M1 candle cache — requests served from cache vs.
 // requiring a Twelve Data fetch, real API calls made, candles inserted,
 // budget-exhausted misses, broken down per consumer (forward_labeler /
@@ -2313,114 +2013,6 @@ app.get('/api/regime', async (req, res) => {
 
 app.get('/api/m1-cache/metrics', (req, res) => {
   res.json(getM1CacheMetrics());
-});
-
-// Mechanical / mechanical_prime / mechanical_session comparison — equity,
-// P&L, WR, PF, expectancy, drawdown, streaks per account; time-bucket
-// breakdowns (hour/3h-window/weekday/weekday×window) from real trade
-// history; the five value-attribution metrics for prime/session (mechanical
-// itself has no decision journal, so no attribution metrics — nothing to
-// attribute value to). ?start=&end= as YYYY-MM-DD, same convention as the
-// equity chart and hybrid's branch-analytics; omit either for all history.
-app.get('/api/mechanical-variants/comparison', async (req, res) => {
-  try {
-    const params = [];
-    let dateFilter = '';
-    if (req.query.start) { params.push(req.query.start + 'T00:00:00Z'); dateFilter += ` AND t.timestamp >= $${params.length}`; }
-    if (req.query.end)   { params.push(req.query.end   + 'T23:59:59Z'); dateFilter += ` AND t.timestamp <= $${params.length}`; }
-
-    const ACCOUNTS = ['mechanical', 'mechanical_prime', 'mechanical_session'];
-    const accounts = {};
-
-    for (const name of ACCOUNTS) {
-      const portfolio = await database.getPortfolioByName(name);
-      if (!portfolio) continue;
-
-      const { rows: trades } = await database.pool.query(`
-        SELECT t.pnl, t.timestamp, t.exit_timestamp, t.entry_price, t.stop_loss, t.lot_size
-        FROM trades t
-        WHERE t.portfolio_id = $${params.length + 1} AND t.exit_reason IS NOT NULL ${dateFilter}
-        ORDER BY t.timestamp ASC
-      `, [...params, portfolio.id]);
-
-      const entry = {
-        account: name,
-        starting_balance: portfolio.starting_balance,
-        comparison: computeComparisonMetrics(trades, portfolio.starting_balance),
-        time_buckets: computeTimeBuckets(trades),
-      };
-
-      if (name !== 'mechanical') {
-        const decParams = [name];
-        let decDateFilter = '';
-        if (req.query.start) { decParams.push(req.query.start + 'T00:00:00Z'); decDateFilter += ` AND d.cycle_ts_utc >= $${decParams.length}`; }
-        if (req.query.end)   { decParams.push(req.query.end   + 'T23:59:59Z'); decDateFilter += ` AND d.cycle_ts_utc <= $${decParams.length}`; }
-        const { rows: decisions } = await database.pool.query(`
-          SELECT d.reason_code, d.final_action, d.lots, d.theoretical_1pct_lots,
-                 o.eod_pnl, o.eod_outcome, o.matured_at,
-                 t.pnl AS trade_pnl
-          FROM mechanical_variant_decisions d
-          LEFT JOIN mechanical_variant_decision_outcomes o ON o.decision_id = d.id
-          LEFT JOIN trades t ON t.id = d.trade_id
-          WHERE d.account = $1 ${decDateFilter}
-        `, decParams);
-        entry.attribution = computeAttributionMetrics(decisions);
-        entry.total_evaluations = decisions.length;
-      }
-
-      accounts[name] = entry;
-    }
-
-    res.json({ accounts, attribution_cutover: attributionCutover });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Live risk-state snapshot for mechanical_prime/mechanical_session — the
-// compact gauge-row equivalent of /api/hybrid/status, not a full account
-// panel. Reflects mechVariantState directly (in-memory, restart-safe via
-// service_state) rather than recomputing from the decision journal.
-app.get('/api/mechanical-variants/status', async (req, res) => {
-  try {
-    const out = {};
-    for (const account of MECH_VARIANT_ACCOUNTS) {
-      const portfolio = await database.getPortfolioByName(account);
-      if (!portfolio) continue;
-      const schema = account === MECHANICAL_PRIME_BOT ? MECHANICAL_PRIME_SCHEMA : MECHANICAL_SESSION_SCHEMA;
-      const cfg = await getBotConfig(database.pool, account, schema);
-      const state = mechVariantState[account];
-      const openRiskUsd = computeOpenRiskUsd(portfolio.id);
-      // Same mark-to-market basis the guards themselves now use, so the
-      // gauge row cannot disagree with the state it is reporting on.
-      const equity = portfolio.current_balance + computeUnrealizedPnl(portfolio.id, lastKnownPrice);
-      const peakProfit = state.dayStartEquity != null ? (state.dayPeakEquity ?? state.dayStartEquity) - state.dayStartEquity : null;
-      const givebackFloor = state.givebackArmed && peakProfit != null
-        ? state.dayStartEquity + peakProfit * (1 - cfg.giveBackPct / 100)
-        : null;
-      out[account] = {
-        balance: equity,
-        day_start_equity: state.dayStartEquity,
-        day_pnl: state.dayStartEquity != null ? equity - state.dayStartEquity : null,
-        risk_state: state.riskState,
-        allowed_risk_pct: applyPerTradeRiskCap(RISK_STATE_PCT[state.riskState], cfg.maxRiskPerTradePct),
-        consecutive_losses: state.consecutiveLosses,
-        open_positions: outcomeTracker.getOpenPositionsForPortfolio(portfolio.id).length,
-        open_risk_usd: openRiskUsd,
-        open_risk_pct: equity > 0 ? (openRiskUsd / equity) * 100 : 0,
-        risk_budget_pct: cfg.maxTotalRiskPct,
-        daily_max_loss_hit: state.dailyMaxLossHit,
-        daily_max_loss_pct: cfg.dailyMaxLossPct,
-        giveback_armed: state.givebackArmed,
-        giveback_locked: state.givebackLocked,
-        giveback_floor: givebackFloor,
-        entry_window: `${String(cfg.entryWindowStartHour).padStart(2, '0')}:00-${String(cfg.entryWindowEndHour).padStart(2, '0')}:00`,
-      };
-    }
-    res.json(out);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
 // prop_sim's /api/prop/status and /api/prop/reset endpoints were removed
@@ -2629,13 +2221,9 @@ app.get('/api/hybrid/status', async (req, res) => {
 
 // ── Bot config — live-editable parameters, no redeploy needed ────────────
 // Schema drives the settings form; every write is clamped server-side.
-// bot -> schema lookup. Unknown/omitted ?bot= falls back to hybrid, so every
-// pre-existing caller (no query param) is byte-identical to before.
-function schemaForBot(botName) {
-  if (botName === MECHANICAL_PRIME_BOT)   return MECHANICAL_PRIME_SCHEMA;
-  if (botName === MECHANICAL_SESSION_BOT) return MECHANICAL_SESSION_SCHEMA;
-  return CONFIG_SCHEMA;
-}
+// Only hybrid has live-editable config now that the mechanical variants are
+// retired; the ?bot= parameter is kept so existing callers still work.
+function schemaForBot() { return CONFIG_SCHEMA; }
 
 app.get('/api/bot-config', async (req, res) => {
   try {
@@ -2963,15 +2551,6 @@ let attributionCutover = null;
 // Restore the day's session range (survives redeploys).
 await restoreSessionRange();
 
-// Restore the prop hard-halt flag (a fired trailing Max Loss is permanent).
-try {
-  const raw = await database.getServiceState('prop_hard_halt');
-  if (raw) {
-    propHardHalted = JSON.parse(raw).date ?? 'unknown';
-    console.log(`🛑 [PROP] hard halt restored (fired ${propHardHalted})`);
-  }
-} catch { /* absent = never fired */ }
-
 // Restore circuit-breaker state from DB (handles server restarts mid-session).
 {
   const portfolios = await database.getAllPortfolios();
@@ -3104,7 +2683,7 @@ app.listen(PORT, () => {
   console.log(`📡 Price poller: every 1 min  → ~900 checks × 1 call = ~900 calls/day`);
   console.log(`📊 Projected daily total: ~1080 calls  (bulk plan budget: 800/min)`);
   console.log(`📍 Sessions: JP(06-10) | JP-EUR(10-11) | EUR(11-16) | EUR-US(16-19) | US(19-21) UAE`);
-  console.log(`🏦 Accounts: mechanical | claude_overlay | claude_solo`);
+  console.log(`🏦 Accounts: mechanical | claude_overlay | claude_hybrid`);
   console.log('='.repeat(55) + '\n');
 
   startBackgroundSignalGeneration();
