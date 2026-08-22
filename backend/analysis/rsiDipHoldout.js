@@ -22,6 +22,36 @@
 // Default holdout: 2022-08-01 .. 2024-07-31, which ends the day before the
 // existing dataset begins. No overlap.
 //
+// ── RESULT, 2026-08-22: FAILED ──────────────────────────────────────────
+//
+// Run once, on 11,729 hourly bars, 2022-08-01 .. 2024-07-31:
+//
+//   trades      261
+//   win rate    42%
+//   avg P&L     -0.32 points per trade      (PRIMARY required >= +1.00)
+//   total       -83 points
+//   quarters    -32 / +73 / -49 / -75       (SUPPORT required 3 of 4 positive)
+//
+//   gold ROSE : 14 months, -27 pts, profitable 8/14
+//   gold FELL : 10 months, -56 pts, profitable 2/10
+//
+// Development window gave +1.18/trade. The holdout gives -0.32. That gap is
+// the overfitting, measured rather than argued about.
+//
+// Note it lost in RISING months too (-27, 8/14). So this is not only the
+// known bull-market dependence -- the rule itself does not carry.
+//
+// The rule as specified is DEAD. Not "needs tuning": the freeze exists so that
+// a failing result cannot be rescued by adjusting the hour window or the daily
+// cap until it passes, which is precisely what would have happened otherwise.
+// Anyone tempted to edit the spec above and re-run should instead read the
+// development-window numbers again and notice they were +2.07, then +1.18, and
+// now -0.32 as the data got further from where the parameters were chosen.
+//
+// What remains true and was never tested here: the RSI band is a legitimate
+// self-normalising oversold measure. What failed is the claim that acting on
+// it, with this geometry, makes money.
+//
 // ── THE RULE, AS SPECIFIED (frozen) ─────────────────────────────────────
 //
 //   indicator   RSI(14), Wilder, on H1 closes
