@@ -7,6 +7,7 @@
 
 import { callDecider } from './claudeClient.js';
 import { VALUE_PER_LOT } from '../contractSpec.js';
+import { ENTRY_TAXONOMY_PROMPT_BLOCK } from '../tagTaxonomy.js';
 
 // ── System prompt (static → prompt-cached after first call) ─────────────
 
@@ -97,14 +98,24 @@ Respond with a single valid JSON object. No markdown, no text outside the JSON.
   "target": <number or null>,
   "lots": <number or null>,
   "reasoning": "<1–3 sentences for the trade journal — why you resized/approved/vetoed>",
-  "tag": "<snake_case label, e.g. atr_resize, h1_momentum_long, h4_h1_macd_contra_veto>"
+  "tag": "<one entry tag key from the list below — exact string, no modifications>"
 }
 
 For TRADE: all numeric fields must be present and valid.
   LONG: stop < entry < target (strictly)
   SHORT: target < entry < stop (strictly)
 For VETO or NO_TRADE: set direction, entry, stop, target, lots to null.
-reasoning and tag are both mandatory.`;
+reasoning and tag are both mandatory.
+
+For VETO or NO_TRADE the tag still records the entry reason you are declining,
+so the counterfactual shadow is comparable with taken trades of the same setup.
+
+## Entry Tag
+${ENTRY_TAXONOMY_PROMPT_BLOCK}`;
+
+// Exposed for tests only: proves the taxonomy actually reached the prompt.
+// A broken import interpolates "undefined" here and fails silently otherwise.
+export const SYSTEM_PROMPT_FOR_TEST = SYSTEM;
 
 // ── Market-data formatter (shared format with solo decider) ─────────────
 

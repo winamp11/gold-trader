@@ -59,6 +59,41 @@ export const TAG_TAXONOMY = {
   no_entry_observation:         'Overlay or solo chose not to enter — observation only, no trade taken',
 };
 
+// ── Entry-reason taxonomy (decider-side) ──────────────────────────────────
+// Distinct from TAG_TAXONOMY above, which is post-hoc *lesson* classification
+// used by the reflector and by pin firing. This one answers a different
+// question: "why is this trade being entered?", recorded on trades.tag at
+// decision time. Kept closed so Analyst can aggregate expectancy per setup —
+// free-text tags produced 77 distinct strings over 125 trades, 59 of them
+// appearing exactly once, which no aggregation can act on.
+//
+// Risk mechanics (ATR resizing, stop staggering, correlated-book size cuts)
+// are deliberately NOT entry reasons and must not appear here — they were the
+// dominant source of the fragmentation (`atr_resize` appeared in 73 of 77 tags).
+export const ENTRY_TAG_TAXONOMY = {
+  trend_h4:          'Entering with the established H4 trend direction',
+  trend_h1:          'H1 momentum push; H4 neutral, absent or unclear',
+  macd_align:        'H4 and H1 MACD agree, and that agreement is the reason for entry',
+  adx_trend:         'ADX confirms an established trend and the entry goes with it',
+  pullback:          'Counter-move into a trend — buying a dip or selling a rally',
+  breakout:          'Price clears the day or session high/low and the entry follows it',
+  range_fade:        'Fading the session high or low as resistance or support',
+  stop_hunt_reentry: 'Entering after a stop sweep / liquidity grab has reversed',
+  correlated_add:    'Adding to an existing position in the same direction',
+  other:             'None of the above genuinely fits this entry',
+};
+
+// Formatted block for injection into decider system prompts.
+export const ENTRY_TAXONOMY_PROMPT_BLOCK = `\
+REQUIRED: "tag" must be exactly one key from the list below — the single reason \
+this entry is being taken. Do not invent tags, do not combine them with "_", and \
+do not describe sizing or stop mechanics (ATR resizing, staggered stops, \
+correlated-book reductions) in the tag; those belong in "reasoning".
+If none genuinely fits, use "other" — do not force a near-miss.
+
+AVAILABLE ENTRY TAGS:
+${Object.entries(ENTRY_TAG_TAXONOMY).map(([k, v]) => `${k} — ${v}`).join('\n')}`;
+
 // Formatted block for injection into the reflector system prompt.
 export const TAXONOMY_PROMPT_BLOCK = `\
 REQUIRED: You must select the tag from the list below that best fits this lesson. \
