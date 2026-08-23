@@ -2882,6 +2882,52 @@ app.get('/api/diag/veto-dollars', async (req, res) => {
   }
 });
 
+// What the unresolved veto shadows actually are. Read-only.
+// 339 of overlay's 1,641 shadows have no would_be_pnl and are excluded from
+// the veto-effectiveness net. At the average outcome size they could swing
+// that net by more than its own magnitude, so the sign is not settled until
+// their composition is known. Three very different explanations produce the
+// same NULL: never resolved (still pending), resolved-but-not-written (a
+// tracking bug), and genuinely never triggered (no fill — correctly neutral).
+app.get('/api/diag/veto-unresolved', async (req, res) => {
+  try {
+    const pool = database.pool;
+    const { rows } = await pool.query(`
+      SELECT p.name AS account,
+             COALESCE(v.would_be_outcome, '(null)') AS would_be_outcome,
+             COUNT(*) AS n,
+             MIN(v.timestamp) AS oldest,
+             MAX(v.timestamp) AS newest
+      FROM veto_shadows v JOIN portfolios p ON p.id = v.portfolio_id
+      WHERE v.would_be_pnl IS NULL
+      GROUP BY p.name, COALESCE(v.would_be_outcome, '(null)')
+      ORDER BY n DESC
+    `);
+    // Age split matters: a shadow opened in the last few hours is legitimately
+    // pending, while one from weeks ago with no outcome is a stuck record.
+    const { rows: age } = await pool.query(`
+      SELECT p.name AS account,
+             SUM(CASE WHEN v.timestamp > $1 THEN 1 ELSE 0 END) AS last_24h,
+             SUM(CASE WHEN v.timestamp <= $1 THEN 1 ELSE 0 END) AS older_than_24h
+      FROM veto_shadows v JOIN portfolios p ON p.id = v.portfolio_id
+      WHERE v.would_be_pnl IS NULL
+      GROUP BY p.name
+    `, [new Date(Date.now() - 86400000).toISOString()]);
+    // For contrast: how resolved shadows are labelled, so a value appearing
+    // in both sets (e.g. EXPIRED with a pnl AND without) is visible.
+    const { rows: resolved } = await pool.query(`
+      SELECT p.name AS account, v.would_be_outcome, COUNT(*) AS n
+      FROM veto_shadows v JOIN portfolios p ON p.id = v.portfolio_id
+      WHERE v.would_be_pnl IS NOT NULL
+      GROUP BY p.name, v.would_be_outcome
+      ORDER BY n DESC
+    `);
+    res.json({ unresolved_by_outcome: rows, unresolved_by_age: age, resolved_by_outcome: resolved });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/diag/queries', async (req, res) => {
   try {
     const pool = database.pool;
