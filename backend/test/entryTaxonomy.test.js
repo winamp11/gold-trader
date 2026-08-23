@@ -84,3 +84,40 @@ describe('overlay decider prompt wiring', () => {
     assert.match(SYSTEM_PROMPT_FOR_TEST, /VETO or NO_TRADE the tag still records/);
   });
 });
+
+describe('overlay veto-history claim', () => {
+  // The prompt previously told overlay that "vetoes have missed more winners
+  // than they avoided losers". Measured across all 1,069 resolved veto
+  // counterfactuals that is false on both axes: 519 would-be winners vs 550
+  // would-be losers (a coin flip, not a deficit), and +85,356 net in favour
+  // of vetoing once WINDOW_CLOSE artifacts are excluded. The claim was
+  // suppressing a behaviour that pays, so these tests pin it out.
+
+  test('does not reassert the disproven claim', () => {
+    assert.ok(
+      !/missed more\s+winners than they avoided losers/.test(SYSTEM_PROMPT_FOR_TEST),
+      'the disproven veto claim is back in the prompt',
+    );
+  });
+
+  test('states the measured counts and dollars, and dates them', () => {
+    // Figures without a date silently rot as more shadows resolve.
+    assert.match(SYSTEM_PROMPT_FOR_TEST, /1,069 resolved shadows/);
+    assert.match(SYSTEM_PROMPT_FOR_TEST, /519 .*would have won/);
+    assert.match(SYSTEM_PROMPT_FOR_TEST, /550 would\s+have lost/);
+    assert.match(SYSTEM_PROMPT_FOR_TEST, /\+85,356/);
+    assert.match(SYSTEM_PROMPT_FOR_TEST, /as of 2026-08-23/);
+  });
+
+  test('attributes the edge to loss size, not to veto selection skill', () => {
+    // The mechanism matters: overlay's veto win rate is 48.5%, so telling it
+    // it can pick losers would invite more marginal vetoes, each ~EV 0.
+    assert.match(SYSTEM_PROMPT_FOR_TEST, /NOT from picking which trades would fail/);
+  });
+
+  test('keeps veto reserved for genuine direction disagreement', () => {
+    // The corrected figures must not read as blanket encouragement to veto.
+    assert.match(SYSTEM_PROMPT_FOR_TEST, /marginal veto has close to zero expected value/);
+    assert.match(SYSTEM_PROMPT_FOR_TEST, /Veto is reserved for disagreeing with the DIRECTION/);
+  });
+});
