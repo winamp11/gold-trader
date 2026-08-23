@@ -20,14 +20,21 @@
 // -80 scratch and a -2,400 stop-out as the same lesson, and with only three
 // pin slots the cheap-but-frequent mistakes crowd out the expensive ones.
 
-import { COSTLY_VETO_TAGS, ARTIFACT_TAGS } from './tagTaxonomy.js';
+import { COSTLY_VETO_TAGS, ARTIFACT_TAGS, VERDICT_ONLY_TAGS } from './tagTaxonomy.js';
 
 // True when a (tag, entry_type) pair represents an outcome that cost money.
+//
 // Artifact tags are never costly however they are typed: window_close_exit
 // entries are written with entry_type 'loss', but the position was ended by
 // the trading window, not by the thesis failing.
+//
+// Verdict-only tags are never costly either. They say an outcome was bad
+// without saying what produced it, so there is nothing for a pinned lesson to
+// instruct. Excluding them is what keeps the pin channel from restating an
+// aggregate record as a recurring mistake.
 export function isCostly(entryType, tag) {
   if (ARTIFACT_TAGS.has(tag)) return false;
+  if (VERDICT_ONLY_TAGS.has(tag)) return false;
   if (entryType === 'loss') return true;
   if (entryType === 'veto') return COSTLY_VETO_TAGS.has(tag);
   return false;

@@ -18,7 +18,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { selectPinnableTags, isCostly, reconcilePins } from '../pinning.js';
-import { COSTLY_VETO_TAGS, ARTIFACT_TAGS, TAG_TAXONOMY } from '../tagTaxonomy.js';
+import { COSTLY_VETO_TAGS, ARTIFACT_TAGS, VERDICT_ONLY_TAGS, TAG_TAXONOMY } from '../tagTaxonomy.js';
 
 describe('artifact tags', () => {
   test('every member is a real taxonomy tag', () => {
@@ -118,9 +118,10 @@ describe('isCostly', () => {
     assert.equal(isCostly('loss', 'anything_at_all'), true);
   });
 
-  test('a veto is costly only when it gave up a winner', () => {
-    assert.equal(isCostly('veto', 'veto_missed_winner'), true);
+  test('a veto is costly only when it gave up a winner AND names a mechanism', () => {
     assert.equal(isCostly('veto', 'rsi_extreme_veto_missed'), true);
+    // Gave up a winner, but names no mechanism — see VERDICT_ONLY_TAGS.
+    assert.equal(isCostly('veto', 'veto_missed_winner'), false);
     assert.equal(isCostly('veto', 'veto_correct_outcome_avoided'), false);
     assert.equal(isCostly('veto', 'rsi_extreme_veto_correct'), false);
   });
@@ -132,12 +133,13 @@ describe('isCostly', () => {
 
 describe('selectPinnableTags', () => {
   test('vetoes that gave up winners now qualify', () => {
-    // The regression this whole change exists to prevent.
+    // The regression this whole change exists to prevent: veto entries were
+    // typed 'veto' and so could never pin at all.
     const out = selectPinnableTags([
-      { tag: 'veto_missed_winner', entry_type: 'veto', count: 19 },
+      { tag: 'rsi_extreme_veto_missed', entry_type: 'veto', count: 19 },
     ]);
     assert.equal(out.length, 1);
-    assert.equal(out[0].tag, 'veto_missed_winner');
+    assert.equal(out[0].tag, 'rsi_extreme_veto_missed');
     assert.equal(out[0].costlyCount, 19);
   });
 
@@ -155,8 +157,8 @@ describe('selectPinnableTags', () => {
     // The original code did lossCounts[tag] = cnt (assignment). With two
     // contributing entry_types that silently discards one of them.
     const out = selectPinnableTags([
-      { tag: 'veto_missed_winner', entry_type: 'veto', count: 5 },
-      { tag: 'veto_missed_winner', entry_type: 'loss', count: 3 },
+      { tag: 'rsi_extreme_veto_missed', entry_type: 'veto', count: 5 },
+      { tag: 'rsi_extreme_veto_missed', entry_type: 'loss', count: 3 },
     ]);
     assert.equal(out[0].costlyCount, 8);
   });
@@ -276,5 +278,77 @@ describe('reconcilePins', () => {
   test('handles empty and missing inputs', () => {
     assert.deepEqual(reconcilePins([], []), { deactivateIds: [], insert: [] });
     assert.deepEqual(reconcilePins(undefined, undefined), { deactivateIds: [], insert: [] });
+  });
+});
+
+describe('verdict-only tags', () => {
+  // A pinned lesson is injected into the decider as something to do
+  // differently, so the tag has to identify WHAT. Tags that only record
+  // whether an outcome was good or bad name no mechanism and cannot instruct.
+  //
+  // veto_missed_winner is the case that forced this rule. It is the veto-side
+  // analogue of a losing trade, so it looked like an obvious inclusion, and it
+  // immediately took a pin slot with 362 entries. But it means only "vetoed on
+  // structural grounds, was wrong" — pinning it restates overlay's aggregate
+  // veto record as a recurring mistake, while that aggregate measures at
+  // +85,356 in FAVOUR of vetoing (550 losers avoided vs 519 winners forgone).
+  // It would push overlay away from a behaviour the data says pays.
+
+  test('every member is a real taxonomy tag', () => {
+    for (const tag of VERDICT_ONLY_TAGS) {
+      assert.ok(tag in TAG_TAXONOMY, `${tag} is not in TAG_TAXONOMY`);
+    }
+  });
+
+  test('verdict-only and costly-veto sets are disjoint', () => {
+    // Re-adding veto_missed_winner to COSTLY_VETO_TAGS without removing it
+    // here would make isCostly order-dependent and the intent ambiguous.
+    for (const tag of VERDICT_ONLY_TAGS) {
+      assert.ok(!COSTLY_VETO_TAGS.has(tag), `${tag} is in both sets`);
+    }
+  });
+
+  test('a verdict tag cannot pin even when typed as a loss', () => {
+    // Not hypothetical: initializeDatabase runs an "overlay loss remap" that
+    // rewrites entry_type on existing journal rows. Excluding a tag from
+    // COSTLY_VETO_TAGS only covers entry_type 'veto'; if a remap ever types
+    // veto_missed_winner as 'loss' it would sail through on the loss branch.
+    // This is the case the VERDICT_ONLY_TAGS check actually exists for.
+    assert.equal(isCostly('loss', 'veto_missed_winner'), false);
+    assert.equal(isCostly('loss', 'veto_correct_outcome_avoided'), false);
+
+    const out = selectPinnableTags(
+      [{ tag: 'veto_missed_winner', entry_type: 'loss', count: 362 }],
+      { veto_missed_winner: 500000 },
+    );
+    assert.deepEqual(out, []);
+  });
+
+  test('veto_missed_winner cannot pin, at any volume', () => {
+    const out = selectPinnableTags(
+      [{ tag: 'veto_missed_winner', entry_type: 'veto', count: 362 }],
+      { veto_missed_winner: 500000 },
+    );
+    assert.deepEqual(out, []);
+  });
+
+  test('the mechanism-naming veto tag still pins alongside it', () => {
+    // The rule must not throw out the veto channel wholesale — that would
+    // undo the earlier fix and make counterfactuals invisible again.
+    const out = selectPinnableTags(
+      [
+        { tag: 'veto_missed_winner',      entry_type: 'veto', count: 362 },
+        { tag: 'rsi_extreme_veto_missed', entry_type: 'veto', count: 24 },
+      ],
+      { rsi_extreme_veto_missed: 42693 },
+    );
+    assert.deepEqual(out.map(r => r.tag), ['rsi_extreme_veto_missed']);
+    assert.equal(out[0].damageUsd, 42693);
+  });
+
+  test('mechanism-naming trade tags are unaffected', () => {
+    // stop_hunt names a mechanism, so the rule must leave the trade side alone.
+    assert.equal(isCostly('loss', 'stop_hunt'), true);
+    assert.equal(isCostly('loss', 'counter_trend_failed'), true);
   });
 });

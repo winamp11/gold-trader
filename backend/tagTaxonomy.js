@@ -79,9 +79,31 @@ export const ARTIFACT_TAGS = new Set([
 // 'veto', exit_type is null), so the tag is the only place the outcome is
 // recorded. Membership is asserted against TAG_TAXONOMY in the tests, so
 // renaming a tag there breaks loudly rather than silently emptying this set.
+//
+// Membership rule: the tag must name a MECHANISM, not merely record a verdict.
+// A pinned lesson is injected into the decider as something to do differently,
+// so it has to identify what. 'rsi_extreme_veto_missed' does — it points at
+// vetoing on an RSI extreme, which cost $42,693 across 24 entries and is a
+// specific habit overlay can change.
+//
+// 'veto_missed_winner' is deliberately excluded despite being the veto-side
+// analogue of a loss. It means only "vetoed on structural grounds, was wrong",
+// naming no pattern. Pinning it restates the aggregate veto record as a
+// recurring mistake — and the aggregate is measured at +85,356 in favour of
+// vetoing (550 losers avoided against 519 winners forgone). It would tell
+// overlay to veto less on the strength of a number that says the opposite,
+// and a coin flip contains no pattern to learn from anyway.
 export const COSTLY_VETO_TAGS = new Set([
-  'veto_missed_winner',
   'rsi_extreme_veto_missed',
+]);
+
+// Verdict-only tags: they record whether an outcome was good or bad without
+// identifying any mechanism behind it. Never pinnable, on either side of the
+// ledger. Kept as an explicit set rather than an omission so the reasoning is
+// visible at the point where someone would otherwise re-add one.
+export const VERDICT_ONLY_TAGS = new Set([
+  'veto_missed_winner',
+  'veto_correct_outcome_avoided',
 ]);
 
 // ── Entry-reason taxonomy (decider-side) ──────────────────────────────────
