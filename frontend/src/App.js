@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   ResponsiveContainer, LineChart, Line,
   XAxis, YAxis, Tooltip, Legend,
@@ -616,9 +616,26 @@ function HybridSettings({ schema, config, onSaved, bot }) {
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState(null);
 
-  useEffect(() => { setDraft(config); }, [config]);
-
   const dirty = schema.some(f => Number(draft[f.key]) !== Number(config[f.key]));
+
+  // Resync from the server ONLY when its values actually change, and never
+  // while there are unsaved edits.
+  //
+  // This used to depend on [config], the object itself. The dashboard polls
+  // every 60s and rebuilds that object each time, so its identity changed even
+  // when every value was identical -- the effect fired and reset the form
+  // underneath whatever was being typed. Editing a second field then appeared
+  // to revert the first, because the poll had quietly restored it in between.
+  //
+  // Keyed on the VALUES, and gated on `dirty` through a ref so the effect does
+  // not re-run merely because dirty flipped.
+  const serverKey = schema.map(f => `${f.key}=${config[f.key]}`).join('|');
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  useEffect(() => {
+    if (!dirtyRef.current) setDraft(config);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverKey]);
 
   const save = async () => {
     setSaving(true); setMsg(null);
