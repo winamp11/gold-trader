@@ -2922,7 +2922,28 @@ app.get('/api/diag/veto-unresolved', async (req, res) => {
       GROUP BY p.name, v.would_be_outcome
       ORDER BY n DESC
     `);
-    res.json({ unresolved_by_outcome: rows, unresolved_by_age: age, resolved_by_outcome: resolved });
+    // Dollar split per outcome label. WINDOW_CLOSE is 233 of the 1,302
+    // resolved shadows, and the project's own tag taxonomy calls a
+    // window-close exit an artifact to be excluded from expectancy: the
+    // position was closed by the 21:00 UAE window, not by the trade thesis
+    // being right or wrong. If the veto net depends on those, it is measuring
+    // the window rather than the veto.
+    const { rows: byOutcome } = await pool.query(`
+      SELECT p.name AS account, v.would_be_outcome, COUNT(*) AS n,
+             ROUND(COALESCE(SUM(CASE WHEN v.would_be_pnl > 0 THEN v.would_be_pnl ELSE 0 END), 0)::numeric, 2) AS missed_usd,
+             ROUND(COALESCE(SUM(CASE WHEN v.would_be_pnl < 0 THEN -v.would_be_pnl ELSE 0 END), 0)::numeric, 2) AS avoided_usd,
+             ROUND(COALESCE(SUM(-v.would_be_pnl), 0)::numeric, 2) AS net_usd
+      FROM veto_shadows v JOIN portfolios p ON p.id = v.portfolio_id
+      WHERE v.would_be_pnl IS NOT NULL
+      GROUP BY p.name, v.would_be_outcome
+      ORDER BY n DESC
+    `);
+    res.json({
+      unresolved_by_outcome: rows,
+      unresolved_by_age: age,
+      resolved_by_outcome: resolved,
+      dollars_by_outcome: byOutcome,
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
