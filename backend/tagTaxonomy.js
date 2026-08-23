@@ -59,6 +59,17 @@ export const TAG_TAXONOMY = {
   no_entry_observation:         'Overlay or solo chose not to enter — observation only, no trade taken',
 };
 
+// Tags whose own taxonomy definition says the outcome was an artifact of the
+// harness rather than the trade thesis being wrong. These must never pin: a
+// pinned lesson is fed back into the decider as a recurring mistake to avoid,
+// and there is nothing for it to avoid here. window_close_exit alone had 34
+// entries and was displacing genuine lessons from the 3-slot cap.
+export const ARTIFACT_TAGS = new Set([
+  'window_close_exit',    // closed by the 21:00 UAE window, not by TP/SL
+  'expired_no_fill',      // never filled — no trade thesis was ever tested
+  'no_entry_observation', // no trade taken; an observation, not an outcome
+]);
+
 // Veto entries whose verdict is that the veto COST money — the counterfactual
 // would have won. These are the veto-side equivalent of a losing trade, and
 // the only veto outcomes worth pinning: a veto that correctly avoided a loss

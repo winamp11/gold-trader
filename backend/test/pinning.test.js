@@ -17,8 +17,83 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { selectPinnableTags, isCostly } from '../pinning.js';
-import { COSTLY_VETO_TAGS, TAG_TAXONOMY } from '../tagTaxonomy.js';
+import { selectPinnableTags, isCostly, reconcilePins } from '../pinning.js';
+import { COSTLY_VETO_TAGS, ARTIFACT_TAGS, TAG_TAXONOMY } from '../tagTaxonomy.js';
+
+describe('artifact tags', () => {
+  test('every member is a real taxonomy tag', () => {
+    for (const tag of ARTIFACT_TAGS) {
+      assert.ok(tag in TAG_TAXONOMY, `${tag} is not in TAG_TAXONOMY`);
+    }
+  });
+
+  test('window_close_exit is treated as an artifact', () => {
+    // Its own taxonomy entry says "artifact, exclude from expectancy", yet it
+    // was written with entry_type 'loss' and had pinned 34 times, occupying a
+    // slot with a lesson that has nothing to teach.
+    assert.ok(ARTIFACT_TAGS.has('window_close_exit'));
+    assert.match(TAG_TAXONOMY.window_close_exit, /artifact/i);
+  });
+
+  test('artifacts are never costly, even typed as a loss', () => {
+    assert.equal(isCostly('loss', 'window_close_exit'), false);
+    assert.equal(isCostly('loss', 'expired_no_fill'), false);
+  });
+
+  test('artifacts cannot pin however often they recur', () => {
+    const out = selectPinnableTags(
+      [{ tag: 'window_close_exit', entry_type: 'loss', count: 34 }],
+      { window_close_exit: 50000 },
+    );
+    assert.deepEqual(out, []);
+  });
+});
+
+describe('damage-based ranking', () => {
+  const history = [
+    { tag: 'frequent_scratch', entry_type: 'loss', count: 20 },
+    { tag: 'rare_disaster',    entry_type: 'loss', count: 3  },
+  ];
+
+  test('a costly rare mistake outranks a cheap frequent one', () => {
+    // The whole point of the change: counting treats a -80 scratch and a
+    // -2,400 stop-out identically, and with three slots the cheap frequent
+    // mistakes crowd out the expensive ones.
+    const out = selectPinnableTags(history, { frequent_scratch: 1600, rare_disaster: 7200 });
+    assert.deepEqual(out.map(r => r.tag), ['rare_disaster', 'frequent_scratch']);
+  });
+
+  test('count alone would have ranked them the other way', () => {
+    // Pins the regression: if damage is ignored, this flips.
+    const out = selectPinnableTags(history, {});
+    assert.deepEqual(out.map(r => r.tag), ['frequent_scratch', 'rare_disaster']);
+  });
+
+  test('falls back to count when no damage joins, not to arbitrary order', () => {
+    // Damage comes from a join that can miss rows entirely. Degrading to the
+    // previous count behaviour is acceptable; degrading to alphabetical is not.
+    const out = selectPinnableTags(history, { unrelated_tag: 999 });
+    assert.deepEqual(out.map(r => r.tag), ['frequent_scratch', 'rare_disaster']);
+    assert.equal(out[0].damageKnown, false);
+  });
+
+  test('reports damage and flags whether it is known', () => {
+    const out = selectPinnableTags(history, { rare_disaster: 7200.456 });
+    const byTag = Object.fromEntries(out.map(r => [r.tag, r]));
+    assert.equal(byTag.rare_disaster.damageUsd, 7200.46);
+    assert.equal(byTag.rare_disaster.damageKnown, true);
+    assert.equal(byTag.frequent_scratch.damageUsd, 0);
+    assert.equal(byTag.frequent_scratch.damageKnown, false);
+  });
+
+  test('malformed damage values do not corrupt the ordering', () => {
+    // A NaN leaking into the sort key makes the comparator inconsistent and
+    // the resulting order unspecified.
+    const out = selectPinnableTags(history, { frequent_scratch: 'oops', rare_disaster: null });
+    assert.deepEqual(out.map(r => r.tag), ['frequent_scratch', 'rare_disaster']);
+    assert.ok(out.every(r => Number.isFinite(r.damageUsd)));
+  });
+});
 
 describe('costly veto tag set', () => {
   test('every member is a real taxonomy tag', () => {
@@ -134,5 +209,72 @@ describe('selectPinnableTags', () => {
   test('empty and missing history are handled', () => {
     assert.deepEqual(selectPinnableTags([]), []);
     assert.deepEqual(selectPinnableTags(undefined), []);
+  });
+});
+
+describe('reconcilePins', () => {
+  // The production bug this replaces: pins were reconciled incrementally, with
+  // the cap enforced immediately before each insert. Whichever tag was
+  // processed last always won a slot regardless of rank, so a 2-occurrence
+  // lesson displaced a 34-occurrence one.
+
+  test('a lower-ranked tag cannot displace a higher-ranked one', () => {
+    // Exactly the observed failure, replayed. Both tags are already pinned and
+    // both are still wanted, so nothing should move at all.
+    const active = [
+      { id: 1, tag: 'window_close_exit',       journal_id: 100 },
+      { id: 2, tag: 'rsi_exhaustion_fade_loss', journal_id: 200 },
+    ];
+    const desired = [
+      { tag: 'window_close_exit',        journalId: 100 },
+      { tag: 'rsi_exhaustion_fade_loss', journalId: 200 },
+    ];
+    const { deactivateIds, insert } = reconcilePins(active, desired);
+    assert.deepEqual(deactivateIds, []);
+    assert.deepEqual(insert, []);
+  });
+
+  test('is idempotent — a second run with unchanged inputs writes nothing', () => {
+    // The old loop re-inserted on every cycle, which is why the table holds a
+    // dozen near-identical stop_hunt pins.
+    const desired = [{ tag: 'stop_hunt', journalId: 900 }];
+    const first = reconcilePins([], desired);
+    assert.equal(first.insert.length, 1);
+
+    const nowActive = [{ id: 7, tag: 'stop_hunt', journal_id: 900 }];
+    const second = reconcilePins(nowActive, desired);
+    assert.deepEqual(second.deactivateIds, []);
+    assert.deepEqual(second.insert, []);
+  });
+
+  test('retires a pin whose tag dropped out of the target set', () => {
+    const active  = [{ id: 5, tag: 'demoted_tag', journal_id: 11 }];
+    const desired = [{ tag: 'promoted_tag', journalId: 22 }];
+    const { deactivateIds, insert } = reconcilePins(active, desired);
+    assert.deepEqual(deactivateIds, [5]);
+    assert.deepEqual(insert.map(i => i.tag), ['promoted_tag']);
+  });
+
+  test('refreshes a still-wanted tag when a newer lesson supersedes it', () => {
+    const active  = [{ id: 5, tag: 'stop_hunt', journal_id: 11 }];
+    const desired = [{ tag: 'stop_hunt', journalId: 99 }];
+    const { deactivateIds, insert } = reconcilePins(active, desired);
+    assert.deepEqual(deactivateIds, [5]);
+    assert.deepEqual(insert.map(i => i.journalId), [99]);
+  });
+
+  test('clears every pin when nothing qualifies any more', () => {
+    const active = [
+      { id: 1, tag: 'a', journal_id: 1 },
+      { id: 2, tag: 'b', journal_id: 2 },
+    ];
+    const { deactivateIds, insert } = reconcilePins(active, []);
+    assert.deepEqual(deactivateIds, [1, 2]);
+    assert.deepEqual(insert, []);
+  });
+
+  test('handles empty and missing inputs', () => {
+    assert.deepEqual(reconcilePins([], []), { deactivateIds: [], insert: [] });
+    assert.deepEqual(reconcilePins(undefined, undefined), { deactivateIds: [], insert: [] });
   });
 });

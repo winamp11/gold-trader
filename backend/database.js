@@ -1,5 +1,5 @@
 import pg from 'pg';
-import { selectPinnableTags } from './pinning.js';
+import { selectPinnableTags, reconcilePins } from './pinning.js';
 import { COSTLY_VETO_TAGS } from './tagTaxonomy.js';
 
 const { Pool } = pg;
@@ -1729,6 +1729,36 @@ class DatabaseService {
     return r.rows;
   }
 
+  // Dollars lost per journal tag, so pins can be ranked by damage rather than
+  // by number of occurrences. Two different sources are unioned because the
+  // journal's signal_or_trade_id points at different tables depending on
+  // entry_type: trades for a taken loss, veto_shadows for a counterfactual.
+  //
+  // Rows whose id does not join (null, or a deleted parent) contribute no
+  // damage. Counts are therefore taken from getTagFullHistory instead, which
+  // sees every journal row.
+  async getTagDamage(portfolioId) {
+    const { rows } = await this.pool.query(`
+      SELECT tag, ROUND(SUM(damage)::numeric, 2) AS damage_usd, COUNT(*) AS n
+      FROM (
+        SELECT j.tag, CASE WHEN t.pnl < 0 THEN -t.pnl ELSE 0 END AS damage
+        FROM journal j
+        JOIN trades t ON t.id = j.signal_or_trade_id
+        WHERE j.portfolio_id = $1 AND j.entry_type = 'loss' AND j.tag IS NOT NULL
+        UNION ALL
+        -- A costly veto's damage is the winnings it gave up.
+        SELECT j.tag, CASE WHEN v.would_be_pnl > 0 THEN v.would_be_pnl ELSE 0 END AS damage
+        FROM journal j
+        JOIN veto_shadows v ON v.id = j.signal_or_trade_id
+        WHERE j.portfolio_id = $1 AND j.entry_type = 'veto' AND j.tag IS NOT NULL
+      ) x
+      GROUP BY tag
+    `, [portfolioId]);
+    const map = {};
+    for (const r of rows) map[r.tag] = parseFloat(r.damage_usd) || 0;
+    return map;
+  }
+
   // Maintains the pinned_lessons table: finds tags with >= 2 costly outcomes
   // and ensures the most recent costly entry for each is pinned (max 3 active
   // pins per portfolio).
@@ -1736,11 +1766,21 @@ class DatabaseService {
   // "Costly" means a losing trade OR a veto that gave up a winner — see
   // pinning.js. It previously meant losing trades only, which made every veto
   // counterfactual permanently unpinnable.
-  async updatePinnedLessons(portfolioId) {
-    const history = await this.getTagFullHistory(portfolioId);
-    const qualifying = selectPinnableTags(history);
+  async updatePinnedLessons(portfolioId, maxPins = 3) {
+    const [history, damageMap] = await Promise.all([
+      this.getTagFullHistory(portfolioId),
+      this.getTagDamage(portfolioId),
+    ]);
+    const desired = selectPinnableTags(history, damageMap).slice(0, maxPins);
 
-    for (const { tag, costlyCount, totalCount } of qualifying) {
+    // Reconcile the whole active set against the desired top-N rather than
+    // inserting one at a time. The previous loop deactivated the lowest-count
+    // ACTIVE pin immediately before each insert, so whichever tag happened to
+    // be processed last always won a slot: a 2-occurrence lesson displaced a
+    // 34-occurrence one. Deciding the target set first makes the outcome
+    // depend on rank alone, and makes the function idempotent.
+    const desiredByTag = new Map();
+    for (const d of desired) {
       // Most recent costly entry for this tag. Must use the same predicate as
       // the selection above: matching on entry_type = 'loss' alone would find
       // no row for a tag that qualified purely on vetoes, and the tag would
@@ -1751,52 +1791,42 @@ class DatabaseService {
           AND (entry_type = 'loss' OR (entry_type = 'veto' AND tag = ANY($3)))
         ORDER BY timestamp DESC
         LIMIT 1
-      `, [portfolioId, tag, [...COSTLY_VETO_TAGS]]);
-      if (!recent.length) continue;
-      const journalId = recent[0].id;
+      `, [portfolioId, d.tag, [...COSTLY_VETO_TAGS]]);
+      if (recent.length) desiredByTag.set(d.tag, { ...d, journalId: recent[0].id });
+    }
 
-      // Skip if this exact journal entry is already an active pin
-      const { rows: existing } = await this.pool.query(`
-        SELECT id FROM pinned_lessons
-        WHERE portfolio_id = $1 AND journal_id = $2 AND active = TRUE
-      `, [portfolioId, journalId]);
-      if (existing.length > 0) continue;
+    const { rows: active } = await this.pool.query(`
+      SELECT id, tag, journal_id FROM pinned_lessons
+      WHERE portfolio_id = $1 AND active = TRUE
+    `, [portfolioId]);
 
-      // Enforce hard cap of 3 active pins — deactivate lowest-priority one first
-      const { rows: activeRows } = await this.pool.query(`
-        SELECT COUNT(*) AS n FROM pinned_lessons
-        WHERE portfolio_id = $1 AND active = TRUE
-      `, [portfolioId]);
-      if (parseInt(activeRows[0].n) >= 3) {
-        await this.pool.query(`
-          UPDATE pinned_lessons SET active = FALSE
-          WHERE id = (
-            SELECT id FROM pinned_lessons
-            WHERE portfolio_id = $1 AND active = TRUE
-            ORDER BY tag_loss_count ASC, pinned_at ASC
-            LIMIT 1
-          )
-        `, [portfolioId]);
-      }
+    const { deactivateIds, insert } = reconcilePins(active, [...desiredByTag.values()]);
 
+    if (deactivateIds.length) {
+      await this.pool.query(
+        `UPDATE pinned_lessons SET active = FALSE WHERE id = ANY($1)`, [deactivateIds]);
+    }
+
+    for (const d of insert) {
+      const tag = d.tag;
       await this.pool.query(`
         INSERT INTO pinned_lessons
           (portfolio_id, journal_id, tag, tag_total_count, tag_loss_count, pin_reason, pinned_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
       `, [
         portfolioId,
-        journalId,
+        d.journalId,
         tag,
-        totalCount,
-        costlyCount,
+        d.totalCount,
         // Column is named tag_loss_count for schema continuity; it now holds
         // the costly count, which includes costly vetoes.
-        COSTLY_VETO_TAGS.has(tag)
-          ? `costly_veto_tag_recurring_${costlyCount}_times`
-          : `loss_tag_recurring_${costlyCount}_times`,
+        d.costlyCount,
+        d.damageKnown
+          ? `costliest_tag_${Math.round(d.damageUsd)}_usd_over_${d.costlyCount}`
+          : `recurring_tag_${d.costlyCount}_times_damage_unknown`,
         new Date().toISOString(),
       ]);
-      console.log(`📌 [PIN] portfolio=${portfolioId} tag=${tag} costly_count=${costlyCount} journal_id=${journalId}`);
+      console.log(`📌 [PIN] portfolio=${portfolioId} tag=${tag} damage=${d.damageUsd} n=${d.costlyCount} journal_id=${d.journalId}`);
     }
   }
 
