@@ -1,4 +1,6 @@
 import pg from 'pg';
+import { selectPinnableTags } from './pinning.js';
+import { COSTLY_VETO_TAGS } from './tagTaxonomy.js';
 
 const { Pool } = pg;
 
@@ -1727,35 +1729,29 @@ class DatabaseService {
     return r.rows;
   }
 
-  // Maintains the pinned_lessons table: finds tags with loss_count >= 2 and ensures
-  // the most recent loss entry for each such tag is pinned (max 3 active pins per portfolio).
+  // Maintains the pinned_lessons table: finds tags with >= 2 costly outcomes
+  // and ensures the most recent costly entry for each is pinned (max 3 active
+  // pins per portfolio).
+  //
+  // "Costly" means a losing trade OR a veto that gave up a winner — see
+  // pinning.js. It previously meant losing trades only, which made every veto
+  // counterfactual permanently unpinnable.
   async updatePinnedLessons(portfolioId) {
     const history = await this.getTagFullHistory(portfolioId);
+    const qualifying = selectPinnableTags(history);
 
-    // Aggregate loss count and total count per tag
-    const lossCounts  = {};
-    const totalCounts = {};
-    for (const row of history) {
-      const cnt = parseInt(row.count);
-      totalCounts[row.tag] = (totalCounts[row.tag] ?? 0) + cnt;
-      if (row.entry_type === 'loss') lossCounts[row.tag] = cnt;
-    }
-
-    // Tags with >= 2 loss entries, sorted by loss count descending
-    const qualifying = Object.entries(lossCounts)
-      .filter(([, cnt]) => cnt >= 2)
-      .sort((a, b) => b[1] - a[1]);
-
-    for (const [tag, lossCount] of qualifying) {
-      const totalCount = totalCounts[tag] ?? lossCount;
-
-      // Most recent loss entry for this tag
+    for (const { tag, costlyCount, totalCount } of qualifying) {
+      // Most recent costly entry for this tag. Must use the same predicate as
+      // the selection above: matching on entry_type = 'loss' alone would find
+      // no row for a tag that qualified purely on vetoes, and the tag would
+      // be skipped every cycle without ever erroring.
       const { rows: recent } = await this.pool.query(`
         SELECT id FROM journal
-        WHERE portfolio_id = $1 AND tag = $2 AND entry_type = 'loss'
+        WHERE portfolio_id = $1 AND tag = $2
+          AND (entry_type = 'loss' OR (entry_type = 'veto' AND tag = ANY($3)))
         ORDER BY timestamp DESC
         LIMIT 1
-      `, [portfolioId, tag]);
+      `, [portfolioId, tag, [...COSTLY_VETO_TAGS]]);
       if (!recent.length) continue;
       const journalId = recent[0].id;
 
@@ -1792,11 +1788,15 @@ class DatabaseService {
         journalId,
         tag,
         totalCount,
-        lossCount,
-        `loss_tag_recurring_${lossCount}_times`,
+        costlyCount,
+        // Column is named tag_loss_count for schema continuity; it now holds
+        // the costly count, which includes costly vetoes.
+        COSTLY_VETO_TAGS.has(tag)
+          ? `costly_veto_tag_recurring_${costlyCount}_times`
+          : `loss_tag_recurring_${costlyCount}_times`,
         new Date().toISOString(),
       ]);
-      console.log(`📌 [PIN] portfolio=${portfolioId} tag=${tag} loss_count=${lossCount} journal_id=${journalId}`);
+      console.log(`📌 [PIN] portfolio=${portfolioId} tag=${tag} costly_count=${costlyCount} journal_id=${journalId}`);
     }
   }
 

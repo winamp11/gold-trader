@@ -59,6 +59,20 @@ export const TAG_TAXONOMY = {
   no_entry_observation:         'Overlay or solo chose not to enter — observation only, no trade taken',
 };
 
+// Veto entries whose verdict is that the veto COST money — the counterfactual
+// would have won. These are the veto-side equivalent of a losing trade, and
+// the only veto outcomes worth pinning: a veto that correctly avoided a loss
+// is not a mistake to be reminded of.
+//
+// Journal rows carry no structured verdict for vetoes (entry_type is always
+// 'veto', exit_type is null), so the tag is the only place the outcome is
+// recorded. Membership is asserted against TAG_TAXONOMY in the tests, so
+// renaming a tag there breaks loudly rather than silently emptying this set.
+export const COSTLY_VETO_TAGS = new Set([
+  'veto_missed_winner',
+  'rsi_extreme_veto_missed',
+]);
+
 // ── Entry-reason taxonomy (decider-side) ──────────────────────────────────
 // Distinct from TAG_TAXONOMY above, which is post-hoc *lesson* classification
 // used by the reflector and by pin firing. This one answers a different
