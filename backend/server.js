@@ -2840,6 +2840,48 @@ await restoreSessionRange();
   }
 }
 
+// Veto effectiveness in DOLLARS, not counts. Read-only.
+// The overlay system prompt asserts that "vetoes have missed more winners
+// than they avoided losers"; the count-based stats appear to say the opposite.
+// Both can hold at once given a 2.76 win:loss ratio, so this reports the
+// dollar sums and the concentration behind them.
+app.get('/api/diag/veto-dollars', async (req, res) => {
+  try {
+    const accounts = await database.getAllPortfolios();
+    const out = [];
+    for (const a of accounts) {
+      const stats = await database.getVetoStats(a.id);
+      if (!stats.veto_count) continue;
+      const rows = await database.getVetoShadowRows(a.id);
+      const resolved = rows.filter(r => r.would_be_pnl != null);
+      const wins  = resolved.filter(r => r.would_be_pnl > 0).map(r => r.would_be_pnl).sort((x, y) => y - x);
+      const losses = resolved.filter(r => r.would_be_pnl < 0).map(r => -r.would_be_pnl).sort((x, y) => y - x);
+      const sum = arr => arr.reduce((s, v) => s + v, 0);
+      // Whether the verdict rests on a handful of outliers.
+      const top3MissedShare = wins.length
+        ? Math.round((sum(wins.slice(0, 3)) / sum(wins)) * 1000) / 10 : null;
+      const top3AvoidedShare = losses.length
+        ? Math.round((sum(losses.slice(0, 3)) / sum(losses)) * 1000) / 10 : null;
+      out.push({
+        account: a.name,
+        ...stats,
+        avg_missed_win:     wins.length   ? Math.round(sum(wins) / wins.length)     : null,
+        avg_avoided_loss:   losses.length ? Math.round(sum(losses) / losses.length) : null,
+        largest_missed_win: wins[0]   ?? null,
+        largest_avoided:    losses[0] ?? null,
+        top3_missed_share_pct:  top3MissedShare,
+        top3_avoided_share_pct: top3AvoidedShare,
+        // Net excluding the 3 biggest missed winners — if this flips sign,
+        // the conclusion is an outlier artifact, not a property of vetoing.
+        net_usd_ex_top3_missed: Math.round(sum(losses) - sum(wins.slice(3))),
+      });
+    }
+    res.json({ accounts: out });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/diag/queries', async (req, res) => {
   try {
     const pool = database.pool;

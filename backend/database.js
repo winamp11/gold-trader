@@ -1901,6 +1901,11 @@ class DatabaseService {
     });
   }
 
+  // Veto effectiveness. Counts alone are misleading here and were the only
+  // thing this returned: on an account whose edge is a 2.76 win:loss ratio,
+  // a minority of missed winners can outweigh a majority of avoided losers.
+  // avoided_usd / missed_usd are the figures that decide whether vetoing is
+  // net positive; the counts are kept for continuity with existing callers.
   async getVetoStats(portfolioId) {
     const r = await this.pool.query(`
       SELECT
@@ -1910,15 +1915,43 @@ class DatabaseService {
                  THEN 1 ELSE 0 END) AS correctly_avoided,
         SUM(CASE WHEN would_be_outcome = 'TARGET_HIT'
                  OR  (would_be_pnl IS NOT NULL AND would_be_pnl > 0)
-                 THEN 1 ELSE 0 END) AS missed_wins
+                 THEN 1 ELSE 0 END) AS missed_wins,
+        -- Losses the veto avoided, as a positive dollar amount.
+        COALESCE(SUM(CASE WHEN would_be_pnl < 0 THEN -would_be_pnl ELSE 0 END), 0) AS avoided_usd,
+        -- Winnings the veto gave up.
+        COALESCE(SUM(CASE WHEN would_be_pnl > 0 THEN  would_be_pnl ELSE 0 END), 0) AS missed_usd,
+        -- Net effect of vetoing: positive means vetoing made money.
+        COALESCE(SUM(CASE WHEN would_be_pnl IS NOT NULL THEN -would_be_pnl ELSE 0 END), 0) AS net_usd,
+        -- Shadows that never resolved contribute nothing to either side and
+        -- must not be silently read as "correct".
+        SUM(CASE WHEN would_be_pnl IS NULL THEN 1 ELSE 0 END) AS unresolved
       FROM veto_shadows WHERE portfolio_id = $1
     `, [portfolioId]);
     const row = r.rows[0];
+    const num = v => Math.round((parseFloat(v) || 0) * 100) / 100;
     return {
       veto_count:        parseInt(row?.veto_count)        || 0,
       correctly_avoided: parseInt(row?.correctly_avoided) || 0,
       missed_wins:       parseInt(row?.missed_wins)       || 0,
+      unresolved:        parseInt(row?.unresolved)        || 0,
+      avoided_usd:       num(row?.avoided_usd),
+      missed_usd:        num(row?.missed_usd),
+      net_usd:           num(row?.net_usd),
     };
+  }
+
+  // Per-shadow rows for the veto-effectiveness diagnostic. Read-only.
+  // Returned newest-first so a concentrated tail (one huge missed winner
+  // carrying the whole net) is visible rather than averaged away.
+  async getVetoShadowRows(portfolioId, limit = 500) {
+    const r = await this.pool.query(`
+      SELECT id, timestamp, direction, tag, would_be_outcome, would_be_pnl
+      FROM veto_shadows
+      WHERE portfolio_id = $1
+      ORDER BY timestamp DESC
+      LIMIT $2
+    `, [portfolioId, limit]);
+    return r.rows;
   }
 
   async updatePortfolioBalance(portfolioId, pnlDelta) {
