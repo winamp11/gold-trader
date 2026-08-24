@@ -27,6 +27,7 @@ import { computeBranchAnalytics } from './hybridAnalytics.js';
 import { getM1CacheMetrics, cleanupOldM1Candles } from './m1CandleCache.js';
 import { CONFIG_SCHEMA, getBotConfig, saveBotConfig, HYBRID_BOT, MIRROR_BOT, configFingerprint } from './botConfig.js';
 import { classifyRulebookQualification, classifyOverlayStatus, classifyBranch, clampRiskUsd } from './hybridBranchClassifier.js';
+import { mirrorSkipReason } from './mirrorGate.js';
 
 dotenv.config();
 
@@ -920,6 +921,14 @@ async function generateSignalIfTradingHours() {
     // ── Claude Overlay decider ────────────────────────────────────────────
     // Always receives mechDecision regardless of mechanical's execution status.
     let overlayDecision;
+    // Whether overlay actually OPENED a position this cycle, as distinct from
+    // whether it decided to. overlay_mirror needs the former: a decision of
+    // TRADE that the position cap then blocks leaves overlayDecision.action
+    // as 'TRADE', and a mirror keying off that opens a trade overlay never
+    // took — the two books then hold different positions and the comparison
+    // stops measuring the risk envelope.
+    let overlayExecuted = false;
+    let overlayBlockedReason = null;
     if (isHaltedToday(overlayPortfolio.id)) {
       console.log(`🛑 [OVERLAY] Circuit breaker active — skipping Claude call this cycle`);
       overlayDecision = { action: 'NO_TRADE', direction: null, entry: null, stop: null, target: null, lots: null, reasoning: 'circuit breaker halt', tag: 'circuit_breaker_halt' };
@@ -932,9 +941,11 @@ async function generateSignalIfTradingHours() {
         // approves most proposals, which stacks correlated same-direction
         // positions up against the 10% risk budget without a cap.
         if (overlayOpenPositions.length >= 3) {
+          overlayBlockedReason = `position cap ${overlayOpenPositions.length}/3`;
           console.log(`⏸️  [OVERLAY] Position cap: ${overlayOpenPositions.length}/3 open — no new position this cycle`);
         } else {
           await openPosition({ portfolio: overlayPortfolio, decision: overlayDecision, signalId, currentPrice, isSignalOwner: false, session: currentSession });
+          overlayExecuted = true;
         }
       } else if (overlayDecision.action === 'VETO') {
         await openVetoShadow({ portfolio: overlayPortfolio, decision: overlayDecision, currentPrice, session: currentSession });
@@ -961,14 +972,21 @@ async function generateSignalIfTradingHours() {
         const mDow   = mUae.getUTCDay();
         const mHour  = mUae.getUTCHours();
 
-        let mSkip = null, mSkipCode = null;
-        if (overlayDecision?.action !== 'TRADE')                  { mSkipCode = 'NO_OVERLAY_TRADE'; mSkip = `overlay did not propose (${overlayDecision?.action ?? 'none'})`; }
-        else if (mDow === 1 && mHour >= mcfg.mondayBlockStartHour && mHour < mcfg.mondayBlockEndHour) { mSkipCode = 'MONDAY_BLOCK';    mSkip = 'Monday block'; }
-        else if (mDow === 5 && mHour >= mcfg.fridayBlockStartHour && mHour < mcfg.fridayBlockEndHour) { mSkipCode = 'FRIDAY_BLOCK';    mSkip = 'Friday block'; }
-        else if (mirrorDay.stoppedReason)                         { mSkipCode = 'STOOD_DOWN';      mSkip = `stood down: ${mirrorDay.stoppedReason}`; }
-        else if (isHaltedToday(mPortfolio.id))                    { mSkipCode = 'CIRCUIT_BREAKER'; mSkip = 'circuit breaker active'; }
-        else if (mOpen.length >= mcfg.maxOpenPositions)           { mSkipCode = 'POSITION_CAP';    mSkip = `position cap ${mOpen.length}/${mcfg.maxOpenPositions}`; }
-        else if (mRiskLeft < 50)                                  { mSkipCode = 'RISK_EXHAUSTED';  mSkip = `risk budget exhausted ($${mRiskUsed.toFixed(0)}/$${mBudget.toFixed(0)})`; }
+        const mGate = mirrorSkipReason({
+          overlayAction:        overlayDecision?.action,
+          overlayExecuted,
+          overlayBlockedReason,
+          dayOfWeek:            mDow,
+          hour:                 mHour,
+          cfg:                  mcfg,
+          stoppedReason:        mirrorDay.stoppedReason,
+          circuitBreaker:       isHaltedToday(mPortfolio.id),
+          openPositions:        mOpen.length,
+          riskLeftUsd:          mRiskLeft,
+          riskUsedUsd:          mRiskUsed,
+          riskBudgetUsd:        mBudget,
+        });
+        let mSkip = mGate?.reason ?? null, mSkipCode = mGate?.code ?? null;
 
         // Same DB-read throttle hybrid uses: in-memory state resets to "never
         // traded" on redeploy, which silently bypasses the gate.
