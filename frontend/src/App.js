@@ -21,7 +21,15 @@ const C = {
 };
 
 const TRADE_PAGE    = 10;
-const JOURNAL_LIMIT = 20;
+// Overlay's journal runs ~96% veto entries, so a 20-entry fetch was in
+// practice all vetoes — wins and losses were pushed off the list within hours
+// and looked as though they were never being journalled. Fetch the endpoint's
+// maximum so the type filter below has something to filter.
+const JOURNAL_LIMIT = 100;
+
+// Entry types the journal filter offers. 'all' is first so the default view is
+// unchanged from before the filter existed.
+const JOURNAL_FILTERS = ['all', 'win', 'loss', 'veto'];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -251,12 +259,42 @@ function HistorySection({ trades, hasMore, onLoadMore }) {
 // ─── JournalSection ───────────────────────────────────────────────────────────
 
 function JournalSection({ entries }) {
+  const [filter, setFilter] = useState('all');
+
+  // Counts come from the unfiltered set so an empty bucket still shows "0"
+  // rather than vanishing — the point of the filter is to confirm that wins
+  // ARE being journalled, which a hidden tab cannot do.
+  const counts = entries.reduce((acc, e) => {
+    acc[e.entry_type] = (acc[e.entry_type] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  const shown = filter === 'all' ? entries : entries.filter(e => e.entry_type === filter);
+
   if (!entries.length) {
     return <div className="section-empty">No journal entries yet</div>;
   }
   return (
     <div className="journal-inner">
-      {entries.map(e => {
+      <div className="journal-filter">
+        {JOURNAL_FILTERS.map(f => (
+          <button
+            key={f}
+            type="button"
+            className={`journal-filter__btn${filter === f ? ' is-active' : ''}`}
+            onClick={() => setFilter(f)}
+          >
+            {f}
+            <span className="journal-filter__count">
+              {f === 'all' ? entries.length : (counts[f] ?? 0)}
+            </span>
+          </button>
+        ))}
+      </div>
+      {!shown.length && (
+        <div className="section-empty">No {filter} entries in the last {entries.length}</div>
+      )}
+      {shown.map(e => {
         const sl = sessionLabel(e.timestamp);
         return (
           <div className="journal-row" key={e.id}>
