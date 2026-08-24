@@ -39,9 +39,16 @@ const REFLECT_MODE = (process.env.REFLECT_MODE || 'daily').toLowerCase();
 
 function fmt(n, dp = 2) { return n != null ? Number(n).toFixed(dp) : 'n/a'; }
 
-function pnlStr(pnl) {
+// Signed, always. The negative branch previously emitted an empty prefix, so a
+// loss rendered as "$718.26" while a gain rendered as "+$718.26" — the reflector
+// was shown an unsigned figure next to signed ones and read losses as gains.
+// This string is the only place a journal entry learns the direction of a
+// result, so every lesson written since is suspect.
+export function pnlStr(pnl) {
   if (pnl == null) return 'n/a';
-  return `${pnl >= 0 ? '+' : ''}$${Math.abs(pnl).toFixed(2)}`;
+  const n = Number(pnl);
+  if (!Number.isFinite(n)) return 'n/a';
+  return `${n < 0 ? '-' : '+'}$${Math.abs(n).toFixed(2)}`;
 }
 
 // ── Outcome classification (shared by per-trade and batch paths) ─────────
