@@ -2967,6 +2967,56 @@ app.get('/api/diag/veto-unresolved', async (req, res) => {
   }
 });
 
+// Excursion profile — how far each trade went in favour (MFE) and against
+// (MAE) before it closed, in multiples of its own stop distance (R).
+// Read-only.
+//
+// This is the only way to separate "the direction was wrong" from "the
+// direction was right and the execution lost it". A losing trade whose MFE
+// reached 1R+ was a correct call given up; a losing trade whose MFE never
+// cleared 0.3R was simply wrong. P&L alone cannot tell those apart, and they
+// need opposite fixes.
+app.get('/api/diag/excursions', async (req, res) => {
+  try {
+    const account = req.query.account || 'claude_overlay';
+    const since   = req.query.since || '2026-01-01';
+    const { rows } = await database.pool.query(`
+      SELECT p.name AS account, t.timestamp, t.direction, t.entry_price,
+             t.stop_loss, t.take_profit, t.exit_price, t.exit_reason, t.pnl,
+             t.max_price_during, t.min_price_during
+      FROM trades t JOIN portfolios p ON p.id = t.portfolio_id
+      WHERE p.name = $1 AND t.exit_reason IS NOT NULL
+        AND t.timestamp >= $2
+        AND t.max_price_during IS NOT NULL AND t.min_price_during IS NOT NULL
+      ORDER BY t.timestamp
+    `, [account, since]);
+
+    const out = rows.map(r => {
+      const long = r.direction === 'LONG';
+      const stopDist = Math.abs(r.entry_price - r.stop_loss);
+      // Favourable extreme is the high for a long, the low for a short.
+      const favour = long ? r.max_price_during - r.entry_price
+                          : r.entry_price - r.min_price_during;
+      const adverse = long ? r.entry_price - r.min_price_during
+                           : r.max_price_during - r.entry_price;
+      const tgtDist = Math.abs(r.take_profit - r.entry_price);
+      return {
+        timestamp: r.timestamp, direction: r.direction, exit_reason: r.exit_reason,
+        pnl: Number(r.pnl),
+        // Negative values are possible and meaningful: price never traded
+        // beyond entry in that direction at all.
+        mfe_r: stopDist > 0 ? favour / stopDist : null,
+        mae_r: stopDist > 0 ? adverse / stopDist : null,
+        // Share of the intended target actually reached at the best moment.
+        mfe_vs_target: tgtDist > 0 ? favour / tgtDist : null,
+      };
+    });
+    res.json({ account, since, n: out.length, trades: out });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/diag/queries', async (req, res) => {
   try {
     const pool = database.pool;
