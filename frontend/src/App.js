@@ -6,6 +6,10 @@ import {
 import './App.css';
 import AutochartistCalculator from './AutochartistCalculator';
 import AnalystDashboard from './AnalystDashboard';
+import {
+  diffNewPositions, fireNotifications, notificationsSupported,
+  permissionState, requestPermission,
+} from './tradeNotifier';
 
 const API = process.env.REACT_APP_API_URL || '';
 
@@ -936,6 +940,12 @@ export default function App() {
   const [equity,      setEquity]      = useState(null);
   const [dateRange,   setDateRange]   = useState(() => ({ start: firstOfMonthStr(), end: todayStr() }));
   const [positions,   setPositions]   = useState([]);
+
+  // Overlay open-position alerts. seenPositions starts as null, not an empty
+  // Set: the first poll after a page load must prime the set silently, or you
+  // get a burst of alerts for trades that opened hours ago.
+  const seenPositions = useRef(null);
+  const [notifyPerm, setNotifyPerm] = useState(permissionState());
   const [snapshot,    setSnapshot]    = useState(null);
   const [missed,      setMissed]      = useState([]);
   const [lastUpdated, setLastUpdated] = useState(null);
@@ -993,6 +1003,15 @@ export default function App() {
       setAccounts(accData.accounts || []);
       setEquity(equityData.equity || null);
       setPositions(posData.positions || []);
+
+      // Alert on Overlay positions that appeared since the previous poll.
+      // Done here rather than in an effect on `positions` so it runs once per
+      // fetch — an effect would also fire on unrelated re-renders.
+      {
+        const { fresh, seen } = diffNewPositions(seenPositions.current, posData.positions || []);
+        seenPositions.current = seen;
+        if (fresh.length) fireNotifications(fresh);
+      }
       setSnapshot(snapData);
       setMissed(missedData.missed || []);
 
@@ -1070,6 +1089,21 @@ export default function App() {
             <span className="topbar__updated">updated {fmtTime(lastUpdated)}</span>
           )}
           {error && <span className="topbar__error">{error}</span>}
+          {notificationsSupported() && notifyPerm !== 'granted' && (
+            <button
+              className="topbar__btn"
+              title={notifyPerm === 'denied'
+                ? 'Blocked — re-enable notifications for this site in Chrome settings'
+                : 'Alert when Overlay opens a position'}
+              disabled={notifyPerm === 'denied'}
+              onClick={async () => setNotifyPerm(await requestPermission())}
+            >
+              {notifyPerm === 'denied' ? '🔕 blocked' : '🔔 alerts off'}
+            </button>
+          )}
+          {notifyPerm === 'granted' && (
+            <span className="topbar__updated" title="Alerting on new Overlay positions">🔔 on</span>
+          )}
           <button className="topbar__btn" onClick={() => setShowAnalyst(true)}>
             Analyst ↗
           </button>
