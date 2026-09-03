@@ -9,7 +9,10 @@
 //   2. Re-alerting for the same position on every poll, which trains you to
 //      ignore the alerts.
 
-import { diffNewPositions, formatPosition, NOTIFY_ACCOUNT } from './tradeNotifier';
+import {
+  diffNewPositions, formatPosition, NOTIFY_ACCOUNT,
+  toggleState, TOGGLE_LABEL, TOGGLE_TITLE, isMuted, setMuted,
+} from './tradeNotifier';
 
 const pos = (key, extra = {}) => ({
   key, portfolioName: NOTIFY_ACCOUNT, direction: 'LONG',
@@ -97,4 +100,99 @@ test('missing levels render as a dash, not as undefined or NaN', () => {
   const { body } = formatPosition({ key: 'x', direction: 'SHORT' });
   expect(body).not.toMatch(/undefined|NaN/);
   expect(body).toContain('—');
+});
+
+// ── Toggle state machine ────────────────────────────────────────────────
+//
+// Browser permission is one-way — once granted it can only be revoked in
+// Chrome's site settings. The app therefore needs its own mute flag, and the
+// button has to represent five states, not two. The bug this replaces
+// rendered a status label once permission was granted, so there was no way to
+// stop alerts from inside the app at all.
+
+describe('toggleState', () => {
+  test('covers every permission and mute combination', () => {
+    expect(toggleState('unsupported', false)).toBe('unsupported');
+    expect(toggleState('denied', false)).toBe('denied');
+    expect(toggleState('default', false)).toBe('default');
+    expect(toggleState('granted', false)).toBe('on');
+    expect(toggleState('granted', true)).toBe('muted');
+  });
+
+  test('mute is irrelevant until permission is granted', () => {
+    // A stale muted flag from a previous grant must not make an ungranted
+    // button read as "muted", which would look like alerts are merely paused.
+    expect(toggleState('default', true)).toBe('default');
+    expect(toggleState('denied', true)).toBe('denied');
+    expect(toggleState('unsupported', true)).toBe('unsupported');
+  });
+
+  test('every actionable state has a label and a tooltip', () => {
+    for (const s of ['default', 'on', 'muted', 'denied']) {
+      expect(TOGGLE_LABEL[s]).toBeTruthy();
+      expect(TOGGLE_TITLE[s]).toBeTruthy();
+    }
+  });
+
+  test('on and muted are visually distinguishable', () => {
+    expect(TOGGLE_LABEL.on).not.toBe(TOGGLE_LABEL.muted);
+  });
+});
+
+describe('mute persistence', () => {
+  beforeEach(() => window.localStorage.clear());
+
+  test('defaults to unmuted', () => {
+    expect(isMuted()).toBe(false);
+  });
+
+  test('round-trips through storage so a reload does not un-mute', () => {
+    setMuted(true);
+    expect(isMuted()).toBe(true);
+    setMuted(false);
+    expect(isMuted()).toBe(false);
+  });
+
+  // These must spy on Storage.prototype, NOT assign to window.localStorage
+  // .getItem. jsdom silently ignores that assignment — the original version of
+  // these tests did exactly that, passed, and still passed when the try/catch
+  // was deleted. They were guarding nothing.
+
+  test('survives unreadable storage without throwing', () => {
+    // localStorage throws outright in some privacy modes. Failing to read the
+    // preference must not take the dashboard down with it.
+    const spy = jest.spyOn(Storage.prototype, 'getItem')
+      .mockImplementation(() => { throw new Error('blocked'); });
+    expect(() => isMuted()).not.toThrow();
+    expect(isMuted()).toBe(false);        // safe default: alert rather than go silent
+    spy.mockRestore();
+  });
+
+  test('survives unwritable storage without throwing', () => {
+    const spy = jest.spyOn(Storage.prototype, 'setItem')
+      .mockImplementation(() => { throw new Error('blocked'); });
+    expect(() => setMuted(true)).not.toThrow();
+    spy.mockRestore();
+  });
+
+  test('survives an unremovable key without throwing', () => {
+    // Un-muting takes the removeItem path, which is a separate call.
+    const spy = jest.spyOn(Storage.prototype, 'removeItem')
+      .mockImplementation(() => { throw new Error('blocked'); });
+    expect(() => setMuted(false)).not.toThrow();
+    spy.mockRestore();
+  });
+});
+
+describe('muting does not replay backlog', () => {
+  test('the seen-set still advances while muted', () => {
+    // Muting suppresses delivery only. If the diff stopped running, unmuting
+    // would fire an alert for every position opened in the meantime.
+    const first = diffNewPositions(null, []);
+    const during = diffNewPositions(first.seen, [pos('2_100'), pos('2_101')]);
+    expect(during.seen.size).toBe(2);
+
+    const after = diffNewPositions(during.seen, [pos('2_100'), pos('2_101')]);
+    expect(after.fresh).toHaveLength(0);
+  });
 });

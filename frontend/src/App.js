@@ -7,8 +7,8 @@ import './App.css';
 import AutochartistCalculator from './AutochartistCalculator';
 import AnalystDashboard from './AnalystDashboard';
 import {
-  diffNewPositions, fireNotifications, notificationsSupported,
-  permissionState, requestPermission,
+  diffNewPositions, fireNotifications, permissionState, requestPermission,
+  isMuted, setMuted, toggleState, TOGGLE_LABEL, TOGGLE_TITLE,
 } from './tradeNotifier';
 
 const API = process.env.REACT_APP_API_URL || '';
@@ -945,7 +945,9 @@ export default function App() {
   // Set: the first poll after a page load must prime the set silently, or you
   // get a burst of alerts for trades that opened hours ago.
   const seenPositions = useRef(null);
-  const [notifyPerm, setNotifyPerm] = useState(permissionState());
+  const [notifyPerm,  setNotifyPerm]  = useState(permissionState());
+  const [notifyMuted, setNotifyMuted] = useState(isMuted());
+  const alertState = toggleState(notifyPerm, notifyMuted);
   const [snapshot,    setSnapshot]    = useState(null);
   const [missed,      setMissed]      = useState([]);
   const [lastUpdated, setLastUpdated] = useState(null);
@@ -1089,20 +1091,20 @@ export default function App() {
             <span className="topbar__updated">updated {fmtTime(lastUpdated)}</span>
           )}
           {error && <span className="topbar__error">{error}</span>}
-          {notificationsSupported() && notifyPerm !== 'granted' && (
+          {alertState !== 'unsupported' && (
             <button
-              className="topbar__btn"
-              title={notifyPerm === 'denied'
-                ? 'Blocked — re-enable notifications for this site in Chrome settings'
-                : 'Alert when Overlay opens a position'}
-              disabled={notifyPerm === 'denied'}
-              onClick={async () => setNotifyPerm(await requestPermission())}
+              className={`topbar__btn topbar__alerts is-${alertState}`}
+              title={TOGGLE_TITLE[alertState]}
+              disabled={alertState === 'denied'}
+              onClick={async () => {
+                // 'default' asks the browser; the granted states just flip the
+                // in-app mute flag, since permission cannot be revoked here.
+                if (alertState === 'default') setNotifyPerm(await requestPermission());
+                else setNotifyMuted(setMuted(alertState === 'on'));
+              }}
             >
-              {notifyPerm === 'denied' ? '🔕 blocked' : '🔔 alerts off'}
+              {TOGGLE_LABEL[alertState]}
             </button>
-          )}
-          {notifyPerm === 'granted' && (
-            <span className="topbar__updated" title="Alerting on new Overlay positions">🔔 on</span>
           )}
           <button className="topbar__btn" onClick={() => setShowAnalyst(true)}>
             Analyst ↗

@@ -54,6 +54,66 @@ export function notificationsSupported() {
   return typeof window !== 'undefined' && 'Notification' in window;
 }
 
+// ── Mute preference ──────────────────────────────────────────────────────
+//
+// Browser permission is one-way: once granted, it can only be revoked through
+// Chrome's site settings. That is far too buried to be the only off switch,
+// so the app keeps its own mute flag alongside it.
+//
+// Stored rather than held in state so it survives a reload — otherwise every
+// refresh silently un-mutes. Reads and writes are guarded: localStorage throws
+// outright in some privacy modes, and a storage failure must never stop the
+// dashboard rendering.
+
+const MUTE_KEY = 'goldtrader.alerts.muted';
+
+export function isMuted() {
+  try {
+    return window.localStorage.getItem(MUTE_KEY) === '1';
+  } catch {
+    return false;                 // unreadable storage → default to alerting
+  }
+}
+
+export function setMuted(muted) {
+  try {
+    if (muted) window.localStorage.setItem(MUTE_KEY, '1');
+    else       window.localStorage.removeItem(MUTE_KEY);
+  } catch {
+    /* preference simply will not persist; the in-memory state still applies */
+  }
+  return muted;
+}
+
+// The single source of truth for what the toggle shows and does next.
+// Kept pure so every state transition is testable without a browser.
+//
+// 'unsupported' — no Notification API; render nothing
+// 'denied'      — blocked at browser level; only Chrome settings can undo it
+// 'default'     — never asked; tapping requests permission
+// 'on'          — granted and alerting; tapping mutes
+// 'muted'       — granted but silenced in-app; tapping unmutes
+export function toggleState(permission, muted) {
+  if (permission === 'unsupported') return 'unsupported';
+  if (permission === 'denied')      return 'denied';
+  if (permission !== 'granted')     return 'default';
+  return muted ? 'muted' : 'on';
+}
+
+export const TOGGLE_LABEL = {
+  default: '🔔 alerts off',
+  on:      '🔔 alerts on',
+  muted:   '🔕 muted',
+  denied:  '🔕 blocked',
+};
+
+export const TOGGLE_TITLE = {
+  default: 'Alert when Overlay opens a position',
+  on:      'Alerting on new Overlay positions — tap to mute',
+  muted:   'Alerts muted — tap to resume',
+  denied:  'Blocked — re-enable notifications for this site in Chrome settings',
+};
+
 export function permissionState() {
   if (!notificationsSupported()) return 'unsupported';
   return Notification.permission;          // 'default' | 'granted' | 'denied'
@@ -70,8 +130,14 @@ export async function requestPermission() {
 
 // Fires one notification per position. Never throws: a notification failure
 // must not break the dashboard render loop.
+//
+// The mute check lives here rather than at the call site so muting cannot be
+// bypassed by a caller that forgets to check — the diff still runs and the
+// seen-set still advances while muted, so unmuting does not then replay every
+// position opened in the meantime.
 export function fireNotifications(fresh) {
   if (!notificationsSupported() || Notification.permission !== 'granted') return 0;
+  if (isMuted()) return 0;
   let sent = 0;
   for (const p of fresh) {
     try {

@@ -144,6 +144,13 @@ body {
 }
 .topbar__btn:hover { border-color: var(--gold2); color: var(--gold); }
 
+/* Alert toggle. Deliberately NOT .topbar__updated, which is display:none
+   below 480px — the phone is the device these alerts exist for. */
+.topbar__alerts { white-space: nowrap; }
+.topbar__alerts.is-on    { border-color: var(--pos); color: var(--pos); }
+.topbar__alerts.is-muted { border-color: var(--border2); color: var(--text3); }
+.topbar__alerts.is-denied { opacity: 0.5; cursor: not-allowed; }
+
 /* ── Main layout ── */
 .main {
   max-width: 860px;
