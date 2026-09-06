@@ -101,3 +101,28 @@ describe('mirrorSkipReason', () => {
     assert.equal(mirrorSkipReason({ ...ok, dayOfWeek: 2, hour: 7 }), null);
   });
 });
+
+describe('entry window in the mirror gate', () => {
+  test('a blocked entry window stops the mirror before anything else', () => {
+    // Redundant today — Overlay is blocked by the same rule and Mirror already
+    // skips when Overlay did not execute. Stated explicitly so the two are not
+    // silently coupled: if Mirror is ever made independent, it must not start
+    // trading Tokyo on its own.
+    const out = mirrorSkipReason({ ...ok, entryBlocked: 'pre-10:00 UAE entry block (JP)' });
+    assert.equal(out?.code, 'ENTRY_WINDOW');
+    assert.match(out.reason, /pre-10:00/);
+  });
+
+  test('it outranks every other skip reason', () => {
+    const out = mirrorSkipReason({
+      ...ok, entryBlocked: 'pre-10:00 UAE entry block (JP)',
+      overlayAction: 'VETO', overlayExecuted: false, circuitBreaker: true, openPositions: 9,
+    });
+    assert.equal(out?.code, 'ENTRY_WINDOW');
+  });
+
+  test('a null entryBlocked leaves behaviour unchanged', () => {
+    assert.equal(mirrorSkipReason({ ...ok, entryBlocked: null }), null);
+    assert.equal(mirrorSkipReason(ok), null);
+  });
+});

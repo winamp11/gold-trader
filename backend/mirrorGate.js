@@ -16,6 +16,7 @@ export function mirrorSkipReason(ctx) {
     overlayAction,        // overlayDecision.action
     overlayExecuted,      // did overlay actually OPEN a position this cycle
     overlayBlockedReason, // why not, when it decided TRADE but did not open
+    entryBlocked,         // non-null when the entry window itself forbids opening
     dayOfWeek,            // UAE day of week, 0=Sun
     hour,                 // UAE hour
     cfg,
@@ -27,6 +28,13 @@ export function mirrorSkipReason(ctx) {
     riskBudgetUsd,
   } = ctx;
 
+  // Pre-10:00 UAE entry block. Redundant today, because Overlay is blocked by
+  // the same rule and Mirror already skips when Overlay did not execute — but
+  // stated explicitly so the two are not silently coupled. If Mirror is ever
+  // made independent of Overlay's execution, it must not start trading Tokyo.
+  if (entryBlocked) {
+    return { code: 'ENTRY_WINDOW', reason: `entry blocked — ${entryBlocked}` };
+  }
   if (overlayAction !== 'TRADE') {
     return { code: 'NO_OVERLAY_TRADE', reason: `overlay did not propose (${overlayAction ?? 'none'})` };
   }

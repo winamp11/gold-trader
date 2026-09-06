@@ -7,7 +7,7 @@ import dotenv from 'dotenv';
 import twelveData from './twelveData.js';
 import database from './database.js';
 import outcomeTracker from './outcomeTracker.js';
-import { isTradingHours, getNextTradingTime, getSession, uaeTime } from './tradingHours.js';
+import { isTradingHours, getNextTradingTime, getSession, uaeTime, isEntryWindow, entryBlockReason } from './tradingHours.js';
 
 import { decide as mechanicalDecide }    from './deciders/mechanicalDecider.js';
 import { decide as claudeOverlayDecide } from './deciders/claudeOverlayDecider.js';
@@ -555,6 +555,17 @@ async function getOrFetchPrevDayHighLow() {
 
 // ── Helper: open a real position for one portfolio ─────────────────────────
 async function openPosition({ portfolio, decision, signalId, currentPrice, isSignalOwner, session = null }) {
+  // Defensive backstop for the pre-10:00 UAE entry block. Every call site
+  // gates before calling, so this should never fire — it exists so that a call
+  // site added later without the gate fails loudly here rather than quietly
+  // trading Tokyo again. Returns null rather than throwing: a throw would
+  // abort the cycle and skip the accounts evaluated after this one.
+  const blocked = entryBlockReason();
+  if (blocked) {
+    console.error(`⛔ [ENTRY BLOCK] ${portfolio.name} reached openPosition during ${blocked} — refused. This call site is missing its gate.`);
+    return null;
+  }
+
   const tradeId = await database.saveTrade({
     signal_id:    signalId,
     portfolio_id: portfolio.id,
@@ -883,7 +894,9 @@ async function generateSignalIfTradingHours() {
     // mechDecision ALWAYS flows to overlay unchanged (decoupling invariant).
     const mechOpenPositions = outcomeTracker.getOpenPositionsForPortfolio(mechPortfolio.id);
     if (mechDecision.action === 'TRADE') {
-      if (isHaltedToday(mechPortfolio.id)) {
+      if (entryBlockReason()) {
+        console.log(`⛔ [MECHANICAL] Entry blocked — ${entryBlockReason()}`);
+      } else if (isHaltedToday(mechPortfolio.id)) {
         console.log(`🛑 [MECHANICAL] Circuit breaker active — no new position this cycle`);
       } else if (mechOpenPositions.length >= 3) {
         console.log(`⏸️  [MECHANICAL] Position cap: ${mechOpenPositions.length}/3 open — no new position this cycle`);
@@ -940,7 +953,10 @@ async function generateSignalIfTradingHours() {
         // Position cap (same as mechanical's 3): post-rework the overlay
         // approves most proposals, which stacks correlated same-direction
         // positions up against the 10% risk budget without a cap.
-        if (overlayOpenPositions.length >= 3) {
+        if (entryBlockReason()) {
+          overlayBlockedReason = entryBlockReason();
+          console.log(`⛔ [OVERLAY] Entry blocked — ${overlayBlockedReason}`);
+        } else if (overlayOpenPositions.length >= 3) {
           overlayBlockedReason = `position cap ${overlayOpenPositions.length}/3`;
           console.log(`⏸️  [OVERLAY] Position cap: ${overlayOpenPositions.length}/3 open — no new position this cycle`);
         } else {
@@ -976,6 +992,7 @@ async function generateSignalIfTradingHours() {
           overlayAction:        overlayDecision?.action,
           overlayExecuted,
           overlayBlockedReason,
+          entryBlocked:         entryBlockReason(),
           dayOfWeek:            mDow,
           hour:                 mHour,
           cfg:                  mcfg,
@@ -1204,7 +1221,11 @@ async function generateSignalIfTradingHours() {
             const riskUsd  = clampRiskUsd(hyDecision.risk_usd, riskLeft, bal * (cfg.maxRiskPerTradePct / 100));
             const targetR  = Math.max(1.5, Number(hyDecision.target_r));
 
-            if (!stopDist || stopDist <= 0 || riskUsd < 50) {
+            if (entryBlockReason()) {
+              console.log(`⛔ [HYBRID] Entry blocked — ${entryBlockReason()}`);
+              hyDecision.action = 'NO_TRADE';   // reflected in the journal below
+              vetoOrReductionReason = entryBlockReason();
+            } else if (!stopDist || stopDist <= 0 || riskUsd < 50) {
               console.log(`⏸️  [HYBRID] entry rejected — stopDist=${stopDist} riskUsd=${riskUsd?.toFixed?.(0)}`);
               hyDecision.action = 'NO_TRADE';   // reflected in the journal below
               vetoOrReductionReason = 'invalid geometry or risk below minimum';

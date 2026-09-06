@@ -20,6 +20,54 @@ export function uaeTime(ts) {
 const SESSION_START = 6  * 60;  //  06:00 UAE = 360 min
 const SESSION_END   = 21 * 60;  //  21:00 UAE = 1260 min
 
+// ── Entry window ─────────────────────────────────────────────────────────
+//
+// No NEW positions before 10:00 UAE. The session itself still runs from
+// 06:00: open positions must keep being monitored and stopped out, signals
+// must keep being recorded, and the daily close series must keep advancing.
+// Only entries are blocked — this is a filter on taking risk, not a shorter
+// trading day.
+//
+// Measured over 3 Jun – 4 Sep 2026, entries in the 06:00–09:59 window:
+//
+//   claude_overlay   -41,570 across 23 days, losing on 19 of them
+//   mechanical       -45,961 in the 06:00 hour alone
+//
+// Removing them from the historical record: overlay +23,183 → +74,239,
+// mechanical -48,626 → +43,143. It holds out of sample (+27,914 and +30,456
+// on trades from 15 Aug onward), survives removing the worst three days,
+// survives day-weighting instead of trade-weighting, and appears independently
+// in two systems that share no decision logic.
+//
+// The mechanism is documented in Overlay's own journal rather than inferred:
+// thin Tokyo liquidity, stops placed at predictable levels and swept in
+// clusters. Three separate hypotheses this month — flat days, H4 lag, and
+// multi-timeframe alignment — turned out on inspection to be measuring this
+// same window under a different name.
+//
+// 10:00 rather than 11:00 deliberately: 10:00 is Overlay's single best hour
+// (+29,611 over 19 trades, profitable on 8 of 9 days, and it improves when its
+// worst day is removed). Opening at 11:00 would discard the strongest hour of
+// the day to avoid nothing.
+const ENTRY_START = 10 * 60;    //  10:00 UAE = 600 min
+
+// True when a NEW position may be opened. Strictly narrower than
+// isTradingHours: every entry minute is a trading minute, but not the reverse.
+export function isEntryWindow(ts) {
+  const { mins, day } = uaeTime(ts);
+  if (day === 0 || day === 6) return false;
+  return mins >= ENTRY_START && mins < SESSION_END;
+}
+
+// Why an entry was refused, for logging. null when it was allowed.
+export function entryBlockReason(ts) {
+  if (isEntryWindow(ts)) return null;
+  const { mins, day } = uaeTime(ts);
+  if (day === 0 || day === 6) return 'weekend';
+  if (mins < ENTRY_START)     return `pre-10:00 UAE entry block (${getSession(ts) ?? 'pre-session'})`;
+  return 'outside trading hours';
+}
+
 export function isTradingHours(ts) {
   const { mins, day } = uaeTime(ts);
   if (day === 0 || day === 6) return false;
