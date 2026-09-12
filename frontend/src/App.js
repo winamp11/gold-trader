@@ -85,7 +85,7 @@ function sessionLabel(ts) {
   if (mins < 660)  return 'JP-EUR';
   if (mins < 960)  return 'EUR';
   if (mins < 1140) return 'EUR-US';
-  if (mins < 1260) return 'US';
+  if (mins < 1380) return 'US';   // to the 23:00 UAE close
   return '';
 }
 

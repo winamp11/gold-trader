@@ -7,7 +7,7 @@ import dotenv from 'dotenv';
 import twelveData from './twelveData.js';
 import database from './database.js';
 import outcomeTracker from './outcomeTracker.js';
-import { isTradingHours, getNextTradingTime, getSession, uaeTime, isEntryWindow, entryBlockReason } from './tradingHours.js';
+import { isTradingHours, getNextTradingTime, getSession, uaeTime, isEntryWindow, entryBlockReason, SESSION_END_HOUR } from './tradingHours.js';
 
 import { decide as mechanicalDecide }    from './deciders/mechanicalDecider.js';
 import { decide as claudeOverlayDecide } from './deciders/claudeOverlayDecider.js';
@@ -797,8 +797,8 @@ function sessionLabel(ts) {
   if (mins < 420)  return 'JP-EUR';   // 05:00–07:00 UTC  (Tokyo/London overlap)
   if (mins < 510)  return 'EUR';      // 07:00–08:30 UTC  (London)
   if (mins < 750)  return 'EUR-US';   // 08:30–12:30 UTC  (trading window: London/NY overlap)
-  if (mins < 1020) return 'US';       // 12:30–17:00 UTC  (New York)
-  return 'JP';                        // 17:00–00:00 UTC  (overnight)
+  if (mins < 1140) return 'US';       // 12:30–19:00 UTC  (New York, to the 23:00 UAE close)
+  return 'JP';                        // 19:00–00:00 UTC  (overnight)
 }
 
 // ── Helper: classify a decision for experiment tracking ───────────────────
@@ -1421,10 +1421,12 @@ async function generateSignalIfTradingHours() {
   }
 }
 
-// ── Window-close sweep — fires once at the 21:00 UAE edge ─────────────────
+// ── Window-close sweep — fires once at the session-end edge ──────────────
+// Edge-triggered off isTradingHours(), so it follows SESSION_END rather than a
+// hardcoded hour: extending the session moves this automatically.
 async function runWindowClose() {
   console.log('\n🔔 [WINDOW CLOSE] ─────────────────────────────────────────');
-  console.log('🔔 [WINDOW CLOSE] Trading window ended (21:00 UAE) — force-closing all positions');
+  console.log(`🔔 [WINDOW CLOSE] Trading window ended (${SESSION_END_HOUR}:00 UAE) — force-closing all positions`);
 
   // Try to get a fresh final mark price; fall back to the last poller tick
   let price = lastKnownPrice;

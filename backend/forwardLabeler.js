@@ -17,19 +17,24 @@
 // runForwardLabeling() never throws — a failed run logs and returns counts.
 
 import { getM1Candles } from './m1CandleCache.js';
+import { SESSION_END_HOUR } from './tradingHours.js';
 
 const HOUR_MS       = 3600000;
 const UAE_OFFSET_MS = 4 * HOUR_MS;
 const MAX_GAP_MS    = 3 * HOUR_MS;        // stale-candle tolerance for point lookups
 
-// Epoch of 21:00 UAE (17:00 UTC) on the UAE day containing ts.
+// Epoch of the UAE day-end close on the UAE day containing ts.
+// Follows SESSION_END_HOUR rather than hardcoding, so the label's notion of
+// "end of day" always matches the actual forced close. NOTE: signals labelled
+// before 12 Sep 2026 used a 21:00 close; the boundary moved to 23:00 with the
+// session extension, so eod labels are not directly comparable across it.
 // Exported: hybridMaturation.js and mechanicalVariantMaturation.js share
 // this exact day-boundary logic so every maturation job agrees on what
 // "end of day" means, rather than each computing it independently.
 export function uaeDayEndMs(tsMs) {
   const uae = new Date(tsMs + UAE_OFFSET_MS);
   const dayStartUtcMs = Date.UTC(uae.getUTCFullYear(), uae.getUTCMonth(), uae.getUTCDate()) - UAE_OFFSET_MS;
-  return dayStartUtcMs + 21 * HOUR_MS;
+  return dayStartUtcMs + SESSION_END_HOUR * HOUR_MS;
 }
 
 // Close of the last candle at/before ts, or null if the nearest is > MAX_GAP_MS stale.

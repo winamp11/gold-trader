@@ -42,12 +42,23 @@ describe('entry window', () => {
     assert.equal(isEntryWindow(uae(10, 1)), true);
   });
 
-  test('entries are allowed from 10:00 to 20:59 UAE', () => {
-    for (const h of [10, 12, 15, 18, 20]) {
+  test('entries are allowed from 10:00 to 22:59 UAE', () => {
+    // Session extended from 21:00 to 23:00 on 12 Sep 2026.
+    for (const h of [10, 12, 15, 18, 20, 21, 22]) {
       assert.equal(isEntryWindow(uae(h)), true, `${h}:00 should be allowed`);
     }
-    assert.equal(isEntryWindow(uae(20, 59)), true);
-    assert.equal(isEntryWindow(uae(21, 0)), false);   // session ends
+    assert.equal(isEntryWindow(uae(22, 59)), true);
+    assert.equal(isEntryWindow(uae(23, 0)), false);   // session ends
+  });
+
+  test('the session-end boundary is 23:00, and 21:00-23:00 now trades', () => {
+    // Pins the extension explicitly. These two hours were previously outside
+    // the window entirely, so nothing in the trade record covers them.
+    assert.equal(isEntryWindow(uae(21)), true);
+    assert.equal(isEntryWindow(uae(22, 55)), true);
+    assert.equal(isEntryWindow(uae(23)), false);
+    assert.equal(isTradingHours(uae(22, 55)), true);
+    assert.equal(isTradingHours(uae(23)), false);
   });
 
   test('no entries at the weekend', () => {
@@ -106,6 +117,6 @@ describe('entryBlockReason', () => {
 
   test('distinguishes weekend and after-hours from the entry block', () => {
     assert.equal(entryBlockReason(uae(12, 0, '2026-09-12')), 'weekend');
-    assert.match(entryBlockReason(uae(22)), /outside trading hours/);
+    assert.match(entryBlockReason(uae(23, 30)), /outside trading hours/);
   });
 });

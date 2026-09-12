@@ -1,5 +1,15 @@
-// Trading hours: 06:00–21:00 UAE (Asia/Dubai = UTC+4, no DST), Monday–Friday.
-// Hard close at 21:00 UAE — existing forceCloseAll mechanism fires at that edge.
+// Trading hours: 06:00–23:00 UAE (Asia/Dubai = UTC+4, no DST), Monday–Friday.
+// Hard close at 23:00 UAE — the forceCloseAll mechanism is edge-triggered off
+// isTradingHours(), so it follows SESSION_END automatically.
+//
+// Extended from 21:00 to 23:00 on 12 Sep 2026. Measured over 12 Jul – 12 Sep,
+// positions force-closed at 21:00 would more often have reached target than
+// stop had they been allowed to run (44 target-first vs 29 stop-first at +8h).
+// That result is regime-dependent — September strongly favoured it (17 vs 2)
+// while August did not (13 vs 17) — so this is a bet on trend persistence, not
+// a demonstrated edge. Two consequences worth knowing: positions now run two
+// hours later with no additional monitoring, and a Friday position carries
+// weekend gap risk two hours deeper into the NY afternoon.
 
 // Dubai is UTC+4, no daylight saving time.
 // Add 4 h to UTC epoch to read hours/minutes as UAE local time.
@@ -18,7 +28,8 @@ export function uaeTime(ts) {
 }
 
 const SESSION_START = 6  * 60;  //  06:00 UAE = 360 min
-const SESSION_END   = 21 * 60;  //  21:00 UAE = 1260 min
+export const SESSION_END_HOUR = 23;            // single source of truth
+const SESSION_END   = SESSION_END_HOUR * 60;  //  23:00 UAE = 1380 min
 
 // ── Entry window ─────────────────────────────────────────────────────────
 //
@@ -75,7 +86,7 @@ export function isTradingHours(ts) {
 }
 
 // Returns one of 'JP'|'JP-EUR'|'EUR'|'EUR-US'|'US', or null outside the window.
-// Every minute in the 06:00–21:00 UAE window maps to exactly one label.
+// Every minute in the 06:00–23:00 UAE window maps to exactly one label.
 export function getSession(ts) {
   const { mins, day } = uaeTime(ts);
   if (day === 0 || day === 6) return null;
@@ -84,11 +95,11 @@ export function getSession(ts) {
   if (mins < 660)  return 'JP-EUR';  // 10:00–11:00 UAE — Tokyo/London overlap
   if (mins < 960)  return 'EUR';     // 11:00–16:00 UAE — London
   if (mins < 1140) return 'EUR-US';  // 16:00–19:00 UAE — London/NY overlap
-  if (mins < 1260) return 'US';      // 19:00–21:00 UAE — New York
-  return null;                       // 21:00+ UAE — post-session
+  if (mins < 1380) return 'US';      // 19:00–23:00 UAE — New York
+  return null;                       // 23:00+ UAE — post-session
 }
 
-// True if any trading-hours minute (Mon-Fri 06:00-21:00 UAE) falls inside
+// True if any trading-hours minute (Mon-Fri 06:00-23:00 UAE) falls inside
 // [fromMs, toMs). Used by m1CandleCache.js to tell "missing data" apart from
 // "the market was legitimately closed" -- a weekend/off-hours gap should
 // never trigger a Twelve Data fetch attempt. Bounded day-walk (maturation

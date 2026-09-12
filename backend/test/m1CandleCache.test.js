@@ -61,10 +61,23 @@ describe('evaluateCoverageDecision — the core cache-vs-fetch decision', () => 
   });
 
   test('tail gap that is purely non-trading time (e.g. we have data up to Friday close) -> complete', () => {
-    const fri2100uae = Date.UTC(2026, 7, 7, 17, 0, 0); // Fri 21:00 UAE = market close
+    // Friday close moved from 21:00 to 23:00 UAE on 12 Sep 2026, so the "we
+    // have everything up to the close" fixture had to move with it — at
+    // 21:00 UAE there are now two trading hours still to come and the gap is
+    // correctly reported incomplete.
+    const friClose   = Date.UTC(2026, 7, 7, 19, 0, 0); // Fri 23:00 UAE = market close
     const monMorning = Date.UTC(2026, 7, 10, 1, 0, 0); // Mon 05:00 UAE, still pre-open
-    const r = evaluateCoverageDecision(Date.UTC(2026, 7, 7, 10, 0, 0), fri2100uae, Date.UTC(2026, 7, 7, 10, 0, 0), monMorning);
+    const r = evaluateCoverageDecision(Date.UTC(2026, 7, 7, 10, 0, 0), friClose, Date.UTC(2026, 7, 7, 10, 0, 0), monMorning);
     assert.equal(r.complete, true);
+  });
+
+  test('Friday 21:00-23:00 UAE is now trading time, so a gap there is incomplete', () => {
+    // Guards the boundary move in the other direction: before the extension
+    // this range was non-trading and a gap across it was legitimately complete.
+    const fri2100uae = Date.UTC(2026, 7, 7, 17, 0, 0); // Fri 21:00 UAE
+    const monMorning = Date.UTC(2026, 7, 10, 1, 0, 0);
+    const r = evaluateCoverageDecision(Date.UTC(2026, 7, 7, 10, 0, 0), fri2100uae, Date.UTC(2026, 7, 7, 10, 0, 0), monMorning);
+    assert.equal(r.complete, false);
   });
 
   test('head gap (min stored is later than requested start) during trading hours -> incomplete, fetch from startMs', () => {
