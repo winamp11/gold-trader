@@ -1,5 +1,41 @@
 import { VALUE_PER_LOT } from './contractSpec.js';
 
+// ── Entry gate: score, not unanimity ─────────────────────────────────────
+//
+// The six directional conditions were previously an AND gate — all six had to
+// be true in the same 5-minute cycle. That made the engine wait for perfect
+// alignment, which in a stair-step trend arrives only after the move. Measured
+// over 7-11 Sep, 593 signals were blocked while gold fell steadily:
+//
+//   h1_rsi_bearish      418  (70%)   ← H1 RSI popped back above 48 on bounces
+//   m30_macd_negative   412  (69%)   ← M30 MACD flipped positive on bounces
+//   h1_macd_negative    329  (55%)
+//   m30_rsi_ok           97  (16%)
+//   m15_rsi_range        61  (10%)
+//   h4_macd_ok            0   (0%)   ← never once the blocker
+//
+// Notably H4 was never the constraint, despite being the suspected cause. The
+// binding conditions were H1 and M30 confirmation, and every retracement broke
+// them. Requiring 4 of 6 rather than 6 of 6 lets the engine fire during a move
+// instead of only at the moment everything agrees.
+//
+// Env-overridable so the threshold can be tightened back toward 6 without a
+// code change if frequency proves too high.
+export const SIGNAL_MIN_SCORE = Math.min(6, Math.max(1, Number(process.env.SIGNAL_MIN_SCORE ?? 4)));
+
+// Two of the six conditions are direction-agnostic and can be true for LONG
+// and SHORT simultaneously: h4_macd_ok (long wants > -1.0, short wants < 1.0 —
+// both hold between them) and m15_rsi_range (identical text in both). Under the
+// old AND gate that was harmless, since all six could not pass both ways. With
+// a threshold of 4 they can, so the winning direction must also strictly beat
+// the other. A tie means the timeframes genuinely disagree — no trade.
+export function pickDirection(longCheck, shortCheck, minScore = SIGNAL_MIN_SCORE) {
+  const l = longCheck.score, s = shortCheck.score;
+  if (l >= minScore && l > s) return 'LONG';
+  if (s >= minScore && s > l) return 'SHORT';
+  return null;
+}
+
 class SignalEngine {
   constructor() {
     this.lastSignal = null;
@@ -42,10 +78,13 @@ class SignalEngine {
       m15_rsi_range: m15.rsi > 30 && m15.rsi < 70  // Not extreme
     };
 
-    const allPass = Object.values(conditions).every(c => c);
-    
+    const score = Object.values(conditions).filter(c => c).length;
+
     return {
-      valid: allPass,
+      // Retained for callers that only ask "was this unanimous?" — the score
+      // is what the gate now uses.
+      valid: score === Object.keys(conditions).length,
+      score,
       conditions,
       direction: 'LONG',
       failedConditions: Object.entries(conditions)
@@ -64,10 +103,13 @@ class SignalEngine {
       m15_rsi_range: m15.rsi > 30 && m15.rsi < 70  // Not extreme
     };
 
-    const allPass = Object.values(conditions).every(c => c);
-    
+    const score = Object.values(conditions).filter(c => c).length;
+
     return {
-      valid: allPass,
+      // Retained for callers that only ask "was this unanimous?" — the score
+      // is what the gate now uses.
+      valid: score === Object.keys(conditions).length,
+      score,
       conditions,
       direction: 'SHORT',
       failedConditions: Object.entries(conditions)
@@ -142,7 +184,12 @@ class SignalEngine {
       marketData: { h4, h1, m30, m15 }
     };
     
-    if (longCheck.valid) {
+    const chosen = pickDirection(longCheck, shortCheck);
+    signal.long_score  = longCheck.score;
+    signal.short_score = shortCheck.score;
+    signal.min_score   = SIGNAL_MIN_SCORE;
+
+    if (chosen === 'LONG') {
       const entry = currentPrice;
       const stop = support;
       const target = resistance;
@@ -162,9 +209,9 @@ class SignalEngine {
         potentialProfit: positionSize.potentialProfit,
         riskReward: positionSize.potentialProfit / positionSize.riskAmount,
         confidence: 'HIGH',
-        reasoning: 'All timeframes aligned bullish'
+        reasoning: `long score ${longCheck.score}/6 (min ${SIGNAL_MIN_SCORE}) vs short ${shortCheck.score}/6`
       };
-    } else if (shortCheck.valid) {
+    } else if (chosen === 'SHORT') {
       const entry = currentPrice;
       const stop = resistance;
       const target = support;
@@ -184,11 +231,11 @@ class SignalEngine {
         potentialProfit: positionSize.potentialProfit,
         riskReward: positionSize.potentialProfit / positionSize.riskAmount,
         confidence: 'HIGH',
-        reasoning: 'All timeframes aligned bearish'
+        reasoning: `short score ${shortCheck.score}/6 (min ${SIGNAL_MIN_SCORE}) vs long ${longCheck.score}/6`
       };
     } else {
       // RED signal - explain why
-      const reasons = [];
+      const reasons = [`scores L${longCheck.score}/S${shortCheck.score} (min ${SIGNAL_MIN_SCORE}, strict winner required)`];
       if (longCheck.failedConditions.length > 0) {
         reasons.push(`Long failed: ${longCheck.failedConditions.join(', ')}`);
       }
