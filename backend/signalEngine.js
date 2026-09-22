@@ -21,7 +21,25 @@ import { VALUE_PER_LOT } from './contractSpec.js';
 //
 // Env-overridable so the threshold can be tightened back toward 6 without a
 // code change if frequency proves too high.
-export const SIGNAL_MIN_SCORE = Math.min(6, Math.max(1, Number(process.env.SIGNAL_MIN_SCORE ?? 4)));
+// Default raised 4 -> 5 on 22 Sep after ten days of live results. Mechanical's
+// trades since the gate went in, split by the score that produced them:
+//
+//   4/6   n=42   net -19,141   avg -456   WR 36%
+//   5/6   n=70   net +10,155   avg +145   WR 59%
+//   6/6   n=48   net -21,347   avg -445   WR 33%
+//
+// Both ends lose and only 5 makes money, which also means reverting to the
+// original six-of-six gate would NOT have saved the period -- it lost 21,347
+// over the same window, just on fewer trades. The plausible mechanism: at 4 the
+// signal fires before confirmation, at 6 every timeframe has aligned and the
+// move is already extended, so the entry lands near exhaustion. 5 is the band
+// with confirmation and room left.
+//
+// Honest status: fitted to ten days. The win-rate spread (36/59/33) is wide
+// enough to look real, but this is a choice between three directly observed
+// options rather than a demonstrated edge. Env-overridable precisely so it can
+// be moved again without a deploy.
+export const SIGNAL_MIN_SCORE = Math.min(6, Math.max(1, Number(process.env.SIGNAL_MIN_SCORE ?? 5)));
 
 // Two of the six conditions are direction-agnostic and can be true for LONG
 // and SHORT simultaneously: h4_macd_ok (long wants > -1.0, short wants < 1.0 —

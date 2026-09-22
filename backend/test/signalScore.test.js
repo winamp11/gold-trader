@@ -25,13 +25,22 @@ import { pickDirection, SIGNAL_MIN_SCORE } from '../signalEngine.js';
 const chk = (score) => ({ score });
 
 describe('pickDirection', () => {
-  test('default threshold is 4 of 6, not unanimity', () => {
-    assert.equal(SIGNAL_MIN_SCORE, 4);
+  test('default threshold is 5 of 6 — neither unanimity nor 4', () => {
+    // Raised 4 -> 5 on 22 Sep. Live results split by score: 4/6 lost 19,141 at
+    // a 36% win rate, 6/6 lost 21,347 at 33%, and only 5/6 made money (+10,155
+    // at 59%). Both ends lose, so reverting to the original six-of-six gate
+    // would not have saved the period either.
+    assert.equal(SIGNAL_MIN_SCORE, 5);
   });
 
   test('fires at the threshold when it strictly beats the other side', () => {
-    assert.equal(pickDirection(chk(4), chk(2)), 'LONG');
-    assert.equal(pickDirection(chk(2), chk(4)), 'SHORT');
+    // Derived from the constant rather than hardcoded, so moving the default
+    // (4 -> 5 on 22 Sep) doesn't break a test that is about the comparison.
+    const t = SIGNAL_MIN_SCORE;
+    assert.equal(pickDirection(chk(t), chk(t - 2)), 'LONG');
+    assert.equal(pickDirection(chk(t - 2), chk(t)), 'SHORT');
+    // And one below the threshold never fires, whatever it is set to.
+    assert.equal(pickDirection(chk(t - 1), chk(0)), null);
   });
 
   test('does NOT fire on a tie, at any score', () => {
@@ -87,13 +96,14 @@ describe('condition scoring', () => {
     assert.equal(score(c), 4);
   });
 
-  test('a steady-decline bounce scores 4, which now fires', () => {
+  test('a steady-decline bounce scores 4, which no longer fires', () => {
     // The 9 Sep situation: falling, but H1 RSI popped back above 48 and M30
     // MACD turned positive. Six-of-six refused; four-of-six takes it.
     const c = shortConds(-2.0, 51.0, -1.2, 0.4, 45, 48);
     assert.equal(c.h1_rsi_bearish, false);
     assert.equal(c.m30_macd_negative, false);
     assert.equal(score(c), 4);
+    assert.ok(score(c) < SIGNAL_MIN_SCORE, 'a 4 should no longer clear the gate');
   });
 
   test('a genuinely mixed reading still scores too low to fire', () => {
