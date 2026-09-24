@@ -1,7 +1,30 @@
 // Does the morning's range predict whether the rest of the day will trend?
 //
 // PREREGISTERED. Spec, thresholds method and pass criteria committed before
-// any data was pulled. Read-only: changes no trading behaviour.
+// any data was pulled (d7ca11a). Read-only: changes no trading behaviour.
+//
+// ── RESULT (24 Sep 2026): NOT CONFIRMED ──────────────────────────────────
+//
+// 148 complete weekdays, 2 Mar - 23 Sep. Tercile edges from dev: $34.57/$53.72.
+//
+//   MARKET, rest-of-day |move| by morning tercile
+//     DEV      $31.6 / $41.9 / $49.8   ratio 1.58   M1 pass, M2 pass
+//     HOLDOUT  $30.0 / $27.9 / $30.8   ratio 1.03   M1 FAIL, M2 FAIL
+//
+//   BOTS, afternoon P&L per day, bottom / top tercile, HOLDOUT
+//     mechanical   +3,899 (7/8 up)   /  -5,132 (1/5 up)
+//     overlay      +2,263 (4/8 up)   /    -394 (3/5 up)
+//
+// Intraday volatility clustering held from March to mid-July and then
+// disappeared. The bots' afternoon P&L did not follow the morning in either
+// period, and in the holdout it ran backwards — quiet mornings preceded their
+// best afternoons. That inversion is NOT a finding: dev shows no such ordering
+// (mechanical dev: +581 / +4,699 / +944), and acting on a reversed sign seen
+// only out of sample is exactly the threshold-shopping this spec forbids.
+//
+// Conclusion: morning range cannot identify a chop day by 12:00 UAE. The
+// "lose less on chop days" lever still stands as the largest available, but
+// this — the most natural early-warning signal for it — does not work.
 //
 // ── Why this question ────────────────────────────────────────────────────
 //
