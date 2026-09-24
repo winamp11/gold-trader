@@ -23,8 +23,11 @@ import {
 
 // UAE is UTC+4 with no DST, so a UAE wall-clock time is a fixed UTC offset.
 // 2026-09-07 is a Monday; 2026-09-12 a Saturday.
+// Arithmetic, not string-building: `T-4:00` for hours 0-3 was an Invalid Date,
+// which uaeTime() treated as "now" — so this suite failed only when run
+// between 06:00 and 10:00 UAE.
 const uae = (h, m = 0, day = '2026-09-07') =>
-  new Date(`${day}T${String(h - 4).padStart(2, '0')}:${String(m).padStart(2, '0')}:00Z`).getTime();
+  Date.parse(`${day}T00:00:00Z`) + ((h - 4) * 60 + m) * 60000;
 
 describe('entry window', () => {
   test('entries are blocked from 06:00 to 09:59 UAE', () => {

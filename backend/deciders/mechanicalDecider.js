@@ -1,5 +1,5 @@
 // mechanicalDecider — wraps the existing signalEngine unchanged.
-// This is the baseline: no ATR, no M5, no AI.  Results are the ground
+// This is the baseline: no M5, no AI. (Stops use H1 ATR since 24 Sep.)  Results are the ground
 // truth against which the two Claude accounts are measured.
 //
 // decide() returns the standard decider shape plus _signal (internal)

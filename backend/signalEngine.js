@@ -1,5 +1,16 @@
 import { VALUE_PER_LOT } from './contractSpec.js';
 
+// ── Stops and targets (24 Sep 2026) ──────────────────────────────────────
+// Set a priori, not fitted: 1.5x H1 ATR is roughly double the old median
+// stop (0.82x ATR, i.e. inside one hour's noise), and 1.5R is the planned
+// R:R Overlay already runs at. Mechanical proposals feed Overlay and Hybrid,
+// so they see these levels too. Confounded with the 22 Sep gate change
+// (4 -> 5): both alter mechanical, and results from here can't separate them.
+export const STOP_ATR_MULT = 1.5;
+export const TARGET_R      = 1.5;
+export const ROUND_STEP    = 5;    // $5 levels
+export const ROUND_BUFFER  = 1.5;  // keep stops at least $1.50 off a $5 level
+
 // ── Entry gate: score, not unanimity ─────────────────────────────────────
 //
 // The six directional conditions were previously an AND gate — all six had to
@@ -156,17 +167,37 @@ class SignalEngine {
     };
   }
 
+  // Old placeholder, kept only as the fallback distance when H1 ATR is missing.
+  // It sized stops off H4 MACD histogram (not a volatility measure) and
+  // rounded both levels outward to $5, so every one of 964 mechanical stops
+  // sat on an exact $5 level and targets mirrored stops (median planned R:R
+  // 0.99). Stops were a median 0.82x H1 ATR — inside one hour's normal noise.
   findSupportResistance(h4Data, h1Data, currentPrice) {
-    // Simple support/resistance based on recent price action
-    // In production, this would analyze price structure more thoroughly
-    
     const volatility = Math.abs(h4Data.macd_hist) * 2;
     const baseDistance = Math.max(8, volatility);
-    
     return {
       support: Math.floor((currentPrice - baseDistance) / 5) * 5,
       resistance: Math.ceil((currentPrice + baseDistance) / 5) * 5
     };
+  }
+
+  // Stop and target for a chosen direction (24 Sep 2026).
+  //   stop:   STOP_ATR_MULT x H1 ATR from entry, then pushed past any $5 round
+  //           level it lands within ROUND_BUFFER of — round numbers are where
+  //           stops cluster and get swept.
+  //   target: TARGET_R x the final stop distance, so R:R is fixed by design.
+  // Position size still comes from 2% risk on the stop distance, so a wider
+  // stop means fewer lots, not more dollars at risk.
+  placeStopTarget(direction, entry, h1Atr, fallbackDistance) {
+    const sign = direction === 'LONG' ? -1 : 1;           // stop side
+    const dist = Number.isFinite(h1Atr) && h1Atr > 0 ? STOP_ATR_MULT * h1Atr : fallbackDistance;
+    let stop = entry + sign * dist;
+    const round = Math.round(stop / ROUND_STEP) * ROUND_STEP;
+    if (Math.abs(stop - round) < ROUND_BUFFER) stop = round + sign * ROUND_BUFFER;
+    const risk = Math.abs(entry - stop);
+    const target = entry - sign * TARGET_R * risk;
+    const r2 = v => Math.round(v * 100) / 100;
+    return { stop: r2(stop), target: r2(target), usedAtr: dist !== fallbackDistance };
   }
 
   generateSignal(marketData, accountBalance = 400) {
@@ -209,11 +240,11 @@ class SignalEngine {
 
     if (chosen === 'LONG') {
       const entry = currentPrice;
-      const stop = support;
-      const target = resistance;
+      const { stop, target } = this.placeStopTarget('LONG', entry, h1.atr, entry - support);
       const positionSize = this.calculatePositionSize(accountBalance, entry, stop);
-      
-      positionSize.potentialProfit = (target - entry) * positionSize.lots * 10;
+
+      // Was `* 10`, which understated profit (and R:R) 10x against VALUE_PER_LOT.
+      positionSize.potentialProfit = (target - entry) * positionSize.lots * VALUE_PER_LOT;
       
       signal.signal = 'GREEN';
       signal.recommendation = {
@@ -231,11 +262,10 @@ class SignalEngine {
       };
     } else if (chosen === 'SHORT') {
       const entry = currentPrice;
-      const stop = resistance;
-      const target = support;
+      const { stop, target } = this.placeStopTarget('SHORT', entry, h1.atr, resistance - entry);
       const positionSize = this.calculatePositionSize(accountBalance, entry, stop);
-      
-      positionSize.potentialProfit = (entry - target) * positionSize.lots * 10;
+
+      positionSize.potentialProfit = (entry - target) * positionSize.lots * VALUE_PER_LOT;
       
       signal.signal = 'GREEN';
       signal.recommendation = {
