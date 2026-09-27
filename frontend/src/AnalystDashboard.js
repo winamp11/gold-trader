@@ -432,7 +432,7 @@ const REGIME_LEGEND = [
   ['DOWN', 'below −3%'],
 ];
 
-function RegimeChart({ history, thresholdPct }) {
+function RegimeChart({ history, thresholdPct, lookbackDays = 10 }) {
   const hist = (history || []).slice(-30);
   if (hist.length === 0) return null;
 
@@ -460,7 +460,7 @@ function RegimeChart({ history, thresholdPct }) {
   return (
     <div className="regime-chart">
       <svg viewBox={`0 0 ${W} ${H}`} className="regime-chart__svg" role="img"
-           aria-label={`Daily 10-day momentum for the last ${hist.length} trading days`}>
+           aria-label={`Daily ${lookbackDays}-day momentum for the last ${hist.length} trading days`}>
         {/* threshold bands — the actual decision boundary */}
         {[thr, -thr].map(t => (
           <g key={t}>
@@ -516,7 +516,7 @@ function RegimeChart({ history, thresholdPct }) {
           </span>
         ))}
         <span className="regime-chart__note">
-          each bar = one trading day&apos;s 10-day price change
+          each bar = one trading day&apos;s {lookbackDays}-day price change
           {hist[hist.length - 1]?.provisional
             ? ' · hollow bar = today, still live (not a close)'
             : ''}
@@ -530,7 +530,7 @@ function RegimeChart({ history, thresholdPct }) {
 // not just a label. A bare state hides the distinction that matters most:
 // day 1 of a flip is where false positives live (July produced two), while a
 // confirmed run is what actually gates hybrid.
-function RegimePanel({ data }) {
+function RegimePanel({ data, title = 'Market regime' }) {
   const r = data?.regime;
   const state = r?.state ?? 'UNKNOWN';
   const color = REGIME_COLOR[state] ?? REGIME_COLOR.UNKNOWN;
@@ -540,7 +540,7 @@ function RegimePanel({ data }) {
   return (
     <div className="analyst-card">
       <div className="analyst-card__header">
-        <span className="analyst-card__title">Market regime</span>
+        <span className="analyst-card__title">{title}</span>
         <span className="analyst-card__count">
           {r?.lookbackDays ?? 10}d price change · ±{(r?.thresholdPct ?? 3).toFixed(1)}% · descriptive only
         </span>
@@ -558,7 +558,7 @@ function RegimePanel({ data }) {
         </div>
 
         <div className="summary-card">
-          <div className="summary-card__label">Price change (10d)</div>
+          <div className="summary-card__label">Price change ({r?.lookbackDays ?? 10}d)</div>
           <div className="summary-card__val" style={{ color }}>
             {mom == null ? '—' : `${mom >= 0 ? '+' : ''}${mom.toFixed(2)}%`}
           </div>
@@ -594,7 +594,7 @@ function RegimePanel({ data }) {
         </div>
       </div>
 
-      <RegimeChart history={data?.history} thresholdPct={r?.thresholdPct} />
+      <RegimeChart history={data?.history} thresholdPct={r?.thresholdPct} lookbackDays={r?.lookbackDays ?? 10} />
     </div>
   );
 }
@@ -690,6 +690,13 @@ export default function AnalystDashboard({ onBack }) {
             market rather than the bots' activity. Feeds hybrid: a CONFIRMED
             regime suppresses counter-regime rulebook signals in code. */}
         <RegimePanel data={regime} />
+
+        {/* 3/5/7-day versions of the same panel. Dashboard only — same ±3%
+            logic, nothing trades on them. Hidden until the backend serves them. */}
+        {[3, 5, 7].map(n => regime?.shorter?.[n] && (
+          <RegimePanel key={n} title={`Market regime · ${n}-day`}
+                       data={{ ...regime, ...regime.shorter[n] }} />
+        ))}
 
         {/* Summary bar */}
         <div className="analyst-summary">

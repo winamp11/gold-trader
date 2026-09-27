@@ -2208,37 +2208,48 @@ app.get('/api/hybrid/branch-analytics', async (req, res) => {
 app.get('/api/regime', async (req, res) => {
   try {
     const closes = await database.getDailyCloses(Number(req.query.days) || 120);
-    const regime = computeRegime(closes, REGIME_DEFAULTS);
 
     // The series with each day's state, so the dashboard can draw where the
     // flips happened rather than just today's label.
-    const history = [];
-    for (let end = REGIME_DEFAULTS.lookbackDays + 1; end <= closes.length; end++) {
-      const window = closes.slice(0, end);
-      const r = computeRegime(window, REGIME_DEFAULTS);
-      const bar = window[window.length - 1];
-      history.push({
-        date: bar.date,
-        close: bar.close,
-        momentum_pct: r.momentumPct,
-        state: r.state,
-        // The current UAE day's row is rewritten by refreshRegime() on every
-        // cycle with the LIVE price, so while the day is running it is not a
-        // close -- it is "right now" carrying today's date, and its momentum
-        // and state can still change before the session ends. Flagged here
-        // rather than derived in the browser so the UAE day boundary has one
-        // definition, not two.
-        provisional: bar.date === uaeDate(),
-      });
+    const historyFor = (cfg) => {
+      const history = [];
+      for (let end = cfg.lookbackDays + 1; end <= closes.length; end++) {
+        const window = closes.slice(0, end);
+        const r = computeRegime(window, cfg);
+        const bar = window[window.length - 1];
+        history.push({
+          date: bar.date,
+          close: bar.close,
+          momentum_pct: r.momentumPct,
+          state: r.state,
+          // The current UAE day's row is rewritten by refreshRegime() on every
+          // cycle with the LIVE price, so while the day is running it is not a
+          // close -- it is "right now" carrying today's date, and its momentum
+          // and state can still change before the session ends. Flagged here
+          // rather than derived in the browser so the UAE day boundary has one
+          // definition, not two.
+          provisional: bar.date === uaeDate(),
+        });
+      }
+      return history;
+    };
+
+    // Shorter lookbacks for the dashboard only (27 Sep). Same ±3% threshold
+    // and state logic; nothing trades on them and the prompt still gets 10d.
+    const shorter = {};
+    for (const lookbackDays of [3, 5, 7]) {
+      const cfg = { ...REGIME_DEFAULTS, lookbackDays };
+      shorter[lookbackDays] = { regime: computeRegime(closes, cfg), history: historyFor(cfg) };
     }
 
     res.json({
-      regime,
+      regime: computeRegime(closes, REGIME_DEFAULTS),
       config: REGIME_DEFAULTS,
       closes_recorded: closes.length,
       first_close: closes[0]?.date ?? null,
       last_close: closes[closes.length - 1]?.date ?? null,
-      history,
+      history: historyFor(REGIME_DEFAULTS),
+      shorter,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
