@@ -2234,11 +2234,15 @@ app.get('/api/regime', async (req, res) => {
       return history;
     };
 
-    // Shorter lookbacks for the dashboard only (27 Sep). Same ±3% threshold
-    // and state logic; nothing trades on them and the prompt still gets 10d.
+    // Shorter lookbacks for the dashboard only (27 Sep). Same state logic,
+    // threshold scaled by sqrt(time) so each window is equally hard to leave
+    // FLAT: 3d ±1.6%, 5d ±2.1%, 7d ±2.5% (a flat ±3% left 3d almost always
+    // FLAT). Nothing trades on them and the prompt still gets 10d.
     const shorter = {};
     for (const lookbackDays of [3, 5, 7]) {
-      const cfg = { ...REGIME_DEFAULTS, lookbackDays };
+      const thresholdPct = Math.round(REGIME_DEFAULTS.thresholdPct
+        * Math.sqrt(lookbackDays / REGIME_DEFAULTS.lookbackDays) * 10) / 10;
+      const cfg = { ...REGIME_DEFAULTS, lookbackDays, thresholdPct };
       shorter[lookbackDays] = { regime: computeRegime(closes, cfg), history: historyFor(cfg) };
     }
 

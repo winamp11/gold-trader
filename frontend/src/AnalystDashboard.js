@@ -426,10 +426,12 @@ function Section({ id, title, count, defaultOpen = false, children }) {
 // determines its state, so colour is redundant reinforcement rather than the
 // carrier. A reader who cannot separate the hues still reads the chart.
 const REGIME_COLOR = { UP: '#0e9f6e', DOWN: '#f05252', FLAT: '#64748b', UNKNOWN: '#3d5a75' };
-const REGIME_LEGEND = [
-  ['UP', 'above +3%'],
-  ['FLAT', 'within ±3%'],
-  ['DOWN', 'below −3%'],
+// Threshold is per window (3/5/7-day panels use scaled bands), so the legend
+// is built from it rather than hardcoding ±3%.
+const regimeLegend = (t) => [
+  ['UP', `above +${t}%`],
+  ['FLAT', `within ±${t}%`],
+  ['DOWN', `below −${t}%`],
 ];
 
 function RegimeChart({ history, thresholdPct, lookbackDays = 10 }) {
@@ -510,7 +512,7 @@ function RegimeChart({ history, thresholdPct, lookbackDays = 10 }) {
       </svg>
 
       <div className="regime-chart__legend">
-        {REGIME_LEGEND.map(([k, desc]) => (
+        {regimeLegend(thr).map(([k, desc]) => (
           <span key={k} className="regime-chart__key">
             <i style={{ background: REGIME_COLOR[k] }} />{k} <em>{desc}</em>
           </span>
@@ -691,8 +693,9 @@ export default function AnalystDashboard({ onBack }) {
             regime suppresses counter-regime rulebook signals in code. */}
         <RegimePanel data={regime} />
 
-        {/* 3/5/7-day versions of the same panel. Dashboard only — same ±3%
-            logic, nothing trades on them. Hidden until the backend serves them. */}
+        {/* 3/5/7-day versions of the same panel. Dashboard only — same logic,
+            threshold scaled by √time (±1.6/2.1/2.5%), nothing trades on them.
+            Hidden until the backend serves them. */}
         {[3, 5, 7].map(n => regime?.shorter?.[n] && (
           <RegimePanel key={n} title={`Market regime · ${n}-day`}
                        data={{ ...regime, ...regime.shorter[n] }} />
