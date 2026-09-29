@@ -3,8 +3,19 @@
 PREREGISTERED follow-up to timesfm_holdout.py (NOT CONFIRMED, f2b1d1f).
 Spec committed before any covariate data is pulled. Read-only.
 
-── RESULT ──────────────────────────────────────────────────────────────────
-(not yet run)
+── RESULT (29 Sep 2026): NOT CONFIRMED — TimesFM closed ───────────────────
+Spec committed feb8ed7 before covariate data. Same 257 days.
+
+  DIRECTION hit rate        dev     holdout
+    TimesFM + covariates    48.8%   55.5%    D1 FAIL (<58%), D2 pass,
+    morning baseline        49.6%   53.9%    D3 FAIL, D4 FAIL
+    yesterday baseline      46.5%   43.8%
+    $ proxy (1 oz)          +241    -11      (-403 without best 3 days)
+
+The covariates nudged the hit rate up (51.6% -> 55.5% holdout) but it
+stays inside coin-flip noise for 128 days, was below 50% on dev, and made
+no money: right on the small afternoons, wrong on the big ones. Beating
+the morning baseline by 1.6 points is two days out of 128.
 
 ── Why a second test ───────────────────────────────────────────────────────
 The first test gave TimesFM only gold's own price. MACD/RSI would add
