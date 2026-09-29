@@ -4,8 +4,25 @@ PREREGISTERED. This spec, the scoring code and the pass criteria are
 committed before any price data is pulled. Read-only: touches no trading
 behaviour and nothing here is deployed.
 
-── RESULT ──────────────────────────────────────────────────────────────────
-(not yet run)
+── RESULT (29 Sep 2026): NOT CONFIRMED on both questions ─────────────────
+Spec committed 1f3405e before data. 257 days (dev 129, holdout 128).
+Timestamps checked: 10/10 sampled trade entries inside their UTC bar.
+
+  DIRECTION hit rate        dev     holdout
+    TimesFM                 41.1%   51.6%     D1-D4 all FAIL
+    morning baseline        49.6%   53.9%
+    yesterday baseline      46.5%   43.8%
+    $ proxy (1 oz)          -1,273  -389
+
+  RANGE Spearman vs realised afternoon range
+    TimesFM q10-q90 width   0.61    0.24      R1 FAIL, R2 pass, R3/R4 FAIL
+    H1 ATR(14)              0.67    0.21
+
+Direction: no better than a coin in the holdout, and it lost to the plain
+"same as the morning" rule. The dev 41% is below chance, but the holdout
+does not repeat it, so inverting it is not a finding.
+Range: the forecast band does track the afternoon's size, but no better
+than ATR, which the bots already have for free. TimesFM adds nothing here.
 
 ── Model ───────────────────────────────────────────────────────────────────
 google/timesfm-2.5-200m-pytorch, zero-shot, no fine-tuning, no tuning of any
