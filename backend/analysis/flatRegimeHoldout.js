@@ -3,8 +3,27 @@
 // PREREGISTERED. Spec and pass criteria committed before any P&L was split
 // by this classifier. Read-only: changes no trading behaviour.
 //
-// ── RESULT ───────────────────────────────────────────────────────────────
-// (not yet run)
+// ── RESULT (2 Oct 2026): NOT CONFIRMED — and the wrong tool for the job ───
+//
+// Spec committed 54417c5 before the split. 67 days: 20 FLAT, 47 TREND.
+//
+//   mean P&L per day        DEV FLAT / TREND      HOLDOUT FLAT / TREND
+//   mechanical               +592 /  +760          +1,946 / -1,896
+//   overlay                +2,292 / +1,077          +1,716 / -1,912
+//   (hybrid, reported)       -407 /     +1          +1,245 /   -331
+//   (mirror, reported)          — /   +368            +897 /   -156
+//
+// P1, P2 and P4 fail for both tested accounts: in the holdout the bots made
+// money on FLAT-start days and lost on TREND-start days. Dev doesn't show
+// that ordering consistently (overlay's dev goes the other way), so it is
+// not an inverted rule either.
+//
+// Why it missed the week that motivated it: 28 Sep - 1 Oct all classified
+// TREND. Monday's $155 drop put the 3d/5d readings at -3% to -5% (DOWN) for
+// the whole week, so a range that forms AFTER a big move reads as a
+// downtrend on these windows. Close-to-close change can't see chop that
+// follows a gap; it would need a range-based measure (e.g. how many days
+// price has stayed inside one day's high-low), which is a different test.
 //
 // ── Why this question ────────────────────────────────────────────────────
 //
